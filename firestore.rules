@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Catch-All Deny Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Chat Messages validation
+    function isValidMessage(msg) {
+      return msg.userId is string 
+        && msg.username is string 
+        && msg.username.size() >= 2 
+        && msg.username.size() <= 40
+        && msg.text is string 
+        && msg.text.size() > 0 
+        && msg.text.size() <= 1000
+        && msg.type is string
+        && (msg.type == 'text' || msg.type == 'track_share')
+        && (!('trackId' in msg) || msg.trackId is string);
+    }
+
+    // Tracks validation
+    function isValidTrack(track) {
+      return track.authorId is string
+        && track.authorName is string
+        && track.authorName.size() >= 2
+        && track.authorName.size() <= 40
+        && track.title is string
+        && track.title.size() >= 2
+        && track.title.size() <= 100
+        && track.bpm is int
+        && track.bpm >= 40
+        && track.bpm <= 300
+        && track.chipType is string
+        && track.chipType.size() <= 50
+        && track.tracksJson is string
+        && track.tracksJson.size() <= 200000
+        && (!('description' in track) || (track.description is string && track.description.size() <= 1000))
+        && track.likes is int
+        && track.likes >= 0;
+    }
+
+    // Messages Rules
+    match /messages/{messageId} {
+      allow read: if true;
+      allow create: if isSignedIn() 
+        && isValidId(messageId)
+        && isValidMessage(incoming())
+        && incoming().createdAt == request.time;
+      allow delete: if false;
+    }
+
+    // Tracks Rules
+    match /tracks/{trackId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && isValidId(trackId)
+        && isValidTrack(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isSignedIn()
+        && isValidTrack(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().authorId == existing().authorId
+        && (
+          // Action 1: Owner editing metadata
+          (incoming().authorId == existing().authorId && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'bpm', 'chipType', 'tracksJson']))
+          ||
+          // Action 2: Anyone liking/upvoting (only upvote count increments by 1)
+          (incoming().diff(existing()).affectedKeys().hasOnly(['likes']) && incoming().likes == existing().likes + 1)
+        );
+      allow delete: if false;
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "entities": {
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "A real-time message shared by composers on the tracker network.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "User ID of the author."
+        },
+        "username": {
+          "type": "string",
+          "description": "User profile name of the author."
+        },
+        "text": {
+          "type": "string",
+          "description": "Body content of the text message."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Database timestamp of the message."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["text", "track_share"],
+          "description": "Type of community event."
+        },
+        "trackId": {
+          "type": "string",
+          "description": "Reference to shared chiptune track document."
+        }
+      },
+      "required": ["userId", "username", "text", "createdAt", "type"]
+    },
+    "ChiptuneTrack": {
+      "title": "Chiptune Track",
+      "description": "A shared synthesizer pattern file in .A48 or .G47 formats.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "The name of the custom chiptune creation."
+        },
+        "authorId": {
+          "type": "string",
+          "description": "User ID of the creator."
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Display name of the creator."
+        },
+        "bpm": {
+          "type": "integer",
+          "description": "Beats per minute of the track."
+        },
+        "chipType": {
+          "type": "string",
+          "description": "Primary visual synthesizer chip used."
+        },
+        "tracksJson": {
+          "type": "string",
+          "description": "JSON representation of track channels, parameters, and patterns."
+        },
+        "description": {
+          "type": "string",
+          "description": "User-supplied text notes about the track."
+        },
+        "likes": {
+          "type": "integer",
+          "description": "Total upvotes received by the track."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Database timestamp of creation."
+        }
+      },
+      "required": ["title", "authorId", "authorName", "bpm", "chipType", "tracksJson", "likes", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Global activity panel and real-time chat messages."
+    },
+    "/tracks/{trackId}": {
+      "schema": "ChiptuneTrack",
+      "description": "Public catalog of tracks uploaded by the community."
+    }
+  }
+}
