@@ -316,7 +316,7 @@ class SpessaSynthEngine {
    * Synthesize a note on a specific MIDI channel (0-15)
    * Feeds directly through that channel's AnalyserNode for oscilloscope display
    */
-  public noteOn(channel: number, midiNote: number, velocity = 85, duration = 0.4) {
+  public noteOn(channel: number, midiNote: number, velocity = 85, duration = 0.4, startTime?: number) {
     const ctx = this.init();
     if (ctx.state === "suspended") ctx.resume();
 
@@ -328,7 +328,7 @@ class SpessaSynthEngine {
     const chState = this.channelStates[chIdx];
     const bendSemitones = (chState.pitchBend / 8192) * (chState.pitchBendRange || 2);
     const targetFreq = 440 * Math.pow(2, (midiNote + bendSemitones - 69) / 12);
-    const now = ctx.currentTime;
+    const now = startTime !== undefined ? Math.max(ctx.currentTime, startTime) : ctx.currentTime;
     const vol = (velocity / 127) * (chState.volume / 127) * 0.18;
 
     // Check Portamento Glide (CC 65 & CC 84)
@@ -488,7 +488,7 @@ class SpessaSynthEngine {
   /**
    * Full Standard MIDI File (.mid / .midi) playback through SpessaSynth's 16 channels
    */
-  public playMidi(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
+  public playMidi(arrayBuffer: ArrayBuffer, onEnded?: () => void, startDelaySec = 0.10) {
     this.stopMidi();
     const ctx = this.init();
     if (ctx.state === "suspended") ctx.resume();
@@ -598,14 +598,14 @@ class SpessaSynthEngine {
 
       let lastTick = 0;
       events.forEach(ev => {
-        const timeSec = ev.tick * secondsPerTick;
+        const timeSec = startDelaySec + (ev.tick * secondsPerTick);
         if (ev.tick > lastTick) lastTick = ev.tick;
 
         const timerId = setTimeout(() => {
           if (!this.isPlaying) return;
 
           if (ev.type === 0x90) {
-            this.noteOn(ev.channel, ev.note, ev.velocity, 0.35);
+            this.noteOn(ev.channel, ev.note, ev.velocity, 0.35, ctx.currentTime);
           } else if (ev.type === 0xC0) {
             if (this.channelStates[ev.channel]) {
               this.channelStates[ev.channel].program = ev.note;
@@ -622,7 +622,7 @@ class SpessaSynthEngine {
       });
 
       // End of song listener
-      const totalDurationSec = lastTick * secondsPerTick;
+      const totalDurationSec = startDelaySec + (lastTick * secondsPerTick);
       const endTimer = setTimeout(() => {
         if (this.isPlaying) {
           this.isPlaying = false;

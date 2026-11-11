@@ -23,7 +23,8 @@ import {
   stopMidiPlayback,
   stopAllChannelsSound,
   getAudioContext,
-  setAudioPlaybackRate
+  setAudioPlaybackRate,
+  getTinySynth
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 
@@ -228,6 +229,10 @@ export default function App() {
     if (isPlaying && loadedAudioBuffer) {
       const rate = bpm / (baseSongBpm || 125);
       setAudioPlaybackRate(rate);
+    }
+    const synth = getTinySynth();
+    if (synth && synth.setBpm) {
+      synth.setBpm(bpm);
     }
   }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer]);
 

@@ -12,7 +12,7 @@
  *   encodes, processes and triggers download automatically.
  */
 
-import { getAudioContext } from '../components/AudioEngine';
+import { getAudioContext, getTinySynthMasterGain, getSyntheticMasterGain } from '../components/AudioEngine';
 import { WebScope, WebScopePreset } from '../engines/webscopeOscilloscope';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { Chiptune3 } from '../engines/chiptune3';
@@ -166,6 +166,22 @@ class VideoRecorderService {
             } catch (e) {
               console.log("Note on Chiptune-3 audio route:", e);
             }
+          }
+
+          // Connect WebAudio TinySynth
+          const tinyMaster = getTinySynthMasterGain();
+          if (tinyMaster) {
+            try {
+              tinyMaster.connect(dest);
+            } catch (e) {}
+          }
+
+          // Connect Redundant Synthetic Oscillators
+          const synthMaster = getSyntheticMasterGain();
+          if (synthMaster) {
+            try {
+              synthMaster.connect(dest);
+            } catch (e) {}
           }
 
           // Add audio track to media stream
@@ -341,6 +357,12 @@ class VideoRecorderService {
       } catch (e) {}
       try {
         Chiptune3.getMasterGain()?.disconnect(this.audioDestNode);
+      } catch (e) {}
+      try {
+        getTinySynthMasterGain()?.disconnect(this.audioDestNode);
+      } catch (e) {}
+      try {
+        getSyntheticMasterGain()?.disconnect(this.audioDestNode);
       } catch (e) {}
       this.audioDestNode = null;
     }

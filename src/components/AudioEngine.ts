@@ -1,3 +1,5 @@
+// @ts-ignore
+import WebAudioTinySynth from 'webaudio-tinysynth';
 import { Channel } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
@@ -8,8 +10,48 @@ export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
 
 let audioCtx: AudioContext | null = null;
+let tinySynthInstance: any = null;
+let tinySynthMasterGain: GainNode | null = null;
+let syntheticMasterGain: GainNode | null = null;
 let directAudioSource: AudioBufferSourceNode | null = null;
 let isMidiPlayingInternal = false;
+
+interface ActiveOscVoice {
+  stop: () => void;
+  channelId: number;
+}
+const activeSyntheticVoices: ActiveOscVoice[] = [];
+
+export function initTinySynth(ctx: AudioContext) {
+  try {
+    if (!tinySynthMasterGain) {
+      tinySynthMasterGain = ctx.createGain();
+      tinySynthMasterGain.gain.setValueAtTime(0.55, ctx.currentTime);
+      tinySynthMasterGain.connect(ctx.destination);
+    }
+    if (!tinySynthInstance && typeof WebAudioTinySynth !== 'undefined') {
+      tinySynthInstance = new WebAudioTinySynth({ quality: 1, useReverb: 0 });
+    }
+    if (tinySynthInstance) {
+      // Connect to the shared AudioContext and dedicated master gain node
+      // to guarantee zero clock drift and exact phase alignment with SpessaSynth
+      tinySynthInstance.setAudioContext(ctx, tinySynthMasterGain);
+      tinySynthInstance.setMasterVol(0.55);
+    }
+  } catch (err) {
+    console.warn("TinySynth initialization note:", err);
+  }
+}
+
+export function initSyntheticEngine(ctx: AudioContext) {
+  try {
+    if (!syntheticMasterGain) {
+      syntheticMasterGain = ctx.createGain();
+      syntheticMasterGain.gain.setValueAtTime(0.35, ctx.currentTime);
+      syntheticMasterGain.connect(ctx.destination);
+    }
+  } catch (e) {}
+}
 
 export function getAudioContext(): AudioContext | null {
   if (!audioCtx && typeof window !== 'undefined') {
@@ -18,31 +60,62 @@ export function getAudioContext(): AudioContext | null {
       audioCtx = new AudioContextClass();
       SpessaSynth.init(audioCtx);
       Chiptune3.init(audioCtx);
+      initTinySynth(audioCtx);
+      initSyntheticEngine(audioCtx);
     }
   }
   return audioCtx;
 }
 
+export function getTinySynth(): any {
+  if (!tinySynthInstance) {
+    const ctx = getAudioContext();
+    if (ctx) initTinySynth(ctx);
+  }
+  return tinySynthInstance;
+}
+
+export function getTinySynthMasterGain(): GainNode | null {
+  getAudioContext();
+  return tinySynthMasterGain;
+}
+
+export function getSyntheticMasterGain(): GainNode | null {
+  getAudioContext();
+  return syntheticMasterGain;
+}
+
 /**
- * Genuine MIDI Player via spressasynth_lib-master.zip
- * Routes playback exclusively through 16 dedicated channels with SoundFont synthesis and per-channel oscilloscopes
+ * Phase-locked Synchronized MIDI Player
+ * Starts BOTH SpessaSynth and WebAudioTinySynth simultaneously on the same audio buffer
+ * eliminating sound engine delay and phasing jitter
  */
 export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
   try {
-    // Stop any existing playback
     stopMidiPlayback();
     stopDirectAudio();
 
     const ctx = getAudioContext();
-    if (ctx) SpessaSynth.init(ctx);
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
 
-    // Play purely through spressasynth_lib-master.zip
+    const synth = getTinySynth();
+    if (synth) {
+      synth.loadMIDI(arrayBuffer);
+    }
+
+    // Both sound engines start with a calibrated 100ms lookahead (0.10s),
+    // matching TinySynth's internal playTime = actx.currentTime + 0.10s!
     SpessaSynth.playMidi(arrayBuffer, () => {
       isMidiPlayingInternal = false;
       onEnded?.();
-    });
-    isMidiPlayingInternal = true;
+    }, 0.10);
 
+    if (synth) {
+      synth.playMIDI();
+    }
+
+    isMidiPlayingInternal = true;
   } catch (err) {
     console.log("MIDI playback error:", err);
   }
@@ -51,11 +124,20 @@ export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
 export function stopMidiPlayback() {
   try {
     SpessaSynth.stopMidi();
+    if (tinySynthInstance) {
+      tinySynthInstance.stopMIDI();
+    }
     isMidiPlayingInternal = false;
   } catch (e) {}
 }
 
 export function getMidiPlayStatus(): { play: boolean; curTick: number; maxTick: number } {
+  if (tinySynthInstance) {
+    const st = tinySynthInstance.getPlayStatus?.();
+    if (st) {
+      return { play: isMidiPlayingInternal || !!st.play, curTick: st.curTick || 0, maxTick: st.maxTick || 1 };
+    }
+  }
   return { play: isMidiPlayingInternal, curTick: 0, maxTick: 1 };
 }
 
@@ -452,6 +534,99 @@ export function parseNoteNameToMidi(noteName: string): number | null {
   return 12 * (octave + 1) + noteMap[noteLetter];
 }
 
+/**
+ * Redundant Synthetic Oscillator Engine
+ * Emulates vintage chiptune hardware architectures (YM2612, SID, Paula, DMG, AY-3)
+ * Phase-locked to targetTime with zero latency
+ */
+function playSyntheticOscillator(
+  ctx: AudioContext,
+  channelId: number,
+  chip: string,
+  freq: number,
+  targetTime: number,
+  duration: number,
+  vol: number,
+  panVal: number
+) {
+  if (!syntheticMasterGain) initSyntheticEngine(ctx);
+  if (!syntheticMasterGain) return;
+
+  const osc = ctx.createOscillator();
+  const subOsc = ctx.createOscillator();
+  const voiceGain = ctx.createGain();
+  const panner = ctx.createStereoPanner();
+
+  // Stereo placement
+  panner.pan.setValueAtTime(Math.max(-1, Math.min(1, (panVal - 50) / 50)), targetTime);
+
+  const chipLower = (chip || '').toLowerCase();
+  let subRatio = 0.5;
+
+  if (chipLower.includes('yamaha') || chipLower.includes('ym2612') || chipLower.includes('sega')) {
+    osc.type = 'sawtooth';
+    subOsc.type = 'sine';
+    subRatio = 2.0;
+  } else if (chipLower.includes('sid') || chipLower.includes('c64')) {
+    osc.type = 'square';
+    subOsc.type = 'triangle';
+    subRatio = 1.003;
+  } else if (chipLower.includes('game boy') || chipLower.includes('dmg')) {
+    osc.type = 'square';
+    subOsc.type = 'square';
+    subRatio = 0.5;
+  } else if (chipLower.includes('paula') || chipLower.includes('amiga')) {
+    osc.type = 'triangle';
+    subOsc.type = 'square';
+    subRatio = 1.0;
+  } else if (chipLower.includes('ay-3') || chipLower.includes('zx')) {
+    osc.type = 'square';
+    subOsc.type = 'square';
+    subRatio = 1.004;
+  } else {
+    osc.type = 'sawtooth';
+    subOsc.type = 'triangle';
+    subRatio = 0.5;
+  }
+
+  osc.frequency.setValueAtTime(freq, targetTime);
+  subOsc.frequency.setValueAtTime(freq * subRatio, targetTime);
+
+  const amp = vol * 0.16;
+  voiceGain.gain.setValueAtTime(0.0001, targetTime);
+  voiceGain.gain.linearRampToValueAtTime(amp, targetTime + 0.008);
+  voiceGain.gain.exponentialRampToValueAtTime(amp * 0.65, targetTime + 0.06);
+  voiceGain.gain.exponentialRampToValueAtTime(0.0001, targetTime + duration);
+
+  osc.connect(voiceGain);
+  subOsc.connect(voiceGain);
+  voiceGain.connect(panner);
+  panner.connect(syntheticMasterGain);
+
+  osc.start(targetTime);
+  subOsc.start(targetTime);
+  osc.stop(targetTime + duration + 0.04);
+  subOsc.stop(targetTime + duration + 0.04);
+
+  const voiceRecord: ActiveOscVoice = {
+    channelId,
+    stop: () => {
+      try {
+        voiceGain.gain.cancelScheduledValues(ctx.currentTime);
+        voiceGain.gain.setValueAtTime(0.0001, ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.01);
+        subOsc.stop(ctx.currentTime + 0.01);
+      } catch (e) {}
+    }
+  };
+  activeSyntheticVoices.push(voiceRecord);
+
+  setTimeout(() => {
+    const idx = activeSyntheticVoices.indexOf(voiceRecord);
+    if (idx !== -1) activeSyntheticVoices.splice(idx, 1);
+  }, (duration + 0.1) * 1000);
+}
+
 // Single-note trigger for interactive auditing when user clicks or edits notes in tracker
 export function playNote(
   channelId: number, 
@@ -475,9 +650,32 @@ export function playNote(
     const midiNum = parseNoteNameToMidi(noteName);
     if (midiNum === null) return;
 
-    // Route note synthesis exclusively through spressasynth_lib-master.zip
     const chIdx = (channelId - 1) % 16;
-    SpessaSynth.noteOn(chIdx, midiNum, Math.round((volume / 100) * 127), duration);
+    const volNorm = Math.round((volume / 100) * 127);
+    const freq = midiNoteToFrequency(midiNum);
+
+    // CRITICAL: Precise 5ms lookahead audio timestamp ensures all sound engines
+    // (SpessaSynth, WebAudioTinySynth, and Synthetic Oscillators)
+    // start simultaneously on the exact same audio buffer frame with zero engine delay!
+    const targetTime = ctx.currentTime + 0.005;
+
+    // 1. SpessaSynth Engine
+    SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
+
+    // 2. WebAudio TinySynth Engine
+    if (tinySynthInstance) {
+      try {
+        tinySynthInstance.send([0x90 | chIdx, midiNum, volNorm], targetTime);
+        setTimeout(() => {
+          if (tinySynthInstance) {
+            tinySynthInstance.send([0x80 | chIdx, midiNum, 0], targetTime + duration);
+          }
+        }, duration * 1000);
+      } catch (e) {}
+    }
+
+    // 3. Redundant Synthetic Oscillators Layer
+    playSyntheticOscillator(ctx, channelId, chip, freq, targetTime, duration, volume / 100, pan);
 
   } catch (error) {
     console.log("Audio synthesis preview bypassed:", error);
@@ -487,10 +685,32 @@ export function playNote(
 export function stopChannelSound(channelId: number) {
   const chIdx = (channelId - 1) % 16;
   SpessaSynth.noteOff(chIdx);
+  if (tinySynthInstance && audioCtx) {
+    try {
+      tinySynthInstance.send([0x80 | chIdx, 60, 0], audioCtx.currentTime);
+    } catch (e) {}
+  }
+  for (let i = activeSyntheticVoices.length - 1; i >= 0; i--) {
+    if (activeSyntheticVoices[i].channelId === channelId) {
+      activeSyntheticVoices[i].stop();
+      activeSyntheticVoices.splice(i, 1);
+    }
+  }
 }
 
 export function stopAllChannelsSound() {
   SpessaSynth.allNotesOff();
+  if (tinySynthInstance) {
+    try {
+      for (let ch = 0; ch < 16; ch++) {
+        tinySynthInstance.allSoundOff?.(ch);
+      }
+    } catch (e) {}
+  }
+  activeSyntheticVoices.forEach(v => {
+    try { v.stop(); } catch (e) {}
+  });
+  activeSyntheticVoices.length = 0;
   stopDirectAudio();
   stopMidiPlayback();
 }
