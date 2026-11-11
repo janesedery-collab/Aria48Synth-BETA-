@@ -2,17 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { 
   Play, Square, Settings, Cpu, AlertTriangle, 
   Download, Upload, Music, Radio, Monitor, Cable, Activity,
-  Save, FileAudio, Car
+  Save, FileAudio, Car, Share2
 } from 'lucide-react';
 
 import { Channel, MAX_CHANNELS, OscilloscopeConfig } from './types';
 import { INITIAL_PATTERNS } from './initialPatterns';
 import Header from './components/Header';
+import TimeBar from './components/TimeBar';
 import TrackerEditor from './components/TrackerEditor';
 import ChipConfigurator from './components/ChipConfigurator';
 import MixerEQ from './components/MixerEQ';
 import FileConverterUI from './components/FileConverterUI';
 import HardwareConnectionScript from './components/HardwareConnectionScript';
+import ShareApkModal from './components/ShareApkModal';
 import { 
   playNote, 
   playDirectAudio, 
@@ -20,7 +22,8 @@ import {
   playMidiBuffer, 
   stopMidiPlayback,
   stopAllChannelsSound,
-  getAudioContext
+  getAudioContext,
+  setAudioPlaybackRate
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 
@@ -29,7 +32,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('tracker');
   const [isPlaying, setIsPlaying] = useState(false);
   const [bpm, setBpm] = useState(125);
+  const [baseSongBpm, setBaseSongBpm] = useState<number>(125);
   const [activeRow, setActiveRow] = useState(0);
+  const [isShareApkOpen, setIsShareApkOpen] = useState(false);
 
   // WebUSB / Physical Chip connection state
   const [hardwareConnected, setHardwareConnected] = useState(false);
@@ -44,7 +49,10 @@ export default function App() {
     scanlines: true,
     glowBloom: true,
     gridDividers: true,
-    noiseFloor: 2
+    noiseFloor: 2,
+    amplifier: 1.0,
+    size: 'medium',
+    phaseSync: true
   });
 
   // Channels State (1-48)
@@ -193,8 +201,8 @@ export default function App() {
   // - WebAudioTinySynth for General MIDI
   // - Amiga ProTracker PCM AudioBuffer for MOD chiptunes
   // - Direct decoded AudioBuffer for WAV / MP3
+  // Audio Playback Lifecycle (only triggers on play/pause or buffer swap)
   useEffect(() => {
-    let timer: any = null;
     if (isPlaying) {
       if (loadedMidiBuffer) {
         playMidiBuffer(loadedMidiBuffer, () => {
@@ -204,32 +212,64 @@ export default function App() {
         playDirectAudio(loadedAudioBuffer, 0, () => {
           setIsPlaying(false);
         });
+        const rate = bpm / (baseSongBpm || 125);
+        setAudioPlaybackRate(rate);
       }
-
-      // Visual tracker row advance synchronized with tempo
-      const msPerRow = (60 / bpm / 4) * 1000;
-      timer = setInterval(() => {
-        setActiveRow((prevRow) => {
-          if (prevRow >= 63) {
-            if (playMode === 'song') {
-              setCurrentPatternIndex((prevIdx) => (prevIdx + 1) % Math.max(1, songPatterns.length));
-            }
-            return 0;
-          }
-          return prevRow + 1;
-        });
-      }, msPerRow);
     } else {
       stopDirectAudio();
       stopMidiPlayback();
       stopAllChannelsSound();
       setActiveRow(0);
     }
+  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
+
+  // Dynamic Audio Playback Rate / Tempo Scaling on BPM changes (does NOT restart the song!)
+  useEffect(() => {
+    if (isPlaying && loadedAudioBuffer) {
+      const rate = bpm / (baseSongBpm || 125);
+      setAudioPlaybackRate(rate);
+    }
+  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer]);
+
+  // Synchronous Visual Tracker Row Advance synchronized to BPM
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const msPerRow = Math.max(15, (60 / Math.max(30, bpm) / 4) * 1000);
+    const timer = setInterval(() => {
+      setActiveRow((prevRow) => {
+        if (prevRow >= 63) {
+          if (playMode === 'song') {
+            setCurrentPatternIndex((prevIdx) => (prevIdx + 1) % Math.max(1, songPatterns.length));
+          }
+          return 0;
+        }
+        return prevRow + 1;
+      });
+    }, msPerRow);
 
     return () => {
-      if (timer) clearInterval(timer);
+      clearInterval(timer);
     };
-  }, [isPlaying, bpm, playMode, songPatterns.length, loadedAudioBuffer, loadedMidiBuffer]);
+  }, [isPlaying, bpm, playMode, songPatterns.length]);
+
+  // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer is used
+  useEffect(() => {
+    if (isPlaying && !loadedAudioBuffer && !loadedMidiBuffer) {
+      const activePat = (songPatterns && songPatterns[currentPatternIndex]) || patterns;
+      const rowData = activePat?.[activeRow];
+      if (rowData) {
+        for (let chId = 1; chId <= MAX_CHANNELS; chId++) {
+          const cell = rowData[chId];
+          const ch = channels.find(c => c.id === chId);
+          if (ch && ch.enabled && !ch.mute && cell && cell.note && cell.note !== '---' && cell.note !== '===') {
+            const vol = cell.vol && cell.vol !== '..' ? parseInt(cell.vol, 16) : ch.volume;
+            playNote(chId, ch.chip, cell.note, 0.22, vol, ch.pan, ch.soundFontPreset);
+          }
+        }
+      }
+    }
+  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, currentPatternIndex, songPatterns, patterns, channels]);
 
   const handleLoadTrack = (tracksJson: string, trackBpm: number) => {
     try {
@@ -279,7 +319,10 @@ export default function App() {
     setLoadedAudioBuffer(audioBuffer || null);
     setLoadedMidiBuffer(rawMidiBuffer || null);
 
-    if (importedBpm) setBpm(importedBpm);
+    if (importedBpm) {
+      setBpm(importedBpm);
+      setBaseSongBpm(importedBpm);
+    }
     if (duration) setTrackDuration(duration);
     if (title) setTrackTitle(title);
     if (chipType) setTrackChipType(chipType);
@@ -366,56 +409,98 @@ export default function App() {
         trackOctaveRange={trackOctaveRange}
         trackChannelsCount={trackChannelsCount}
         channels={channels}
+        setChannels={setChannels}
+        patterns={patterns}
         songPatterns={songPatterns}
         onSwitchChiptuneMode={handleSwitchChiptuneMode}
         currentChiptuneMode={chiptuneMode}
+      />
+
+      {/* GLOBAL SYNCHRONIZED TIME BAR & SCRUBBER */}
+      <TimeBar
+        isPlaying={isPlaying}
+        setIsPlaying={setIsPlaying}
+        bpm={bpm}
+        activeRow={activeRow}
+        setActiveRow={setActiveRow}
+        currentPatternIndex={currentPatternIndex}
+        setCurrentPatternIndex={setCurrentPatternIndex}
+        songPatterns={songPatterns}
+        setPatterns={setPatterns}
+        trackDuration={trackDuration}
+        trackTitle={trackTitle}
+        loadedAudioBuffer={loadedAudioBuffer}
+        onSeekAudio={(targetSeconds) => {
+          if (loadedAudioBuffer && isPlaying) {
+            playDirectAudio(loadedAudioBuffer, targetSeconds, () => setIsPlaying(false));
+          }
+        }}
       />
 
       {/* MAIN CONTAINER LAYOUT */}
       <div className="flex flex-1 overflow-hidden">
         
         {/* SIDE BAR NAVIGATION MODULE */}
-        <nav className="w-16 bg-zinc-950 border-r border-zinc-900 flex flex-col items-center py-4 gap-4 flex-shrink-0">
-          <NavBtn 
-            icon={<Monitor />} 
-            tab="tracker" 
-            active={activeTab} 
-            setTab={setActiveTab} 
-            label="Tracker" 
-            disabled={driveMode} 
-          />
-          <NavBtn 
-            icon={<Cpu />} 
-            tab="chips" 
-            active={activeTab} 
-            setTab={setActiveTab} 
-            label="Chips" 
-            disabled={driveMode} 
-          />
-          <NavBtn 
-            icon={<Settings />} 
-            tab="mixer" 
-            active={activeTab} 
-            setTab={setActiveTab} 
-            label="EQ & FX" 
-          />
-          <NavBtn 
-            icon={<FileAudio />} 
-            tab="convert" 
-            active={activeTab} 
-            setTab={setActiveTab} 
-            label="Convert" 
-            disabled={driveMode} 
-          />
-          <NavBtn 
-            icon={<Cable />} 
-            tab="hardware" 
-            active={activeTab} 
-            setTab={setActiveTab} 
-            label="Hardware" 
-            disabled={!hardwareConnected} 
-            glow={hardwareConnected}
-          />
+        <nav className="w-16 bg-zinc-950 border-r border-zinc-900 flex flex-col items-center py-4 justify-between flex-shrink-0">
+          <div className="flex flex-col items-center gap-3 w-full">
+            <NavBtn 
+              icon={<Monitor />} 
+              tab="tracker" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="Tracker" 
+              disabled={driveMode} 
+            />
+            <NavBtn 
+              icon={<Cpu />} 
+              tab="chips" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="Chips" 
+              disabled={driveMode} 
+            />
+            <NavBtn 
+              icon={<Settings />} 
+              tab="mixer" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="EQ & FX" 
+            />
+            <NavBtn 
+              icon={<FileAudio />} 
+              tab="convert" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="Convert" 
+              disabled={driveMode} 
+            />
+            <NavBtn 
+              icon={<Cable />} 
+              tab="hardware" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="Hardware" 
+              disabled={!hardwareConnected} 
+              glow={hardwareConnected}
+            />
+          </div>
+
+          {/* DEDICATED BOTTOM LEFT CORNER SHARE / ANDROID APK SECTION */}
+          <div className="flex flex-col items-center gap-1.5 w-full pt-3 border-t border-zinc-900">
+            <button
+              id="bottom-left-share-apk-btn"
+              onClick={() => setIsShareApkOpen(true)}
+              className="p-2 rounded-xl w-14 h-14 flex flex-col items-center justify-center gap-0.5 transition-all cursor-pointer relative bg-emerald-950/40 text-emerald-400 hover:text-white hover:bg-emerald-600/30 border border-emerald-500/40 hover:border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.25)] group"
+              title="Share Workstation & Download Android APK (.apk)"
+            >
+              <Share2 size={16} className="text-emerald-400 group-hover:scale-110 transition-transform" />
+              <span className="text-[7.5px] uppercase tracking-wider font-black text-center leading-tight">Share/APK</span>
+              <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+            </button>
+          </div>
         </nav>
 
         {/* ACTIVE MAIN VIEWPORT CONTAINER */}
@@ -455,6 +540,8 @@ export default function App() {
                   playMode={playMode}
                   setPlayMode={setPlayMode}
                   bpm={bpm}
+                  setBpm={setBpm}
+                  setIsPlaying={setIsPlaying}
                   trackTitle={trackTitle}
                   onSwitchChiptuneMode={handleSwitchChiptuneMode}
                   currentChiptuneMode={chiptuneMode}
@@ -485,6 +572,7 @@ export default function App() {
               {activeTab === 'mixer' && (
                 <MixerEQ 
                   channels={channels} 
+                  setChannels={setChannels}
                   isPlaying={isPlaying} 
                   driveMode={driveMode} 
                   channelPitches={channelPitches}
@@ -508,6 +596,13 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* ANDROID APK & SHARE MODAL */}
+      <ShareApkModal
+        isOpen={isShareApkOpen}
+        onClose={() => setIsShareApkOpen(false)}
+        trackTitle={trackTitle}
+      />
     </div>
   );
 }

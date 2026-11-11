@@ -87,7 +87,12 @@ service cloud.firestore {
           // Action 2: Anyone liking/upvoting (only upvote count increments by 1)
           (incoming().diff(existing()).affectedKeys().hasOnly(['likes']) && incoming().likes == existing().likes + 1)
         );
-      allow delete: if false;
+      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+    }
+
+    // User Private Cloud Songs
+    match /users/{userId}/cloud_songs/{songId} {
+      allow read, write, delete: if isSignedIn() && request.auth.uid == userId;
     }
   }
 }

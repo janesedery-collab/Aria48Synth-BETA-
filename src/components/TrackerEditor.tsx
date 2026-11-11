@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle } from 'lucide-react';
 import { Channel, SoundFontInstrument } from '../types';
 import { playNote, getAudioContext } from './AudioEngine';
+import { SpessaSynth } from '../engines/spressasynthLib';
+import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
 import { parseSoundFontFile, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import ExportStudioModal from './ExportStudioModal';
@@ -23,6 +25,8 @@ interface TrackerEditorProps {
   playMode?: 'song' | 'pattern';
   setPlayMode?: (mode: 'song' | 'pattern') => void;
   bpm?: number;
+  setBpm?: (bpm: number) => void;
+  setIsPlaying?: (isPlaying: boolean) => void;
   trackTitle?: string | null;
   onSwitchChiptuneMode?: (mode: string) => void;
   currentChiptuneMode?: string;
@@ -49,6 +53,7 @@ export default function TrackerEditor({
   activeRow, 
   setActiveRow, 
   isPlaying, 
+  setIsPlaying,
   patterns, 
   setPatterns, 
   songPatterns,
@@ -58,6 +63,7 @@ export default function TrackerEditor({
   playMode = 'song',
   setPlayMode,
   bpm = 125,
+  setBpm,
   trackTitle,
   onSwitchChiptuneMode,
   currentChiptuneMode = 'mod',
@@ -131,11 +137,15 @@ export default function TrackerEditor({
             try {
               const ctx = getAudioContext();
               if (!ctx) throw new Error("Audio Context unavailable");
+              // Ingest into spressasynth_lib
+              const spessaSf = SpessaSynth.loadSoundFont(event.target.result, selected.name);
+              saveSelectedSoundFont(spessaSf.id);
+
               const res = await parseSoundFontFile(event.target.result, selected.name, ctx);
               setSoundFontInstruments(res.instruments);
               setImportFeedback({
                 success: true,
-                msg: `Loaded SoundFont "${res.bankInfo.name}" with ${res.bankInfo.instrumentCount} instruments!`
+                msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} instruments) into spressasynth_lib!`
               });
               setTimeout(() => {
                 setIsImportModalOpen(false);
@@ -239,6 +249,49 @@ export default function TrackerEditor({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const activeRowRef = useRef<HTMLDivElement>(null);
+  const sfDirectInputRef = useRef<HTMLInputElement>(null);
+
+  const handleDirectSoundFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = async (evt) => {
+        if (evt.target?.result instanceof ArrayBuffer) {
+          try {
+            const ctx = getAudioContext();
+            const spessaSf = SpessaSynth.loadSoundFont(evt.target.result, file.name);
+            saveSelectedSoundFont(spessaSf.id);
+            if (ctx) {
+              const res = await parseSoundFontFile(evt.target.result, file.name, ctx);
+              setSoundFontInstruments(res.instruments);
+              if (setChannels && channels && res.instruments.length > 0) {
+                setChannels(prev => prev.map((ch, idx) => {
+                  const inst = res.instruments[idx % res.instruments.length];
+                  return {
+                    ...ch,
+                    chip: 'General MIDI (SoundFont)',
+                    soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                  };
+                }));
+              }
+            }
+            setImportFeedback({
+              success: true,
+              msg: `SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) registered and assigned to song channels!`
+            });
+            setTimeout(() => setImportFeedback(null), 3500);
+          } catch (err: any) {
+            setImportFeedback({
+              success: false,
+              msg: `Failed to load SoundFont: ${err.message}`
+            });
+            setTimeout(() => setImportFeedback(null), 3500);
+          }
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  };
 
   // Keep active row centered in the scroll view
   useEffect(() => {
@@ -404,6 +457,30 @@ export default function TrackerEditor({
             </button>
           </div>
 
+          {/* TRACKER BPM CONTROLLER */}
+          <div className="flex items-center gap-1 px-2 py-1 bg-zinc-900 border border-zinc-800 rounded-lg text-xs">
+            <span className="text-zinc-500 text-[9.5px] uppercase font-bold tracking-wider mr-0.5">BPM</span>
+            <button
+              type="button"
+              onClick={() => setBpm && setBpm(Math.max(30, bpm - 1))}
+              className="w-5 h-5 flex items-center justify-center bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-cyan-400 rounded border border-zinc-800 cursor-pointer text-xs active:scale-95 transition"
+              title="Decrease BPM (-1)"
+            >
+              -
+            </button>
+            <span className="min-w-[28px] text-center font-mono font-bold text-cyan-300 text-[11px]">
+              {bpm}
+            </span>
+            <button
+              type="button"
+              onClick={() => setBpm && setBpm(Math.min(320, bpm + 1))}
+              className="w-5 h-5 flex items-center justify-center bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-cyan-400 rounded border border-zinc-800 cursor-pointer text-xs active:scale-95 transition"
+              title="Increase BPM (+1)"
+            >
+              +
+            </button>
+          </div>
+
           <button 
             onClick={() => setIsImportModalOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-950/50 text-cyan-400 border border-cyan-800/40 hover:bg-cyan-900/60 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm"
@@ -422,6 +499,24 @@ export default function TrackerEditor({
             <Download size={12} className="text-cyan-400" />
             <span>Export Studio</span>
           </button>
+
+          {/* DEDICATED BUTTON TO ADD SOUNDFONTS INTO SPRESSASYNTH */}
+          <button
+            id="tracker-add-soundfont-btn"
+            onClick={() => sfDirectInputRef.current?.click()}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950/50 text-emerald-300 border border-emerald-600/50 hover:bg-emerald-900/60 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm"
+            title="Add SoundFont (.sf2, .sf3, .dls) into spressasynth_lib-master.zip"
+          >
+            <Disc3 size={12} className="text-emerald-400 animate-pulse" />
+            <span>+ SoundFont</span>
+          </button>
+          <input
+            type="file"
+            ref={sfDirectInputRef}
+            className="hidden"
+            accept=".sf2,.sf3,.dls"
+            onChange={handleDirectSoundFontUpload}
+          />
 
           <span className="flex items-center gap-1 text-[10px] text-zinc-500 pl-2 border-l border-zinc-800">
             <Volume2 size={12} className="text-cyan-400"/> Click cell to edit
@@ -741,10 +836,12 @@ export default function TrackerEditor({
         onClose={() => setIsExportModalOpen(false)}
         songPatterns={songPatterns || [patterns]}
         channels={channels}
-        bpm={bpm}
+        bpm={bpm || 125}
         trackTitle={trackTitle}
         onSwitchChiptuneMode={onSwitchChiptuneMode}
         currentMode={currentChiptuneMode || 'mod'}
+        isPlaying={isPlaying}
+        onTriggerPlay={() => setIsPlaying?.(true)}
       />
     </div>
   );

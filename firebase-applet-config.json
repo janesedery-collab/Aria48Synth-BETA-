@@ -6,5 +6,7 @@
   "firestoreDatabaseId": "ai-studio-e6c0dc76-fdd6-4bd7-9fe0-04c357ae8248",
   "storageBucket": "hypnagogic-smoke-ppp0d.firebasestorage.app",
   "messagingSenderId": "881716969164",
-  "measurementId": ""
+  "measurementId": "",
+  "oAuthClientId": "881716969164-vg9igdi9j7p80fbe00odnr65uuluv2tk.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

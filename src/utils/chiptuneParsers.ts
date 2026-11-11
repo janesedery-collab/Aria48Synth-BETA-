@@ -499,10 +499,11 @@ function parseMOD(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
   const songLength = u8[950] || 1;
   const orderList: number[] = [];
   let maxPatternIdx = 0;
+  // Scan strictly within active song orders (0 .. songLength - 1)
   for (let i = 0; i < songLength; i++) {
     const patIdx = u8[952 + i];
     orderList.push(patIdx);
-    if (patIdx > maxPatternIdx) maxPatternIdx = patIdx;
+    if (patIdx < 128 && patIdx > maxPatternIdx) maxPatternIdx = patIdx;
   }
 
   logs.push(`[MOD] Channels: ${channelsCount} | Orders: ${songLength} | Distinct Patterns: ${maxPatternIdx + 1}`);
@@ -514,37 +515,71 @@ function parseMOD(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
   try {
     const ctx = getAudioContext();
     if (ctx) {
-      let sampleDataOffset = patternStartOffset + (maxPatternIdx + 1) * (64 * channelsCount * 4);
+      // Calculate total sample size across all 31 sample slots
+      let totalSampleBytes = 0;
+      const sampleHeaders: { lengthBytes: number; repeatOffsetWords: number; repeatLengthWords: number; sName: string; finetune: number }[] = [];
       for (let sIdx = 0; sIdx < 31; sIdx++) {
         const headerOffset = 20 + (sIdx * 30);
+        let sName = "";
+        let lengthBytes = 0;
+        let repeatOffsetWords = 0;
+        let repeatLengthWords = 0;
+        let finetune = 0;
         if (headerOffset + 30 <= u8.length) {
-          let sName = "";
           for (let c = 0; c < 22; c++) {
             const char = u8[headerOffset + c];
             if (char > 32 && char < 127) sName += String.fromCharCode(char);
           }
           const lengthWords = (u8[headerOffset + 22] << 8) | u8[headerOffset + 23];
-          const lengthBytes = lengthWords * 2;
-          const repeatOffsetWords = (u8[headerOffset + 26] << 8) | u8[headerOffset + 27];
-          const repeatLengthWords = (u8[headerOffset + 28] << 8) | u8[headerOffset + 29];
+          lengthBytes = lengthWords * 2;
+          finetune = u8[headerOffset + 24] & 0x0F;
+          if (finetune > 7) finetune -= 16;
+          repeatOffsetWords = (u8[headerOffset + 26] << 8) | u8[headerOffset + 27];
+          repeatLengthWords = (u8[headerOffset + 28] << 8) | u8[headerOffset + 29];
+        }
+        totalSampleBytes += lengthBytes;
+        sampleHeaders.push({ lengthBytes, repeatOffsetWords, repeatLengthWords, sName, finetune });
+      }
 
-          if (lengthBytes > 0 && sampleDataOffset + lengthBytes <= u8.length) {
-            const sampleBuf = ctx.createBuffer(1, lengthBytes, 8287);
-            const channelPcm = sampleBuf.getChannelData(0);
-            const s8 = new Int8Array(arrayBuffer, sampleDataOffset, lengthBytes);
-            for (let i = 0; i < lengthBytes; i++) {
-              channelPcm[i] = s8[i] / 128.0;
-            }
+      const patternBytes = 64 * channelsCount * 4;
+      const sampleStartFromPatterns = patternStartOffset + (maxPatternIdx + 1) * patternBytes;
+      let sampleDataOffset = sampleStartFromPatterns;
+      if (sampleStartFromPatterns + totalSampleBytes > u8.length) {
+        const sampleStartFromEnd = arrayBuffer.byteLength - totalSampleBytes;
+        if (sampleStartFromEnd >= patternStartOffset) {
+          sampleDataOffset = sampleStartFromEnd;
+        }
+      }
 
-            const instHex = (sIdx + 1).toString(16).toUpperCase().padStart(2, '0');
-            const instId = `mod_inst_${instHex.toLowerCase()}`;
-            const instName = `${instHex}: ${sName.trim() || `Amiga Sample ${instHex}`}`;
-            const loopStart = repeatLengthWords > 1 ? repeatOffsetWords * 2 : undefined;
-            const loopEnd = repeatLengthWords > 1 ? (repeatOffsetWords + repeatLengthWords) * 2 : undefined;
-
-            registerCustomInstrument(instId, instName, sampleBuf, 60, 8287, loopStart, loopEnd);
-            sampleDataOffset += lengthBytes;
+      for (let sIdx = 0; sIdx < 31; sIdx++) {
+        const { lengthBytes, repeatOffsetWords, repeatLengthWords, sName } = sampleHeaders[sIdx];
+        if (lengthBytes > 0 && sampleDataOffset < u8.length) {
+          const readLen = Math.min(lengthBytes, u8.length - sampleDataOffset);
+          const sampleBuf = ctx.createBuffer(1, lengthBytes, 8287);
+          const channelPcm = sampleBuf.getChannelData(0);
+          const s8 = new Int8Array(arrayBuffer, sampleDataOffset, readLen);
+          for (let i = 0; i < readLen; i++) {
+            channelPcm[i] = s8[i] / 128.0;
           }
+
+          const instHex = (sIdx + 1).toString(16).toUpperCase().padStart(2, '0');
+          const instId = `mod_inst_${instHex.toLowerCase()}`;
+          const instName = `${instHex}: ${sName.trim() || `Amiga Sample ${instHex}`}`;
+          
+          let loopStart: number | undefined = undefined;
+          let loopEnd: number | undefined = undefined;
+          // In ProTracker: loop length is words; when <= 1 word (<= 2 bytes), sample does not loop
+          if (repeatLengthWords > 1) {
+            const lStart = repeatOffsetWords * 2;
+            const lEnd = (repeatOffsetWords + repeatLengthWords) * 2;
+            if (lStart < lengthBytes && lEnd > lStart + 2) {
+              loopStart = lStart;
+              loopEnd = Math.min(lengthBytes, lEnd);
+            }
+          }
+
+          registerCustomInstrument(instId, instName, sampleBuf, 60, 8287, loopStart, loopEnd);
+          sampleDataOffset += readLen;
         }
       }
       logs.push(`[MOD] Extracted authentic 8-bit Amiga PCM samples into Audio Sampler.`);
@@ -1287,6 +1322,14 @@ function parseSoundFontAsSequence(fileName: string, arrayBuffer: ArrayBuffer, lo
     allPats.push(pat);
   }
 
+  const channelSoundFonts: { [ch: number]: string } = {
+    1: 'gm_piano',
+    2: 'gm_strings',
+    3: 'gm_bass',
+    4: 'gm_lead',
+    10: 'gm_drums'
+  };
+
   return {
     patterns: allPats[0],
     allPatterns: allPats,
@@ -1295,6 +1338,7 @@ function parseSoundFontAsSequence(fileName: string, arrayBuffer: ArrayBuffer, lo
     title: fileName.replace(/\.[^/.]+$/, ""),
     duration: "2:08",
     channelsCount: 16,
+    channelSoundFonts,
     log: [
       ...logs,
       `[SUCCESS] SoundFont Multi-Pattern Orchestration Sequence initialized (4 patterns)!`

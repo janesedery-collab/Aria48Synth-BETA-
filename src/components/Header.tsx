@@ -1,12 +1,18 @@
-import React, { useState } from 'react';
-import { Play, Square, Radio, Car, ShieldAlert, Cable, Upload, Download, Sliders, History } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Square, Radio, Car, ShieldAlert, Cable, Upload, Download, Sliders, History, Disc3, Share2, CheckCircle2, Minus, Plus, Cloud } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
 import { Channel } from '../types';
 import ExportStudioModal from './ExportStudioModal';
 import MidiControllerModal from './MidiControllerModal';
 import RecentSongsModal from './RecentSongsModal';
-import { addRecentSong, RecentSong } from '../utils/recentSongsManager';
+import ShareApkModal from './ShareApkModal';
+import CloudSongsModal from './CloudSongsModal';
+import { addRecentSong, RecentSong, saveSelectedSoundFont } from '../utils/recentSongsManager';
+import { SpessaSynth } from '../engines/spressasynthLib';
+import { parseSoundFontFile, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { getAudioContext } from './AudioEngine';
+import { onAuthUserChanged, User } from '../utils/cloudSongsService';
 
 interface HeaderProps {
   isPlaying: boolean;
@@ -40,6 +46,8 @@ interface HeaderProps {
   trackOctaveRange?: string | null;
   trackChannelsCount?: number | null;
   channels: Channel[];
+  setChannels?: React.Dispatch<React.SetStateAction<Channel[]>>;
+  patterns?: any[];
   songPatterns?: any[][];
   onSwitchChiptuneMode?: (mode: string) => void;
   currentChiptuneMode?: string;
@@ -64,6 +72,8 @@ export default function Header({
   trackOctaveRange,
   trackChannelsCount,
   channels,
+  setChannels,
+  patterns,
   songPatterns,
   onSwitchChiptuneMode,
   currentChiptuneMode
@@ -71,6 +81,104 @@ export default function Header({
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
   const [isRecentSongsOpen, setIsRecentSongsOpen] = useState(false);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [isCloudModalOpen, setIsCloudModalOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [sfBannerMessage, setSfBannerMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsub = onAuthUserChanged(setAuthUser);
+    return () => unsub();
+  }, []);
+
+  // Responsive & Non-blocking BPM state
+  const [bpmInputVal, setBpmInputVal] = useState(bpm.toString());
+  const tapTimesRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    setBpmInputVal(bpm.toString());
+  }, [bpm]);
+
+  const commitBpm = (val: string | number) => {
+    const num = typeof val === 'number' ? val : parseInt(val, 10);
+    if (!isNaN(num) && num > 0) {
+      const clamped = Math.max(30, Math.min(320, num));
+      setBpm(clamped);
+      setBpmInputVal(clamped.toString());
+    } else {
+      setBpmInputVal(bpm.toString());
+    }
+  };
+
+  const handleBpmStep = (delta: number) => {
+    const next = Math.max(30, Math.min(320, bpm + delta));
+    setBpm(next);
+    setBpmInputVal(next.toString());
+  };
+
+  const handleTapTempo = () => {
+    const now = Date.now();
+    const recentTaps = tapTimesRef.current.filter(t => now - t < 3000);
+    recentTaps.push(now);
+    tapTimesRef.current = recentTaps;
+
+    if (recentTaps.length >= 2) {
+      const intervals: number[] = [];
+      for (let i = 1; i < recentTaps.length; i++) {
+        intervals.push(recentTaps[i] - recentTaps[i - 1]);
+      }
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      if (avgInterval > 150 && avgInterval < 2000) {
+        const computedBpm = Math.round(60000 / avgInterval);
+        commitBpm(computedBpm);
+      }
+    }
+  };
+
+  const handleHeaderSoundFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const buffer = event.target?.result as ArrayBuffer;
+        if (buffer) {
+          try {
+            // Load into spressasynth_lib
+            const spessaSf = SpessaSynth.loadSoundFont(buffer, file.name);
+            saveSelectedSoundFont(spessaSf.id);
+            
+            // Also parse into WebAudio Sampler for custom instruments
+            const ctx = getAudioContext();
+            if (ctx) {
+              await parseSoundFontFile(buffer, file.name, ctx);
+            }
+            
+            // Put the SoundFont's instruments into the song channels
+            if (setChannels && channels) {
+              const sfInstruments = getAvailableSoundFontInstruments();
+              if (sfInstruments.length > 0) {
+                setChannels(prev => prev.map((ch, idx) => {
+                  const inst = sfInstruments[idx % sfInstruments.length];
+                  return {
+                    ...ch,
+                    chip: 'General MIDI (SoundFont)',
+                    soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                  };
+                }));
+              }
+            }
+
+            setSfBannerMessage(`SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) loaded into spressasynth_lib and assigned to song channels!`);
+            setTimeout(() => setSfBannerMessage(null), 4500);
+          } catch (err: any) {
+            setSfBannerMessage(`SoundFont error: ${err.message}`);
+            setTimeout(() => setSfBannerMessage(null), 4500);
+          }
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  };
 
   const activeChipsCount = React.useMemo(() => {
     if (!channels) return 1;
@@ -177,17 +285,80 @@ export default function Header({
             {isPlaying ? <Square size={14} /> : <Play size={14} fill="currentColor" />}
           </button>
           
-          <div className="flex items-center gap-2 px-3 border-l border-zinc-800">
-            <span className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">BPM</span>
+          {/* TACTILE & RESPONSIVE BPM CONTROLS */}
+          <div className="flex items-center gap-1.5 px-2.5 py-0.5 bg-black/60 border border-zinc-800 rounded-lg">
+            <span className="text-zinc-500 text-[9.5px] uppercase font-bold tracking-wider mr-0.5">BPM</span>
+
+            {/* Decrement Button */}
+            <button
+              id="bpm-decrement-btn"
+              type="button"
+              onClick={(e) => handleBpmStep(e.shiftKey ? -5 : -1)}
+              className="w-5 h-5 flex items-center justify-center bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-cyan-400 rounded border border-zinc-800 active:scale-95 transition cursor-pointer"
+              title="Decrease BPM (-1, Shift+Click: -5)"
+            >
+              <Minus size={11} />
+            </button>
+
+            {/* Direct Number Input */}
             <input 
               id="bpm-input"
-              type="number" 
-              value={bpm} 
-              min={40}
-              max={300}
-              onChange={(e) => setBpm(Math.max(40, Math.min(300, Number(e.target.value) || 120)))}
-              className="w-12 bg-black border border-zinc-800 rounded px-1.5 py-0.5 text-center text-cyan-300 font-mono text-[11px] focus:outline-none focus:border-cyan-600 focus:ring-1 focus:ring-cyan-600"
+              type="text" 
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={bpmInputVal} 
+              onChange={(e) => {
+                const text = e.target.value.replace(/[^0-9]/g, '');
+                setBpmInputVal(text);
+                if (text.length >= 2) {
+                  const n = parseInt(text, 10);
+                  if (n >= 30 && n <= 320) {
+                    setBpm(n);
+                  }
+                }
+              }}
+              onBlur={() => commitBpm(bpmInputVal)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  commitBpm(bpmInputVal);
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  handleBpmStep(e.shiftKey ? 5 : 1);
+                } else if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  handleBpmStep(e.shiftKey ? -5 : -1);
+                }
+              }}
+              onWheel={(e) => {
+                e.preventDefault();
+                handleBpmStep(e.deltaY < 0 ? 1 : -1);
+              }}
+              className="w-12 bg-black border border-zinc-800 focus:border-cyan-500 rounded px-1 py-0.5 text-center text-cyan-300 font-mono text-[11px] font-bold focus:outline-none select-all"
+              title="Click & type, use arrow keys, or scroll mouse wheel to adjust BPM"
             />
+
+            {/* Increment Button */}
+            <button
+              id="bpm-increment-btn"
+              type="button"
+              onClick={(e) => handleBpmStep(e.shiftKey ? 5 : 1)}
+              className="w-5 h-5 flex items-center justify-center bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-cyan-400 rounded border border-zinc-800 active:scale-95 transition cursor-pointer"
+              title="Increase BPM (+1, Shift+Click: +5)"
+            >
+              <Plus size={11} />
+            </button>
+
+            {/* Tap Tempo Button */}
+            <button
+              id="bpm-tap-btn"
+              type="button"
+              onClick={handleTapTempo}
+              className="px-1.5 py-0.5 bg-zinc-900 hover:bg-cyan-950/40 text-zinc-400 hover:text-cyan-300 border border-zinc-800 rounded text-[8.5px] uppercase font-bold tracking-wider transition cursor-pointer active:scale-95 ml-0.5"
+              title="Tap tempo rhythmically to set BPM"
+            >
+              TAP
+            </button>
           </div>
 
           {/* DYNAMIC PLAYER IMPORT TRIGGER */}
@@ -204,6 +375,28 @@ export default function Header({
                <Upload size={11} className="text-cyan-400" />
                <span>Import Song</span>
              </button>
+
+             {/* SEPARATE BUTTON TO ADD SOUNDFONTS INTO SPRESSASYNTH */}
+             <button
+               id="header-soundfont-btn"
+               onClick={() => {
+                 const sfInput = document.getElementById('header-soundfont-file-input');
+                 if (sfInput) sfInput.click();
+               }}
+               className="p-1 px-2.5 bg-emerald-950/40 border border-emerald-600/50 hover:border-emerald-400 text-emerald-300 hover:text-white hover:bg-emerald-900/50 rounded font-bold text-[9.5px] uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ml-2"
+               title="Add SoundFont (.sf2, .sf3, .dls) directly into spressasynth_lib-master.zip"
+             >
+               <Disc3 size={11} className="text-emerald-400 animate-pulse" />
+               <span>+ SoundFont</span>
+             </button>
+             <input
+               id="header-soundfont-file-input"
+               type="file"
+               className="hidden"
+               accept=".sf2,.sf3,.dls"
+               onChange={handleHeaderSoundFontUpload}
+             />
+
              <input 
                id="player-tracker-file-file-btn"
                type="file" 
@@ -341,6 +534,35 @@ export default function Header({
 
         {/* CONTROLS */}
         <div className="flex items-center gap-2">
+          {/* GOOGLE SIGN IN & CLOUD LIBRARY */}
+          <button
+            id="cloud-songs-header-btn"
+            onClick={() => setIsCloudModalOpen(true)}
+            className="p-1.5 px-2.5 rounded-lg border border-indigo-700/60 bg-indigo-950/50 hover:bg-indigo-900/60 text-indigo-200 font-bold transition-all text-[10px] uppercase cursor-pointer flex items-center gap-1.5 shadow-[0_0_12px_rgba(99,102,241,0.25)]"
+            title="Google Sign-In: Export and Import Songs from Google Cloud"
+          >
+            {authUser ? (
+              <>
+                {authUser.photoURL ? (
+                  <img src={authUser.photoURL} alt="" className="w-3.5 h-3.5 rounded-full object-cover border border-indigo-400" />
+                ) : (
+                  <Cloud size={12} className="text-indigo-400" />
+                )}
+                <span className="truncate max-w-[90px]">{authUser.displayName?.split(' ')[0] || 'Cloud Library'}</span>
+              </>
+            ) : (
+              <>
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 flex-shrink-0">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                </svg>
+                <span>Cloud Songs</span>
+              </>
+            )}
+          </button>
+
           {/* RECENT / LAST PLAYED SONGS */}
           <button
             id="recent-songs-header-btn"
@@ -372,6 +594,17 @@ export default function Header({
           >
             <Download size={13} className="text-cyan-400" />
             <span>Export Studio</span>
+          </button>
+
+          {/* SHARE & ANDROID APK BUTTON */}
+          <button 
+            id="share-apk-header-btn"
+            onClick={() => setIsShareModalOpen(true)}
+            className="p-1.5 px-2.5 rounded-lg border border-emerald-800/60 bg-emerald-950/45 hover:bg-emerald-900/60 text-emerald-300 font-bold transition-all text-[10px] uppercase cursor-pointer flex items-center gap-1.5 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+            title="Download Android APK (.apk) or Share Workstation"
+          >
+            <Share2 size={12} className="text-emerald-400" />
+            <span>APK / Share</span>
           </button>
 
           <button 
@@ -414,6 +647,21 @@ export default function Header({
         </div>
       </header>
 
+      {/* SOUNDFONT UPLOAD CONFIRMATION BANNER */}
+      <AnimatePresence>
+        {sfBannerMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-14 left-1/2 transform -translate-x-1/2 z-50 bg-emerald-950 border border-emerald-500 text-emerald-200 px-4 py-2 rounded-xl text-xs font-mono shadow-[0_0_25px_rgba(16,185,129,0.4)] flex items-center gap-2 pointer-events-none"
+          >
+            <CheckCircle2 size={16} className="text-emerald-400 animate-bounce" />
+            <span>{sfBannerMessage}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* RECENT SONGS MODAL */}
       <RecentSongsModal
         isOpen={isRecentSongsOpen}
@@ -437,6 +685,36 @@ export default function Header({
         trackTitle={trackTitle}
         onSwitchChiptuneMode={onSwitchChiptuneMode}
         currentMode={currentChiptuneMode || 'mod'}
+        isPlaying={isPlaying}
+        onTriggerPlay={() => setIsPlaying(true)}
+        onOpenCloudModal={() => {
+          setIsExportModalOpen(false);
+          setIsCloudModalOpen(true);
+        }}
+      />
+
+      {/* ANDROID APK & SHARE MODAL */}
+      <ShareApkModal
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+        trackTitle={trackTitle}
+      />
+
+      {/* GOOGLE CLOUD SONGS MODAL */}
+      <CloudSongsModal
+        isOpen={isCloudModalOpen}
+        onClose={() => setIsCloudModalOpen(false)}
+        patterns={patterns || []}
+        allPatterns={songPatterns}
+        channels={channels}
+        bpm={bpm}
+        trackTitle={trackTitle}
+        trackDuration={trackDuration}
+        trackChipType={trackChipType}
+        onImportSong={(p, b, d, t, c, o, cc, ap, ab, cs) => {
+          onImportSequence?.(p, b, d, t, c, o, cc, ap, ab, cs);
+          setIsPlaying(true);
+        }}
       />
     </>
   );

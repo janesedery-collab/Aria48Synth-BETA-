@@ -30,6 +30,8 @@ export interface SoundFontBankInfo {
   isLoaded: boolean;
 }
 
+export type OscilloscopeSize = 'very-small' | 'small' | 'medium' | 'large' | 'very-large';
+
 export interface OscilloscopeConfig {
   preset: 'protracker' | 'phosphor' | 'neon' | 'sunset' | 'cosmic' | 'copper';
   drawType: 'polygon' | 'solid' | 'dash' | 'dot';
@@ -37,6 +39,9 @@ export interface OscilloscopeConfig {
   glowBloom: boolean;
   gridDividers: boolean;
   noiseFloor: number; // 0 to 10
+  amplifier: number; // 0.2 to 10.0 (multiplier for HTML5 waveform drawing height, default 1.0)
+  size: OscilloscopeSize; // 'very-small' | 'small' | 'medium' | 'large' | 'very-large'
+  phaseSync: boolean; // Stabilize waveform at zero-crossing (true) or free-drifting phase (false)
 }
 
 export interface ChatMessage {

@@ -9,9 +9,12 @@ import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS, WebScopePreset } from '../engines/webscopeOscilloscope';
 import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
+import { getAvailableSoundFontInstruments, parseSoundFontFile } from '../utils/soundFontEngine';
+import { getAudioContext } from './AudioEngine';
 
 interface MixerEQProps {
   channels: Channel[];
+  setChannels?: React.Dispatch<React.SetStateAction<Channel[]>>;
   isPlaying: boolean;
   driveMode?: boolean;
   channelPitches?: { [key: number]: string };
@@ -58,6 +61,14 @@ function WebScopeCRT({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [meter, setMeter] = useState({ peak: 0, rms: 0 });
 
+  const size = oscConfig?.size || 'medium';
+  const amplifier = oscConfig?.amplifier ?? 1.0;
+
+  // Distinct physical box height & canvas resolution for each size preset
+  const canvasHeight = size === 'very-small' ? 50 : size === 'small' ? 82 : size === 'medium' ? 125 : size === 'large' ? 195 : 285;
+  const boxHeightClass = size === 'very-small' ? 'h-[52px] min-h-[52px]' : size === 'small' ? 'h-[86px] min-h-[86px]' : size === 'medium' ? 'h-[130px] min-h-[130px]' : size === 'large' ? 'h-[200px] min-h-[200px]' : 'h-[290px] min-h-[290px]';
+  const cardPadding = size === 'very-small' ? 'p-1.5' : size === 'small' ? 'p-2' : size === 'medium' ? 'p-2.5' : size === 'large' ? 'p-3' : 'p-3.5';
+
   useEffect(() => {
     let animId: number;
 
@@ -72,8 +83,10 @@ function WebScopeCRT({
             scanlines: oscConfig?.scanlines ?? true,
             glowBloom: oscConfig?.glowBloom ?? true,
             gridDividers: oscConfig?.gridDividers ?? true,
-            triggerLock: true,
-            strokeWidth: 1.8
+            phaseSync: oscConfig?.phaseSync ?? true,
+            triggerLock: oscConfig?.phaseSync ?? true,
+            strokeWidth: size === 'very-large' ? 2.4 : size === 'large' ? 2.0 : 1.8,
+            amplifier: amplifier
           }
         );
         setMeter({ peak: stats.peakLevel, rms: stats.rmsLevel });
@@ -83,15 +96,15 @@ function WebScopeCRT({
 
     animId = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(animId);
-  }, [channelIndex, isPlaying, oscConfig]);
+  }, [channelIndex, isPlaying, oscConfig, amplifier, size]);
 
   const presetStyle = WEBSCOPE_PRESETS[(oscConfig?.preset as WebScopePreset) || 'protracker'];
   const peakPct = Math.min(100, Math.round(meter.peak * 125));
 
   return (
-    <div className="bg-black/95 border border-zinc-850 hover:border-zinc-700 rounded-lg p-2 flex flex-col relative overflow-hidden shadow-inner group transition-colors">
+    <div className={`bg-black/95 border border-zinc-850 hover:border-zinc-700 rounded-lg flex flex-col relative overflow-hidden shadow-inner group transition-all ${cardPadding}`}>
       {/* Scope Header */}
-      <div className="flex items-center justify-between text-[8px] font-mono tracking-wider mb-1.5 z-10">
+      <div className="flex items-center justify-between text-[8px] font-mono tracking-wider mb-1 z-10">
         <div className="flex items-center gap-1.5">
           <span 
             className="font-black px-1 py-0.5 rounded text-[8px] uppercase tracking-wider"
@@ -109,17 +122,17 @@ function WebScopeCRT({
         </div>
 
         <div className="flex items-center gap-1 text-[7.5px] text-zinc-500">
-          <span className="text-zinc-600">{role.category}</span>
+          <span className="text-zinc-600 hidden sm:inline">{role.category}</span>
           <span className="font-mono text-cyan-400 font-bold">{pitch || role.defaultFreq}</span>
         </div>
       </div>
 
-      {/* HTML5 CRT Vector Canvas */}
-      <div className="relative flex-1 min-h-[64px] bg-black rounded border border-zinc-900/90 overflow-hidden flex items-center justify-center">
+      {/* HTML5 CRT Vector Canvas (Box size physically scaled by size preset, while drawing height is amplified by amplifier) */}
+      <div className={`relative flex-1 ${boxHeightClass} bg-black rounded border border-zinc-900/90 overflow-hidden flex items-center justify-center`}>
         <canvas 
           ref={canvasRef} 
-          width={220} 
-          height={72} 
+          width={size === 'very-large' ? 360 : size === 'large' ? 280 : 220} 
+          height={canvasHeight} 
           className="w-full h-full block"
         />
 
@@ -128,7 +141,7 @@ function WebScopeCRT({
       </div>
 
       {/* Live Peak / Signal Level Bar */}
-      <div className="mt-1.5 flex items-center gap-1.5 text-[7px] font-mono text-zinc-500">
+      <div className="mt-1 flex items-center gap-1.5 text-[7px] font-mono text-zinc-500">
         <span className="text-zinc-600">PEAK</span>
         <div className="flex-1 h-1.5 bg-zinc-950 rounded border border-zinc-900 overflow-hidden flex gap-0.5 p-0.5">
           <div 
@@ -150,6 +163,7 @@ function WebScopeCRT({
 
 export default function MixerEQ({
   channels,
+  setChannels,
   isPlaying,
   driveMode = false,
   channelPitches = {},
@@ -160,7 +174,10 @@ export default function MixerEQ({
     scanlines: true,
     glowBloom: true,
     gridDividers: true,
-    noiseFloor: 2
+    noiseFloor: 2,
+    amplifier: 1.0,
+    size: 'medium',
+    phaseSync: true
   },
   setOscConfig
 }: MixerEQProps) {
@@ -177,14 +194,32 @@ export default function MixerEQ({
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       const reader = new FileReader();
-      reader.onload = (evt) => {
+      reader.onload = async (evt) => {
         if (evt.target?.result instanceof ArrayBuffer) {
           try {
             const newSf = SpessaSynth.loadSoundFont(evt.target.result, file.name);
             setSoundFonts(SpessaSynth.getLoadedSoundFonts());
             setActiveSoundFont(newSf);
-            setSfFeedback(`Loaded SoundFont Bank "${newSf.name}" (${newSf.instrumentCount} Presets) into spressasynth_lib-master.zip`);
-            setTimeout(() => setSfFeedback(null), 4000);
+            const ctx = getAudioContext();
+            if (ctx) {
+              await parseSoundFontFile(evt.target.result, file.name, ctx);
+            }
+            // Put the SoundFont's real instruments into the song's channels
+            if (setChannels && channels) {
+              const sfInstruments = getAvailableSoundFontInstruments();
+              if (sfInstruments.length > 0) {
+                setChannels(prev => prev.map((ch, idx) => {
+                  const inst = sfInstruments[idx % sfInstruments.length];
+                  return {
+                    ...ch,
+                    chip: 'General MIDI (SoundFont)',
+                    soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                  };
+                }));
+              }
+            }
+            setSfFeedback(`Loaded SoundFont Bank "${newSf.name}" (${newSf.instrumentCount} Presets) into spressasynth_lib and applied instruments to song channels!`);
+            setTimeout(() => setSfFeedback(null), 4500);
           } catch (err: any) {
             setSfFeedback(`Error loading SoundFont: ${err.message}`);
           }
@@ -306,72 +341,167 @@ export default function MixerEQ({
       <div className="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3 flex flex-col gap-3">
         
         {/* WALL TOOLBAR */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
-          <div className="flex items-center gap-2">
-            <Server size={14} className="text-amber-400" />
-            <h3 className="font-bold text-xs uppercase tracking-wider text-white">
-              16-Channel Vector Oscilloscope Matrix
-            </h3>
-            <span className="text-[9px] px-2 py-0.5 bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded font-bold">
-              16 CHANNELS LOCKED
-            </span>
+        <div className="flex flex-col gap-2.5 border-b border-zinc-800/80 pb-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Server size={14} className="text-amber-400" />
+              <h3 className="font-bold text-xs uppercase tracking-wider text-white">
+                16-Channel Vector Oscilloscope Matrix
+              </h3>
+              <span className="text-[9px] px-2 py-0.5 bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded font-bold">
+                16 CHANNELS LOCKED
+              </span>
+            </div>
+
+            {/* SEPARATE BUTTON TO CONFIGURE OSCILLOSCOPE SIZE FOR ALL OSCILLOSCOPES */}
+            <div className="flex items-center gap-1.5 bg-zinc-950/90 border border-zinc-800 px-2 py-1 rounded-lg">
+              <span className="text-[9px] text-zinc-400 uppercase font-bold mr-1">Scope Size:</span>
+              {(['very-small', 'small', 'medium', 'large', 'very-large'] as const).map(sz => (
+                <button
+                  key={sz}
+                  id={`osc-size-btn-${sz}`}
+                  onClick={() => setOscConfig?.({ ...oscConfig, size: sz })}
+                  className={`px-2 py-0.5 rounded text-[8.5px] font-bold border transition cursor-pointer uppercase ${
+                    (oscConfig.size || 'medium') === sz
+                      ? 'bg-amber-600 text-white border-amber-400 shadow-sm'
+                      : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                  }`}
+                  title={`Configure all 16 oscilloscopes to ${sz.replace('-', ' ')}`}
+                >
+                  {sz === 'very-small' ? 'Very Small' : sz === 'small' ? 'Small' : sz === 'medium' ? 'Medium' : sz === 'large' ? 'Large' : 'Very Large'}
+                </button>
+              ))}
+            </div>
+
+            {/* PALETTE PRESET BUTTONS */}
+            <div className="flex items-center gap-1">
+              <span className="text-[9px] text-zinc-500 uppercase font-bold mr-1 hidden sm:inline">CRT Color:</span>
+              {(['protracker', 'phosphor', 'neon', 'sunset', 'cosmic', 'copper'] as WebScopePreset[]).map(p => (
+                <button
+                  key={p}
+                  onClick={() => setOscConfig?.({ ...oscConfig, preset: p as any })}
+                  className={`px-2 py-0.5 rounded text-[9px] font-bold border transition cursor-pointer uppercase ${
+                    oscConfig.preset === p
+                      ? 'bg-zinc-800 text-white border-zinc-500 shadow-sm'
+                      : 'bg-zinc-950/80 text-zinc-500 border-zinc-850 hover:text-zinc-300'
+                  }`}
+                  title={WEBSCOPE_PRESETS[p].name}
+                >
+                  {p === 'protracker' ? 'Amber' : p === 'phosphor' ? 'Green' : p === 'neon' ? 'Cyan' : p === 'sunset' ? 'Magenta' : p === 'cosmic' ? 'Violet' : 'Copper'}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* PALETTE PRESET BUTTONS */}
-          <div className="flex items-center gap-1">
-            <span className="text-[9px] text-zinc-500 uppercase font-bold mr-1 hidden sm:inline">CRT Color:</span>
-            {(['protracker', 'phosphor', 'neon', 'sunset', 'cosmic', 'copper'] as WebScopePreset[]).map(p => (
+          {/* ROW 2: AMPLIFIER (WAVEFORM HEIGHT MULTIPLIER) & DISPLAY SWITCHES */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-zinc-950/60 p-2 rounded-lg border border-zinc-850">
+            {/* AMPLIFIER CONTROL (Makes HTML5 drawing taller to your liking without making box bigger) */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 text-[9.5px] font-bold text-cyan-300 font-mono">
+                <Activity size={12} className="text-cyan-400 animate-pulse" />
+                <span>WAVEFORM AMPLIFIER:</span>
+              </div>
+              <span className="text-[9px] text-zinc-400 font-sans hidden md:inline">
+                (makes HTML5 drawing taller without expanding box)
+              </span>
+
+              {/* Quick Multiplier Buttons */}
+              <div className="flex items-center gap-1">
+                {[0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0].map((mult) => (
+                  <button
+                    key={mult}
+                    id={`osc-amp-btn-${mult}`}
+                    onClick={() => setOscConfig?.({ ...oscConfig, amplifier: mult })}
+                    className={`px-2 py-0.5 rounded text-[8.5px] font-mono font-bold border transition cursor-pointer ${
+                      (oscConfig.amplifier ?? 1.0) === mult
+                        ? 'bg-cyan-600 text-white border-cyan-400 shadow-sm'
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                    }`}
+                    title={`Set waveform amplifier to ${mult}x drawing height`}
+                  >
+                    {mult === 1.0 ? '1.0x (Norm)' : `${mult}x`}
+                  </button>
+                ))}
+              </div>
+
+              {/* Continuous Slider */}
+              <div className="flex items-center gap-1.5 ml-2">
+                <input
+                  type="range"
+                  min="0.2"
+                  max="8.0"
+                  step="0.1"
+                  value={oscConfig.amplifier ?? 1.0}
+                  onChange={(e) => setOscConfig?.({ ...oscConfig, amplifier: parseFloat(e.target.value) })}
+                  className="w-24 accent-cyan-400 cursor-pointer h-1.5 bg-zinc-900 rounded"
+                  title="Smooth waveform amplifier height slider (0.2x - 8.0x)"
+                />
+                <span className="text-[9.5px] font-mono font-black text-cyan-400 min-w-[32px]">
+                  {(oscConfig.amplifier ?? 1.0).toFixed(1)}x
+                </span>
+              </div>
+            </div>
+
+            {/* DISPLAY TOGGLE SWITCHES & PHASE SYNC */}
+            <div className="flex flex-wrap items-center gap-3 text-[9px] text-zinc-400">
+              {/* PHASE SYNC (WAVEFORM STABILIZER / DRIFT CONTROL) */}
               <button
-                key={p}
-                onClick={() => setOscConfig?.({ ...oscConfig, preset: p as any })}
-                className={`px-2 py-0.5 rounded text-[9px] font-bold border transition cursor-pointer uppercase ${
-                  oscConfig.preset === p
-                    ? 'bg-zinc-800 text-white border-zinc-500 shadow-sm'
-                    : 'bg-zinc-950/80 text-zinc-500 border-zinc-850 hover:text-zinc-300'
+                id="osc-phase-sync-btn"
+                onClick={() => setOscConfig?.({ ...oscConfig, phaseSync: !(oscConfig.phaseSync ?? true) })}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[9px] font-mono font-bold border transition cursor-pointer ${
+                  (oscConfig.phaseSync ?? true)
+                    ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/60 shadow-[0_0_8px_rgba(16,185,129,0.25)]'
+                    : 'bg-zinc-900 text-amber-400 border-amber-600/50 hover:bg-zinc-850'
                 }`}
-                title={WEBSCOPE_PRESETS[p].name}
+                title={(oscConfig.phaseSync ?? true) 
+                  ? "Phase Sync ON: Waveforms are locked at zero-crossing (stationary/stabilized in normal position)" 
+                  : "Phase Sync OFF: Waveforms move left/right depending on the sound frequency"}
               >
-                {p === 'protracker' ? 'Amber' : p === 'phosphor' ? 'Green' : p === 'neon' ? 'Cyan' : p === 'sunset' ? 'Magenta' : p === 'cosmic' ? 'Violet' : 'Copper'}
+                <div className={`w-2 h-2 rounded-full ${(oscConfig.phaseSync ?? true) ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                <span>PHASE SYNC: {(oscConfig.phaseSync ?? true) ? 'STABILIZED (ON)' : 'FREE DRIFT (OFF)'}</span>
               </button>
-            ))}
-          </div>
 
-          {/* DISPLAY TOGGLE SWITCHES */}
-          <div className="flex items-center gap-3 text-[9px] text-zinc-400">
-            <label className="flex items-center gap-1 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={oscConfig.scanlines}
-                onChange={(e) => setOscConfig?.({ ...oscConfig, scanlines: e.target.checked })}
-                className="rounded bg-zinc-950 border-zinc-800 text-amber-500 focus:ring-0 accent-amber-500 h-3 w-3"
-              />
-              <span>Scanlines</span>
-            </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={oscConfig.scanlines}
+                  onChange={(e) => setOscConfig?.({ ...oscConfig, scanlines: e.target.checked })}
+                  className="rounded bg-zinc-950 border-zinc-800 text-amber-500 focus:ring-0 accent-amber-500 h-3 w-3"
+                />
+                <span>Scanlines</span>
+              </label>
 
-            <label className="flex items-center gap-1 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={oscConfig.glowBloom}
-                onChange={(e) => setOscConfig?.({ ...oscConfig, glowBloom: e.target.checked })}
-                className="rounded bg-zinc-950 border-zinc-800 text-amber-500 focus:ring-0 accent-amber-500 h-3 w-3"
-              />
-              <span>Phosphor Glow</span>
-            </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={oscConfig.glowBloom}
+                  onChange={(e) => setOscConfig?.({ ...oscConfig, glowBloom: e.target.checked })}
+                  className="rounded bg-zinc-950 border-zinc-800 text-amber-500 focus:ring-0 accent-amber-500 h-3 w-3"
+                />
+                <span>Phosphor Glow</span>
+              </label>
 
-            <label className="flex items-center gap-1 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={oscConfig.gridDividers}
-                onChange={(e) => setOscConfig?.({ ...oscConfig, gridDividers: e.target.checked })}
-                className="rounded bg-zinc-950 border-zinc-800 text-amber-500 focus:ring-0 accent-amber-500 h-3 w-3"
-              />
-              <span>Graticule Grid</span>
-            </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={oscConfig.gridDividers}
+                  onChange={(e) => setOscConfig?.({ ...oscConfig, gridDividers: e.target.checked })}
+                  className="rounded bg-zinc-950 border-zinc-800 text-amber-500 focus:ring-0 accent-amber-500 h-3 w-3"
+                />
+                <span>Graticule Grid</span>
+              </label>
+            </div>
           </div>
         </div>
 
-        {/* 16 OSCILLOSCOPES GRID (Preserved 16 at all times for MIDI and Chiptune) */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 max-h-[460px] overflow-y-auto custom-scrollbar p-1">
+        {/* 16 OSCILLOSCOPES GRID (Preserved 16 at all times with dynamic physical box dimensions) */}
+        <div className={`grid ${
+          oscConfig.size === 'very-small' ? 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-8' :
+          oscConfig.size === 'small' ? 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-4' :
+          oscConfig.size === 'large' ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2' :
+          oscConfig.size === 'very-large' ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2' :
+          'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'
+        } gap-2 max-h-[640px] overflow-y-auto custom-scrollbar p-1`}>
           {SIXTEEN_CHANNEL_ROLES.map((role, idx) => (
             <WebScopeCRT
               key={role.id}

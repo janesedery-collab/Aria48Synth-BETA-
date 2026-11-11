@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Download, Video, Disc3, FileAudio, CheckCircle2, 
-  X, Radio, Sparkles, Film, Play, Square, AlertCircle, Layers
+  X, Radio, Sparkles, Film, Play, Square, AlertCircle, Layers, Cloud, Clock, RefreshCw, Check
 } from 'lucide-react';
 import { Channel } from '../types';
 import { exportChiptuneFile } from '../utils/chiptuneExporters';
@@ -19,6 +19,9 @@ interface ExportStudioModalProps {
   activePreset?: WebScopePreset;
   onSwitchChiptuneMode?: (mode: string) => void;
   currentMode?: string;
+  onOpenCloudModal?: () => void;
+  isPlaying?: boolean;
+  onTriggerPlay?: () => void;
 }
 
 export const CHIPTUNE_MODES = [
@@ -27,6 +30,14 @@ export const CHIPTUNE_MODES = [
   { id: 's3m', label: 'ScreamTracker 3 (.S3M)', channels: 16, chip: 'S3M Digital / AdLib', ext: '.s3m' },
   { id: 'mid', label: 'General MIDI (.MID)', channels: 16, chip: 'General MIDI (SoundFont)', ext: '.mid' },
   { id: 'json', label: 'Aria48 Matrix (.JSON)', channels: 8, chip: 'Universal Synthesizer', ext: '.json' }
+];
+
+const DURATION_PRESETS = [
+  { sec: 10, label: '10s (Short)', desc: 'Quick clip' },
+  { sec: 15, label: '15s (Reel)', desc: 'Standard Reel/Shorts' },
+  { sec: 30, label: '30s (Social)', desc: 'Medium showcase' },
+  { sec: 60, label: '60s (Loop)', desc: 'Full loop' },
+  { sec: 0, label: 'Manual', desc: 'Continuous record' }
 ];
 
 export default function ExportStudioModal({
@@ -38,24 +49,27 @@ export default function ExportStudioModal({
   trackTitle,
   activePreset = 'protracker',
   onSwitchChiptuneMode,
-  currentMode = 'mod'
+  currentMode = 'mod',
+  onOpenCloudModal,
+  isPlaying = false,
+  onTriggerPlay
 }: ExportStudioModalProps) {
   const [selectedChiptuneMode, setSelectedChiptuneMode] = useState(currentMode);
   const [selectedVideoMode, setSelectedVideoMode] = useState<VideoRecordMode>('both');
+  const [selectedDuration, setSelectedDuration] = useState<number>(15); // Default 15s auto-process
+  const [autoStartAudio, setAutoStartAudio] = useState(true);
   const [selectedSoundFontFormat, setSelectedSoundFontFormat] = useState<'sf2' | 'sf3' | 'dls'>('sf2');
   const [soundFontBankName, setSoundFontBankName] = useState(trackTitle || "Aria48_SoundFont_Bank");
   
-  const [videoStatus, setVideoStatus] = useState<VideoRecorderStatus>({
-    isRecording: VideoRecorder.isRecording(),
-    mode: VideoRecorder.getMode(),
-    durationSeconds: 0
-  });
-
+  const [videoStatus, setVideoStatus] = useState<VideoRecorderStatus>(VideoRecorder.getStatus());
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = VideoRecorder.onStatusChange((status) => {
       setVideoStatus(status);
+      if (status.downloadedFilename) {
+        setDownloadSuccess(`Auto-processed & downloaded: ${status.downloadedFilename}`);
+      }
     });
     return () => unsub();
   }, []);
@@ -85,21 +99,35 @@ export default function ExportStudioModal({
     setTimeout(() => setDownloadSuccess(null), 3000);
   };
 
-  const handleToggleVideoRecording = () => {
+  const handleStartAutoVideoExport = () => {
     if (videoStatus.isRecording) {
       VideoRecorder.stopRecording();
-    } else {
-      const started = VideoRecorder.startRecording(selectedVideoMode, undefined, activePreset);
-      if (!started) {
-        alert("Could not start video recording. Please ensure audio context is active.");
+      return;
+    }
+
+    // Auto-start audio if paused so wave signals and synth are active
+    if (autoStartAudio && !isPlaying) {
+      onTriggerPlay?.();
+    }
+
+    const started = VideoRecorder.startRecording(selectedVideoMode, {
+      targetDurationSeconds: selectedDuration,
+      activePreset,
+      onComplete: (_blob, filename) => {
+        setDownloadSuccess(`Video export finished! Auto-saved: ${filename}`);
       }
+    });
+
+    if (!started) {
+      alert("Could not start video recording. Please ensure audio context is active.");
     }
   };
 
   const formatSecs = (s: number) => {
     const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+    const sec = Math.floor(s % 60);
+    const ms = Math.floor((s % 1) * 10);
+    return `${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${ms}`;
   };
 
   return (
@@ -129,9 +157,17 @@ export default function ExportStudioModal({
         </div>
 
         {downloadSuccess && (
-          <div className="bg-emerald-950/40 border border-emerald-500/50 rounded-xl p-2.5 flex items-center gap-2 text-emerald-300 text-xs animate-bounce">
-            <CheckCircle2 size={16} className="text-emerald-400" />
-            <span>{downloadSuccess}</span>
+          <div className="bg-emerald-950/40 border border-emerald-500/50 rounded-xl p-3 flex items-center justify-between gap-2 text-emerald-300 text-xs">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
+              <span className="font-semibold">{downloadSuccess}</span>
+            </div>
+            <button 
+              onClick={() => setDownloadSuccess(null)}
+              className="text-emerald-400 hover:text-white text-xs underline cursor-pointer"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -171,25 +207,33 @@ export default function ExportStudioModal({
           </button>
         </div>
 
-        {/* 2. VIDEO EXPORTER (OSCILLOSCOPE / TRACKER / BOTH) */}
-        <div className="bg-zinc-900/60 border border-zinc-850 rounded-xl p-3.5 flex flex-col gap-3">
+        {/* 2. AUTOMATIC VIDEO EXPORTER (OSCILLOSCOPE / TRACKER / BOTH) */}
+        <div className="bg-zinc-900/60 border border-amber-900/40 rounded-xl p-3.5 flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 text-xs font-bold text-amber-400">
               <Film size={15} />
-              <span>2. VIDEO RECORDING & EXPORT</span>
+              <span>2. AUTOMATIC VIDEO EXPORT & PROCESSOR</span>
             </div>
-            {videoStatus.isRecording && (
+            {videoStatus.isRecording ? (
               <span className="flex items-center gap-1.5 text-red-400 text-[10px] font-bold animate-pulse">
                 <span className="h-2 w-2 rounded-full bg-red-500"></span>
-                <span>REC [{formatSecs(videoStatus.durationSeconds)}]</span>
+                <span>REC [{formatSecs(videoStatus.durationSeconds)}{videoStatus.targetDurationSeconds > 0 ? ` / ${videoStatus.targetDurationSeconds}s` : ''}]</span>
               </span>
+            ) : videoStatus.isProcessing ? (
+              <span className="flex items-center gap-1.5 text-amber-300 text-[10px] font-bold animate-pulse">
+                <RefreshCw size={12} className="animate-spin text-amber-400" />
+                <span>PROCESSING VIDEO...</span>
+              </span>
+            ) : (
+              <span className="text-[9px] text-zinc-500 uppercase">Auto Stop & Process</span>
             )}
           </div>
 
           <p className="text-[10px] text-zinc-400 font-sans leading-relaxed">
-            Record high-definition video of the 16-channel vector CRT oscilloscope, the tracker pattern sequencer with samples inspector, or both views synchronized with the Web Audio stream.
+            Record high-definition video of the 16-channel vector CRT oscilloscope, the tracker pattern sequencer, or both views synchronized directly with Web Audio streams (SpessaSynth & Chiptune-3). It automatically records for the selected duration, encodes, and triggers download with zero manual stop-and-restart.
           </p>
 
+          {/* VIEW MODE SELECTION */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             {[
               { id: 'oscilloscope', title: 'Only Oscilloscope', desc: '16-Channel CRT Vector Wall', icon: '🎛️' },
@@ -198,13 +242,13 @@ export default function ExportStudioModal({
             ].map(vm => (
               <button
                 key={vm.id}
-                onClick={() => !videoStatus.isRecording && setSelectedVideoMode(vm.id as VideoRecordMode)}
-                disabled={videoStatus.isRecording}
+                onClick={() => !videoStatus.isRecording && !videoStatus.isProcessing && setSelectedVideoMode(vm.id as VideoRecordMode)}
+                disabled={videoStatus.isRecording || videoStatus.isProcessing}
                 className={`p-2.5 rounded-lg border text-left transition cursor-pointer flex flex-col gap-1 ${
                   selectedVideoMode === vm.id
                     ? 'bg-amber-950/60 border-amber-500/60 text-white shadow-sm'
                     : 'bg-zinc-950 border-zinc-850 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                } ${videoStatus.isRecording && selectedVideoMode !== vm.id ? 'opacity-40 cursor-not-allowed' : ''}`}
+                } ${videoStatus.isRecording || videoStatus.isProcessing ? 'opacity-40 cursor-not-allowed' : ''}`}
               >
                 <div className="text-base">{vm.icon}</div>
                 <div className="font-bold text-[10.5px] text-zinc-200">{vm.title}</div>
@@ -213,26 +257,120 @@ export default function ExportStudioModal({
             ))}
           </div>
 
-          <button
-            onClick={handleToggleVideoRecording}
-            className={`w-full py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer flex items-center justify-center gap-2 shadow-sm ${
-              videoStatus.isRecording
-                ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse'
-                : 'bg-amber-600 hover:bg-amber-500 text-white'
-            }`}
-          >
-            {videoStatus.isRecording ? (
-              <>
-                <Square size={13} fill="currentColor" />
-                <span>Stop & Download Video ({formatSecs(videoStatus.durationSeconds)})</span>
-              </>
-            ) : (
-              <>
-                <Video size={13} />
-                <span>Start Video Recording ({selectedVideoMode.toUpperCase()})</span>
-              </>
-            )}
-          </button>
+          {/* DURATION PRESETS & AUTO-SETTINGS */}
+          <div className="bg-zinc-950 border border-zinc-850 rounded-lg p-2.5 flex flex-col gap-2">
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-zinc-400 font-bold flex items-center gap-1">
+                <Clock size={12} className="text-amber-400" />
+                Target Clip Duration:
+              </span>
+              <label className="flex items-center gap-1.5 text-zinc-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoStartAudio}
+                  onChange={(e) => setAutoStartAudio(e.target.checked)}
+                  disabled={videoStatus.isRecording || videoStatus.isProcessing}
+                  className="rounded border-zinc-700 text-amber-500 focus:ring-0 cursor-pointer"
+                />
+                <span>Auto-play audio when starting</span>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-5 gap-1.5">
+              {DURATION_PRESETS.map(dp => (
+                <button
+                  key={dp.sec}
+                  onClick={() => !videoStatus.isRecording && !videoStatus.isProcessing && setSelectedDuration(dp.sec)}
+                  disabled={videoStatus.isRecording || videoStatus.isProcessing}
+                  className={`py-1.5 px-1 rounded text-center border transition cursor-pointer ${
+                    selectedDuration === dp.sec
+                      ? 'bg-amber-500/20 border-amber-500 text-amber-300 font-bold'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                  } ${videoStatus.isRecording || videoStatus.isProcessing ? 'opacity-40 cursor-not-allowed' : ''}`}
+                >
+                  <div className="text-[10px] leading-tight font-bold">{dp.label}</div>
+                  <div className="text-[8px] text-zinc-500 leading-tight truncate">{dp.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* LIVE RECORDING PROGRESS BAR */}
+          {videoStatus.isRecording && (
+            <div className="bg-zinc-950 border border-red-900/50 rounded-lg p-2.5 flex flex-col gap-1.5 animate-fadeIn">
+              <div className="flex items-center justify-between text-[10.5px]">
+                <span className="text-red-400 font-bold flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-red-500 animate-ping"></span>
+                  RECORDING IN PROGRESS
+                </span>
+                <span className="text-zinc-300 font-mono">
+                  {formatSecs(videoStatus.durationSeconds)}
+                  {videoStatus.targetDurationSeconds > 0 && ` / ${videoStatus.targetDurationSeconds}.0s (${videoStatus.progressPercent}%)`}
+                </span>
+              </div>
+
+              {videoStatus.targetDurationSeconds > 0 && (
+                <div className="w-full bg-zinc-850 rounded-full h-2 overflow-hidden">
+                  <div 
+                    className="bg-amber-500 h-full rounded-full transition-all duration-200"
+                    style={{ width: `${videoStatus.progressPercent}%` }}
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-[9px] text-zinc-500">
+                <span>
+                  {videoStatus.targetDurationSeconds > 0 
+                    ? `Auto-processing in ${(Math.max(0, videoStatus.targetDurationSeconds - videoStatus.durationSeconds)).toFixed(1)}s...`
+                    : 'Recording continuously. Click below when ready to process.'
+                  }
+                </span>
+                <span className="text-amber-400">Real-time Audio Stream Active</span>
+              </div>
+            </div>
+          )}
+
+          {/* PROCESSING STATE INDICATOR */}
+          {videoStatus.isProcessing && (
+            <div className="bg-amber-950/30 border border-amber-500/50 rounded-lg p-3 flex items-center justify-center gap-3 text-amber-300 text-xs animate-pulse">
+              <RefreshCw size={16} className="animate-spin text-amber-400" />
+              <span>Encoding WebM video stream & auto-downloading... Please wait a second.</span>
+            </div>
+          )}
+
+          {/* ACTION BUTTONS */}
+          <div className="flex gap-2">
+            <button
+              onClick={handleStartAutoVideoExport}
+              disabled={videoStatus.isProcessing}
+              className={`flex-1 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer flex items-center justify-center gap-2 shadow-sm ${
+                videoStatus.isProcessing
+                  ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
+                  : videoStatus.isRecording
+                    ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse'
+                    : 'bg-amber-600 hover:bg-amber-500 text-white'
+              }`}
+            >
+              {videoStatus.isRecording ? (
+                <>
+                  <Square size={13} fill="currentColor" />
+                  <span>Finish & Process Video Now ({formatSecs(videoStatus.durationSeconds)})</span>
+                </>
+              ) : videoStatus.isProcessing ? (
+                <>
+                  <RefreshCw size={13} className="animate-spin" />
+                  <span>Processing Video...</span>
+                </>
+              ) : (
+                <>
+                  <Video size={13} />
+                  <span>
+                    Start Auto Video Export ({selectedDuration > 0 ? `${selectedDuration}s Auto-Stop` : 'Manual'})
+                  </span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* 3. SOUNDFONT EXPORT (.SF2 / .SF3 / .DLS) */}
@@ -283,6 +421,35 @@ export default function ExportStudioModal({
           >
             <Download size={13} />
             <span>Export SoundFont (.{selectedSoundFontFormat.toUpperCase()})</span>
+          </button>
+        </div>
+
+        {/* 4. GOOGLE CLOUD STORAGE & SYNC */}
+        <div className="bg-zinc-900/60 border border-indigo-900/50 rounded-xl p-3.5 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-400">
+              <Cloud size={15} />
+              <span>4. GOOGLE CLOUD SONG STORAGE & IMPORT</span>
+            </div>
+            <span className="text-[9px] text-zinc-500 uppercase">Google Sign-In Sync</span>
+          </div>
+
+          <p className="text-[10px] text-zinc-400 font-sans leading-relaxed">
+            Directly export your song sequence, patterns, tempo, and SoundFont configuration to your Google Cloud library or browse and import any previously saved song.
+          </p>
+
+          <button
+            id="export-modal-google-cloud-btn"
+            onClick={onOpenCloudModal}
+            className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(99,102,241,0.3)]"
+          >
+            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 flex-shrink-0">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+            </svg>
+            <span>Open Google Cloud Library (Export / Import)</span>
           </button>
         </div>
 

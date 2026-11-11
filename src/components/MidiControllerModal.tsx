@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Sliders, Music, Volume2, RotateCcw, AlertOctagon, 
-  Check, X, Activity, Play, Radio, Sparkles, Layers, Piano
+  Check, X, Activity, Play, Radio, Sparkles, Layers, Piano,
+  Lock, Unlock, Waves, ArrowUpDown
 } from 'lucide-react';
 import { SpessaSynth, DEFAULT_GM_PROGRAMS, MidiChannelState } from '../engines/spressasynthLib';
-import { getAvailableSoundFontInstruments, SoundFontInstrument } from '../utils/soundFontEngine';
+import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { SoundFontInstrument } from '../types';
 import { saveSelectedSoundFont, getSavedSelectedSoundFont } from '../utils/recentSongsManager';
 
 interface MidiControllerModalProps {
@@ -73,8 +75,17 @@ export default function MidiControllerModal({
     pan: 64,
     pitchBend: 0,
     isMuted: false,
-    activeNoteCount: 0
+    activeNoteCount: 0,
+    pitchBendRange: 2,
+    portamentoEnabled: false,
+    portamentoTime: 64,
+    portamentoControl: null,
+    lastNote: null
   };
+
+  const [holdPitchWheel, setHoldPitchWheel] = useState(false);
+  const [pitchRange, setPitchRange] = useState(currentCh.pitchBendRange || 2);
+  const [isSlidingActive, setIsSlidingActive] = useState(false);
 
   const handleVolumeChange = (vol: number) => {
     SpessaSynth.setChannelVolume(selectedChannel, vol);
@@ -101,6 +112,52 @@ export default function MidiControllerModal({
   const handlePitchBendChange = (bend: number) => {
     SpessaSynth.setChannelPitchBend(selectedChannel, bend);
     setChannelStates([...SpessaSynth.getChannelStates()]);
+  };
+
+  const handlePitchWheelRelease = () => {
+    if (!holdPitchWheel) {
+      SpessaSynth.setChannelPitchBend(selectedChannel, 0);
+      setChannelStates([...SpessaSynth.getChannelStates()]);
+    }
+  };
+
+  const handlePitchRangeSelect = (semitones: number) => {
+    setPitchRange(semitones);
+    SpessaSynth.setChannelPitchBendRange(selectedChannel, semitones);
+    setChannelStates([...SpessaSynth.getChannelStates()]);
+    setSystemLog(`Ch ${selectedChannel + 1}: Pitch Wheel Range set to +/-${semitones} Semitones`);
+  };
+
+  const handlePortamentoToggle = () => {
+    const nextVal = !currentCh.portamentoEnabled;
+    SpessaSynth.setChannelPortamento(selectedChannel, nextVal);
+    setChannelStates([...SpessaSynth.getChannelStates()]);
+    setSystemLog(`Ch ${selectedChannel + 1}: Portamento Glide ${nextVal ? 'ENABLED (CC 65: ON)' : 'DISABLED (CC 65: OFF)'}`);
+  };
+
+  const handlePortamentoTimeChange = (time: number) => {
+    SpessaSynth.setChannelPortamentoTime(selectedChannel, time);
+    setChannelStates([...SpessaSynth.getChannelStates()]);
+  };
+
+  const handlePortamentoCtrlChange = (note: number | null) => {
+    SpessaSynth.setChannelPortamentoControl(selectedChannel, note);
+    setChannelStates([...SpessaSynth.getChannelStates()]);
+    setSystemLog(`Ch ${selectedChannel + 1}: Portamento Source Control Key (CC 84) set to ${note !== null ? `Note ${note}` : 'Auto'}`);
+  };
+
+  const handleTriggerSlidingTest = (startNote: number, endNote: number) => {
+    setIsSlidingActive(true);
+    setSystemLog(`Ch ${selectedChannel + 1}: Sliding Notes Demo (Glide ${startNote} -> ${endNote} with CC 5 & CC 65)`);
+    SpessaSynth.triggerPortamentoGlideTest(selectedChannel, startNote, endNote);
+    setActiveMidiNotes(new Set([startNote]));
+    setTimeout(() => {
+      setActiveMidiNotes(new Set([endNote]));
+    }, 130);
+    setTimeout(() => {
+      setActiveMidiNotes(new Set());
+      setIsSlidingActive(false);
+    }, 850);
   };
 
   const handlePlayKey = (midiNote: number) => {
@@ -354,13 +411,13 @@ export default function MidiControllerModal({
           </div>
 
           {/* ACTIVE CHANNEL DETAIL CONTROLS */}
-          <div className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-xl grid grid-cols-1 md:grid-cols-3 gap-5">
+          <div className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-xl grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             
             {/* COLUMN 1: PATCH / PROGRAM SELECTOR */}
             <div className="flex flex-col gap-2">
               <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider font-mono flex items-center justify-between">
-                <span>Channel {selectedChannel + 1} Instrument Patch</span>
-                <span className="text-cyan-400">CC 0 / Program</span>
+                <span>Ch {selectedChannel + 1} Patch</span>
+                <span className="text-cyan-400">CC 0 / Prog</span>
               </label>
 
               {selectedChannel === 9 ? (
@@ -393,7 +450,7 @@ export default function MidiControllerModal({
                   className="flex-1 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <Play size={11} fill="currentColor" />
-                  <span>Audition Channel</span>
+                  <span>Audition</span>
                 </button>
 
                 <button
@@ -418,7 +475,7 @@ export default function MidiControllerModal({
                   <span className="text-cyan-400 font-bold">{currentCh.volume} / 127</span>
                 </div>
                 <input 
-                  type="range"
+                  type="range" 
                   min={0}
                   max={127}
                   value={currentCh.volume}
@@ -459,47 +516,247 @@ export default function MidiControllerModal({
                   <span>R127 (Right)</span>
                 </div>
               </div>
-            </div>
-
-            {/* COLUMN 3: PITCH BEND & ACTIVE MONITOR */}
-            <div className="flex flex-col gap-4">
-              {/* PITCH BEND */}
-              <div>
-                <div className="flex items-center justify-between text-[10px] font-mono mb-1">
-                  <span className="font-bold text-zinc-400 uppercase">Pitch Bend</span>
-                  <span className="text-cyan-400 font-bold">{currentCh.pitchBend}</span>
-                </div>
-                <input 
-                  type="range"
-                  min={-8192}
-                  max={8191}
-                  value={currentCh.pitchBend}
-                  onChange={(e) => handlePitchBendChange(parseInt(e.target.value, 10))}
-                  className="w-full accent-indigo-400 cursor-pointer"
-                />
-                <div className="flex justify-between text-[8px] text-zinc-550 font-mono mt-0.5">
-                  <span>-8192</span>
-                  <button 
-                    onClick={() => handlePitchBendChange(0)}
-                    className="hover:text-indigo-400 underline cursor-pointer"
-                  >
-                    Center (0)
-                  </button>
-                  <span>+8191</span>
-                </div>
-              </div>
 
               {/* LIVE OSCILLOSCOPE HARMONICS SUMMARY */}
-              <div className="p-3 bg-black/60 border border-zinc-800 rounded-lg text-[9.5px] font-mono flex flex-col gap-1">
-                <span className="text-zinc-500 uppercase font-bold text-[8.5px]">Oscilloscope Route:</span>
+              <div className="p-2.5 bg-black/60 border border-zinc-800 rounded-lg text-[9px] font-mono flex flex-col gap-0.5">
+                <span className="text-zinc-500 uppercase font-bold text-[8px]">Oscilloscope Route:</span>
                 <span className="text-emerald-400 font-semibold truncate">
-                  Ch {selectedChannel + 1} &rarr; SpessaSynth AnalyserNode [{selectedChannel}]
-                </span>
-                <span className="text-zinc-400 text-[8.5px]">
-                  Zero-Crossing Trigger: Synchronized to 16 CRT Scopes
+                  Ch {selectedChannel + 1} &rarr; WebScope Analyser [{selectedChannel}]
                 </span>
               </div>
             </div>
+
+            {/* COLUMN 3: TACTILE MIDI PITCH BEND WHEEL */}
+            <div className="flex flex-col gap-2.5 p-3 bg-zinc-950/70 border border-zinc-800 rounded-xl">
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="font-bold text-zinc-300 uppercase flex items-center gap-1">
+                  <ArrowUpDown size={12} className="text-indigo-400" />
+                  Pitch Wheel
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className={`font-mono font-black text-[10px] px-1.5 py-0.2 rounded border ${
+                    currentCh.pitchBend !== 0 
+                      ? 'bg-indigo-950 text-indigo-300 border-indigo-600' 
+                      : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+                  }`}>
+                    {((currentCh.pitchBend / 8192) * (currentCh.pitchBendRange || 2)) > 0 ? '+' : ''}
+                    {((currentCh.pitchBend / 8192) * (currentCh.pitchBendRange || 2)).toFixed(2)} ST
+                  </span>
+                  
+                  {/* Hold Center Lock Toggle */}
+                  <button
+                    onClick={() => setHoldPitchWheel(!holdPitchWheel)}
+                    className={`p-1 rounded transition cursor-pointer ${
+                      holdPitchWheel 
+                        ? 'bg-amber-950/70 text-amber-300 border border-amber-600' 
+                        : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300 border border-zinc-800'
+                    }`}
+                    title={holdPitchWheel ? "Spring Return Locked (Pitch stays where released)" : "Spring Return Active (Snaps to 0 on release)"}
+                  >
+                    {holdPitchWheel ? <Lock size={10} /> : <Unlock size={10} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* TACTILE WHEEL VISUALIZER & DRAGGER */}
+              <div className="flex items-center gap-3">
+                {/* Vertical Spring Wheel */}
+                <div className="relative w-12 h-24 bg-gradient-to-b from-zinc-900 via-zinc-800 to-zinc-900 border-2 border-zinc-700 rounded-lg overflow-hidden shadow-inner flex flex-col justify-center items-center select-none group">
+                  {/* Ribbed lines to look like a physical synthesizer pitch wheel */}
+                  <div className="absolute inset-0 flex flex-col justify-between py-1 pointer-events-none opacity-40">
+                    {Array.from({ length: 9 }).map((_, i) => (
+                      <div key={i} className="h-0.5 w-full bg-zinc-400" />
+                    ))}
+                  </div>
+
+                  {/* Center Zero Marker Indicator */}
+                  <div className="absolute top-1/2 left-0 right-0 h-1 bg-cyan-400 -translate-y-1/2 shadow-[0_0_8px_rgba(6,182,212,0.8)] z-10" />
+
+                  {/* Wheel Handle */}
+                  <div 
+                    className="absolute w-full h-5 bg-gradient-to-r from-zinc-600 via-zinc-300 to-zinc-600 rounded border border-zinc-400 transition-all shadow-md pointer-events-none"
+                    style={{
+                      top: `${50 - (currentCh.pitchBend / 8192) * 40}%`,
+                      transform: 'translateY(-50%)'
+                    }}
+                  />
+
+                  {/* Hidden Vertical Input Overlay */}
+                  <input
+                    type="range"
+                    min={-8192}
+                    max={8191}
+                    value={currentCh.pitchBend}
+                    onChange={(e) => handlePitchBendChange(parseInt(e.target.value, 10))}
+                    onMouseUp={handlePitchWheelRelease}
+                    onTouchEnd={handlePitchWheelRelease}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-ns-resize"
+                    title="Drag up to bend pitch up, drag down to bend pitch down. Spring returns to center on release."
+                  />
+                </div>
+
+                {/* Pitch Wheel Presets & Range */}
+                <div className="flex-1 flex flex-col gap-1.5 text-[9px] font-mono">
+                  <div className="text-zinc-500 uppercase font-bold text-[8px]">Quick Nudge:</div>
+                  <div className="grid grid-cols-3 gap-1">
+                    <button
+                      onClick={() => {
+                        handlePitchBendChange(-8192);
+                        if (!holdPitchWheel) setTimeout(handlePitchWheelRelease, 350);
+                      }}
+                      className="px-1 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 active:scale-95 transition text-center"
+                    >
+                      -1 Oct
+                    </button>
+                    <button
+                      onClick={() => handlePitchBendChange(0)}
+                      className="px-1 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-cyan-400 font-bold border border-zinc-800 active:scale-95 transition text-center"
+                    >
+                      Zero (0)
+                    </button>
+                    <button
+                      onClick={() => {
+                        handlePitchBendChange(8191);
+                        if (!holdPitchWheel) setTimeout(handlePitchWheelRelease, 350);
+                      }}
+                      className="px-1 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 active:scale-95 transition text-center"
+                    >
+                      +1 Oct
+                    </button>
+                  </div>
+
+                  <div className="text-zinc-500 uppercase font-bold text-[8px] mt-0.5">Bend Range:</div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[2, 7, 12, 24].map((semi) => (
+                      <button
+                        key={semi}
+                        onClick={() => handlePitchRangeSelect(semi)}
+                        className={`py-0.5 rounded text-[8.5px] font-bold border transition ${
+                          (currentCh.pitchBendRange || 2) === semi
+                            ? 'bg-indigo-600 text-white border-indigo-400'
+                            : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                        }`}
+                        title={`+/-${semi} Semitones`}
+                      >
+                        ±{semi}ST
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* COLUMN 4: PORTAMENTO GLIDE & PORTAMENTO CTRL (CC 65, CC 5, CC 84) */}
+            <div className="flex flex-col gap-2.5 p-3 bg-zinc-950/70 border border-zinc-800 rounded-xl">
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="font-bold text-zinc-300 uppercase flex items-center gap-1">
+                  <Waves size={12} className="text-emerald-400 animate-pulse" />
+                  Portamento (Glide)
+                </span>
+                <span className="text-[8.5px] text-zinc-500">CC 65 / 5 / 84</span>
+              </div>
+
+              {/* CC 65 PORTAMENTO ON/OFF SWITCH */}
+              <button
+                id="midi-portamento-toggle-btn"
+                onClick={handlePortamentoToggle}
+                className={`w-full py-1.5 px-3 rounded-lg border font-mono font-bold text-xs uppercase tracking-wider transition cursor-pointer flex items-center justify-between shadow-sm ${
+                  currentCh.portamentoEnabled
+                    ? 'bg-emerald-950/80 border-emerald-500 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${currentCh.portamentoEnabled ? 'bg-emerald-400 animate-ping' : 'bg-zinc-600'}`} />
+                  <span>Portamento Glide</span>
+                </div>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${currentCh.portamentoEnabled ? 'bg-emerald-500 text-black font-black' : 'bg-zinc-800 text-zinc-500'}`}>
+                  {currentCh.portamentoEnabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+
+              {/* CC 5 PORTAMENTO TIME (GLIDE RATE) */}
+              <div>
+                <div className="flex items-center justify-between text-[9.5px] font-mono mb-1">
+                  <span className="text-zinc-400 font-bold uppercase">Glide Time (CC 5)</span>
+                  <span className="text-emerald-400 font-bold">
+                    {Math.round(20 + ((currentCh.portamentoTime ?? 64) / 127) * 1580)} ms
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={127}
+                  value={currentCh.portamentoTime ?? 64}
+                  onChange={(e) => handlePortamentoTimeChange(parseInt(e.target.value, 10))}
+                  className="w-full accent-emerald-400 cursor-pointer h-1.5 bg-zinc-900 rounded"
+                />
+                <div className="flex justify-between text-[7.5px] text-zinc-550 font-mono mt-0.5">
+                  <span>Fast (20ms)</span>
+                  <span>Normal (800ms)</span>
+                  <span>Long (1.6s)</span>
+                </div>
+              </div>
+
+              {/* CC 84 PORTAMENTO CONTROL (SOURCE NOTE) */}
+              <div>
+                <div className="flex items-center justify-between text-[9.5px] font-mono mb-1">
+                  <span className="text-zinc-400 font-bold uppercase">Porta Ctrl (CC 84)</span>
+                  <span className="text-amber-400 font-bold">
+                    {currentCh.portamentoControl !== null ? `Key ${currentCh.portamentoControl}` : 'Auto (Last Key)'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <select
+                    value={currentCh.portamentoControl ?? -1}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      handlePortamentoCtrlChange(val === -1 ? null : val);
+                    }}
+                    className="flex-1 bg-black border border-zinc-800 text-zinc-200 rounded px-2 py-1 text-[9px] font-mono focus:outline-none focus:border-amber-500 cursor-pointer"
+                  >
+                    <option value={-1}>Auto (Glides from Last Played Note)</option>
+                    <option value={48}>C3 (48)</option>
+                    <option value={52}>E3 (52)</option>
+                    <option value={55}>G3 (55)</option>
+                    <option value={60}>C4 (60 - Middle C)</option>
+                    <option value={64}>E4 (64)</option>
+                    <option value={67}>G4 (67)</option>
+                    <option value={72}>C5 (72)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* SLIDING NOTES DEMO TRIGGER BUTTONS */}
+              <div className="pt-1 border-t border-zinc-850">
+                <span className="text-[8px] text-zinc-500 uppercase font-bold block mb-1">Audition Sliding Notes:</span>
+                <div className="grid grid-cols-3 gap-1">
+                  <button
+                    onClick={() => handleTriggerSlidingTest(48, 67)}
+                    className="py-1 px-1 rounded bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/50 text-[8px] font-bold uppercase tracking-wider transition cursor-pointer text-center truncate"
+                    title="Slide C3 to G3"
+                  >
+                    Slide C3&rarr;G3
+                  </button>
+                  <button
+                    onClick={() => handleTriggerSlidingTest(52, 71)}
+                    className="py-1 px-1 rounded bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/50 text-[8px] font-bold uppercase tracking-wider transition cursor-pointer text-center truncate"
+                    title="Slide E3 to B4"
+                  >
+                    Slide E3&rarr;B4
+                  </button>
+                  <button
+                    onClick={() => handleTriggerSlidingTest(48, 72)}
+                    className="py-1 px-1 rounded bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/50 text-[8px] font-bold uppercase tracking-wider transition cursor-pointer text-center truncate"
+                    title="Slide C3 to C5 (Full 2-Octave Portamento)"
+                  >
+                    Slide C3&rarr;C5
+                  </button>
+                </div>
+              </div>
+
+            </div>
+
           </div>
 
           {/* INTERACTIVE 2-OCTAVE VIRTUAL KEYBOARD */}

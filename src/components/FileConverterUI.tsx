@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, HelpCircle, FileAudio, RotateCw, CheckCircle2, Download, Disc3, Music, Play, Volume2 } from 'lucide-react';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
-import { parseSoundFontFile, getSoundFontBankInfo, getAvailableSoundFontInstruments, playSoundFontNote } from '../utils/soundFontEngine';
+import { parseSoundFontFile, getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { getAudioContext } from './AudioEngine';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { SoundFontBankInfo, SoundFontInstrument } from '../types';
@@ -58,10 +58,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
     const ctx = getAudioContext();
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
-    // Play a smooth 3-note major chord: Root, 3rd, 5th
-    playSoundFontNote(ctx, instId, 60, 0.4, 85, 40); // C4
-    setTimeout(() => playSoundFontNote(ctx, instId, 64, 0.4, 80, 50), 100); // E4
-    setTimeout(() => playSoundFontNote(ctx, instId, 67, 0.5, 85, 60), 200); // G4
+    // Route audition chord exclusively through SpessaSynth engine (Root, 3rd, 5th)
+    SpessaSynth.noteOn(0, 60, 90, 0.45); // C4
+    setTimeout(() => SpessaSynth.noteOn(0, 64, 85, 0.45), 90); // E4
+    setTimeout(() => SpessaSynth.noteOn(0, 67, 95, 0.55), 180); // G4
   };
 
   const handleSoundFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

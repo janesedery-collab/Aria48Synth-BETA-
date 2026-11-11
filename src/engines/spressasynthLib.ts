@@ -25,6 +25,11 @@ export interface MidiChannelState {
   pitchBend: number; // -8192 to 8191
   isMuted: boolean;
   activeNoteCount: number;
+  pitchBendRange: number; // Semitones, default 2 (range 1 to 24)
+  portamentoEnabled: boolean; // CC 65 (Glide Switch)
+  portamentoTime: number; // CC 5 (Glide Rate 0 to 127)
+  portamentoControl: number | null; // CC 84 (Source Note for Portamento 0 to 127)
+  lastNote: number | null; // Previous played note for glide
 }
 
 export const DEFAULT_GM_PROGRAMS: string[] = [
@@ -64,6 +69,15 @@ class SpessaSynthEngine {
   // Active playback tracking
   private isPlaying = false;
   private activeVoices: { stop: () => void }[] = [];
+  private activeOscillators: {
+    [channel: number]: {
+      osc: OscillatorNode;
+      subOsc?: OscillatorNode;
+      baseNote: number;
+      subRatio: number;
+      stop: () => void;
+    }[];
+  } = {};
   private playbackTimeoutIds: any[] = [];
   private midiPlaybackTimer: any = null;
 
@@ -97,8 +111,14 @@ class SpessaSynthEngine {
         pan: 64,
         pitchBend: 0,
         isMuted: false,
-        activeNoteCount: 0
+        activeNoteCount: 0,
+        pitchBendRange: 2,
+        portamentoEnabled: false,
+        portamentoTime: 64,
+        portamentoControl: null,
+        lastNote: null
       });
+      this.activeOscillators[i] = [];
     }
   }
 
@@ -141,6 +161,19 @@ class SpessaSynthEngine {
     }
 
     return this.audioCtx!;
+  }
+
+  public getMasterGain(): GainNode | null {
+    if (!this.masterGain) this.init();
+    return this.masterGain;
+  }
+
+  public getChannelGain(channelIndex: number): GainNode | null {
+    if (this.channelGains.length === 0) this.init();
+    if (channelIndex >= 0 && channelIndex < this.channelGains.length) {
+      return this.channelGains[channelIndex];
+    }
+    return null;
   }
 
   public getChannelAnalyser(channelIndex: number): AnalyserNode | null {
@@ -215,6 +248,31 @@ class SpessaSynthEngine {
                 }
                 infoOffset += 8 + subLen + (subLen % 2);
               }
+            } else if (listType === "pdta") {
+              let pdtaOffset = offset + 12;
+              const pdtaEnd = Math.min(offset + 8 + chunkSize, u8.length);
+              while (pdtaOffset + 8 < pdtaEnd) {
+                const subId = String.fromCharCode(u8[pdtaOffset], u8[pdtaOffset + 1], u8[pdtaOffset + 2], u8[pdtaOffset + 3]);
+                const subLen = (u8[pdtaOffset + 4]) | (u8[pdtaOffset + 5] << 8) | (u8[pdtaOffset + 6] << 16) | (u8[pdtaOffset + 7] << 24);
+                if (subId === "phdr" && subLen >= 38) {
+                  const pCount = Math.floor(subLen / 38);
+                  for (let p = 0; p < pCount; p++) {
+                    const rec = pdtaOffset + 8 + (p * 38);
+                    if (rec + 20 <= u8.length) {
+                      let pName = "";
+                      for (let n = 0; n < 20; n++) {
+                        const ch = u8[rec + n];
+                        if (ch === 0) break;
+                        pName += String.fromCharCode(ch);
+                      }
+                      if (pName.trim() && pName.trim() !== "EOP") {
+                        foundPresets.push(pName.trim());
+                      }
+                    }
+                  }
+                }
+                pdtaOffset += 8 + subLen + (subLen % 2);
+              }
             }
           }
           offset += 8 + chunkSize + (chunkSize % 2);
@@ -226,7 +284,7 @@ class SpessaSynthEngine {
       id: `spessa-sf-${Date.now()}`,
       name: bankName,
       version: version,
-      instrumentCount: Math.max(16, Math.min(128, Math.round(u8.length / 32768))),
+      instrumentCount: foundPresets.length > 0 ? foundPresets.length : Math.max(16, Math.min(128, Math.round(u8.length / 32768))),
       presets: foundPresets.length > 0 ? foundPresets : [
         "Acoustic Grand (SF2)", "Warm Pad (SF2)", "Jazz Bass (SF2)", "Brass Section (SF2)", "Drum Kit (SF2)"
       ],
@@ -236,6 +294,22 @@ class SpessaSynthEngine {
     this.soundFonts.unshift(newSf);
     this.activeSoundFontId = newSf.id;
     return newSf;
+  }
+
+  public noteOff(channel: number, midiNote?: number) {
+    const chIdx = Math.max(0, Math.min(15, channel));
+    const list = this.activeOscillators[chIdx];
+    if (!list || list.length === 0) return;
+    for (const oscRec of list) {
+      if (midiNote === undefined || oscRec.baseNote === midiNote) {
+        oscRec.stop();
+      }
+    }
+    if (midiNote === undefined) {
+      this.activeOscillators[chIdx] = [];
+    } else {
+      this.activeOscillators[chIdx] = list.filter(o => o.baseNote !== midiNote);
+    }
   }
 
   /**
@@ -250,9 +324,31 @@ class SpessaSynthEngine {
     const chGain = this.channelGains[chIdx];
     if (!chGain || this.channelStates[chIdx]?.isMuted) return;
 
-    const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
+    // Apply real-time pitch bend semitones
+    const chState = this.channelStates[chIdx];
+    const bendSemitones = (chState.pitchBend / 8192) * (chState.pitchBendRange || 2);
+    const targetFreq = 440 * Math.pow(2, (midiNote + bendSemitones - 69) / 12);
     const now = ctx.currentTime;
-    const vol = (velocity / 127) * (this.channelStates[chIdx].volume / 127) * 0.18;
+    const vol = (velocity / 127) * (chState.volume / 127) * 0.18;
+
+    // Check Portamento Glide (CC 65 & CC 84)
+    const isPortamentoActive = chState.portamentoEnabled || (chState.portamentoControl !== null);
+    const sourceNote = chState.portamentoControl !== null ? chState.portamentoControl : chState.lastNote;
+    let startFreq = targetFreq;
+    let isGliding = false;
+    let glideDurationSecs = 0.05;
+
+    if (isPortamentoActive && sourceNote !== null && sourceNote !== midiNote) {
+      startFreq = 440 * Math.pow(2, (sourceNote + bendSemitones - 69) / 12);
+      const pTime = chState.portamentoTime ?? 64;
+      // Map CC 5 (0-127) to smooth glide duration between 0.03s and 1.6s
+      glideDurationSecs = 0.03 + (pTime / 127) * 1.57;
+      isGliding = true;
+    }
+
+    // Reset one-shot portamento control (CC 84) and save last note
+    chState.portamentoControl = null;
+    chState.lastNote = midiNote;
 
     // Distinguish GM Drums (Channel 10, idx 9) vs Melodic instruments
     if (chIdx === 9) {
@@ -276,7 +372,7 @@ class SpessaSynthEngine {
       } else {
         // Hi-Hat / Cymbal / Percussion (metallic high noise tone)
         osc.type = "sawtooth";
-        osc.frequency.setValueAtTime(freq > 800 ? freq : 4200, now);
+        osc.frequency.setValueAtTime(targetFreq > 800 ? targetFreq : 4200, now);
         gain.gain.setValueAtTime(vol * 0.8, now);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + Math.min(0.18, duration));
       }
@@ -295,45 +391,55 @@ class SpessaSynthEngine {
     }
 
     // Melodic SoundFont Voice Synthesis
-    const program = this.channelStates[chIdx].program;
+    const program = chState.program;
     const osc = ctx.createOscillator();
     const subOsc = ctx.createOscillator();
     const noteGain = ctx.createGain();
+    let subRatio = 1.0;
 
     // Select waveform based on General MIDI sound family
     if (program < 8) {
       // Piano: rich triangle + sub sine
       osc.type = "triangle";
       subOsc.type = "sine";
-      subOsc.frequency.setValueAtTime(freq * 2, now);
+      subRatio = 2.0;
     } else if (program >= 24 && program < 32) {
       // Guitar: crisp sawtooth
       osc.type = "sawtooth";
       subOsc.type = "triangle";
-      subOsc.frequency.setValueAtTime(freq * 0.5, now);
+      subRatio = 0.5;
     } else if (program >= 32 && program < 40) {
       // Bass: deep square/sawtooth
       osc.type = "square";
       subOsc.type = "sine";
-      subOsc.frequency.setValueAtTime(freq * 0.5, now);
+      subRatio = 0.5;
     } else if (program >= 40 && program < 56) {
       // Strings & Choir: warm saw
       osc.type = "sawtooth";
       subOsc.type = "sawtooth";
-      subOsc.frequency.setValueAtTime(freq * 1.004, now); // subtle detune chorusing
+      subRatio = 1.004; // subtle detune chorusing
     } else if (program >= 56 && program < 64) {
       // Brass: saw + square
       osc.type = "sawtooth";
       subOsc.type = "square";
-      subOsc.frequency.setValueAtTime(freq, now);
+      subRatio = 1.0;
     } else {
       // Synth / Leads: square / triangle
       osc.type = "square";
       subOsc.type = "triangle";
-      subOsc.frequency.setValueAtTime(freq * 1.002, now);
+      subRatio = 1.002;
     }
 
-    osc.frequency.setValueAtTime(freq, now);
+    // Apply Portamento Glide or Instant Pitch
+    if (isGliding && Math.abs(startFreq - targetFreq) > 1) {
+      osc.frequency.setValueAtTime(startFreq, now);
+      osc.frequency.exponentialRampToValueAtTime(targetFreq, now + glideDurationSecs);
+      subOsc.frequency.setValueAtTime(startFreq * subRatio, now);
+      subOsc.frequency.exponentialRampToValueAtTime(targetFreq * subRatio, now + glideDurationSecs);
+    } else {
+      osc.frequency.setValueAtTime(targetFreq, now);
+      subOsc.frequency.setValueAtTime(targetFreq * subRatio, now);
+    }
 
     // Warm envelope
     noteGain.gain.setValueAtTime(0.0001, now);
@@ -350,7 +456,11 @@ class SpessaSynthEngine {
     osc.stop(now + duration + 0.05);
     subOsc.stop(now + duration + 0.05);
 
-    const voice = {
+    const oscRecord = {
+      osc,
+      subOsc,
+      baseNote: midiNote,
+      subRatio,
       stop: () => {
         try {
           osc.stop();
@@ -358,9 +468,20 @@ class SpessaSynthEngine {
         } catch (e) {}
       }
     };
+
+    if (!this.activeOscillators[chIdx]) this.activeOscillators[chIdx] = [];
+    this.activeOscillators[chIdx].push(oscRecord);
+
+    const voice = {
+      stop: () => oscRecord.stop()
+    };
     this.activeVoices.push(voice);
+
     setTimeout(() => {
       this.activeVoices = this.activeVoices.filter(v => v !== voice);
+      if (this.activeOscillators[chIdx]) {
+        this.activeOscillators[chIdx] = this.activeOscillators[chIdx].filter(o => o !== oscRecord);
+      }
     }, duration * 1000 + 80);
   }
 
@@ -579,12 +700,69 @@ class SpessaSynthEngine {
 
   public setChannelPitchBend(channel: number, bend: number) {
     const ch = Math.max(0, Math.min(15, channel));
+    const clampedBend = Math.max(-8192, Math.min(8191, bend));
     if (this.channelStates[ch]) {
-      this.channelStates[ch].pitchBend = Math.max(-8192, Math.min(8191, bend));
+      this.channelStates[ch].pitchBend = clampedBend;
+      const range = this.channelStates[ch].pitchBendRange || 2;
+      const bendSemitones = (clampedBend / 8192) * range;
+      const now = this.audioCtx?.currentTime || 0;
+
+      // Real-time pitch bend on currently sounding oscillators!
+      (this.activeOscillators[ch] || []).forEach(v => {
+        try {
+          const newFreq = 440 * Math.pow(2, (v.baseNote + bendSemitones - 69) / 12);
+          v.osc.frequency.setTargetAtTime(newFreq, now, 0.008);
+          if (v.subOsc) {
+            v.subOsc.frequency.setTargetAtTime(newFreq * v.subRatio, now, 0.008);
+          }
+        } catch (e) {}
+      });
     }
   }
 
-  public allNotesOff() {
+  public setChannelPitchBendRange(channel: number, semitones: number) {
+    const ch = Math.max(0, Math.min(15, channel));
+    if (this.channelStates[ch]) {
+      this.channelStates[ch].pitchBendRange = Math.max(1, Math.min(24, semitones));
+    }
+  }
+
+  public setChannelPortamento(channel: number, enabled: boolean) {
+    const ch = Math.max(0, Math.min(15, channel));
+    if (this.channelStates[ch]) {
+      this.channelStates[ch].portamentoEnabled = enabled;
+    }
+  }
+
+  public setChannelPortamentoTime(channel: number, time: number) {
+    const ch = Math.max(0, Math.min(15, channel));
+    if (this.channelStates[ch]) {
+      this.channelStates[ch].portamentoTime = Math.max(0, Math.min(127, time));
+    }
+  }
+
+  public setChannelPortamentoControl(channel: number, sourceNote: number | null) {
+    const ch = Math.max(0, Math.min(15, channel));
+    if (this.channelStates[ch]) {
+      this.channelStates[ch].portamentoControl = sourceNote !== null ? Math.max(0, Math.min(127, sourceNote)) : null;
+    }
+  }
+
+  public triggerPortamentoGlideTest(channel = 0, startNote = 48, endNote = 67) {
+    this.setChannelPortamento(channel, true);
+    // Note 1 (e.g. C3 = 48)
+    this.noteOn(channel, startNote, 95, 0.28);
+    // Note 2 (e.g. G4 = 67), glides smoothly from startNote!
+    setTimeout(() => {
+      this.noteOn(channel, endNote, 100, 0.65);
+    }, 130);
+  }
+
+  public allNotesOff(channel?: number) {
+    if (channel !== undefined) {
+      this.noteOff(channel);
+      return;
+    }
     this.activeVoices.forEach(v => {
       try { v.stop(); } catch(e) {}
     });
@@ -592,6 +770,9 @@ class SpessaSynthEngine {
     this.channelStates.forEach(ch => {
       ch.activeNoteCount = 0;
     });
+    for (let i = 0; i < 16; i++) {
+      this.noteOff(i);
+    }
   }
 
   public allSoundOff() {
@@ -626,7 +807,12 @@ class SpessaSynthEngine {
         pan: 64,
         pitchBend: 0,
         isMuted: false,
-        activeNoteCount: 0
+        activeNoteCount: 0,
+        pitchBendRange: 2,
+        portamentoEnabled: false,
+        portamentoTime: 64,
+        portamentoControl: null,
+        lastNote: null
       };
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
@@ -650,6 +836,11 @@ class SpessaSynthEngine {
       this.channelStates[i].volume = 100;
       this.channelStates[i].pan = 64;
       this.channelStates[i].pitchBend = 0;
+      this.channelStates[i].pitchBendRange = 2;
+      this.channelStates[i].portamentoEnabled = false;
+      this.channelStates[i].portamentoTime = 64;
+      this.channelStates[i].portamentoControl = null;
+      this.channelStates[i].lastNote = null;
       this.channelStates[i].isMuted = false;
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);

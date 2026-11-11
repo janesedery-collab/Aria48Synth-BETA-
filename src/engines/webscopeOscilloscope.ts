@@ -18,8 +18,10 @@ export interface WebScopeOptions {
   glowBloom: boolean;
   gridDividers: boolean;
   triggerLock: boolean;
+  phaseSync?: boolean; // Stabilize waveform at zero-crossing (true) or free-drifting phase (false)
   phosphorDecay: number; // 0.1 to 0.9
   strokeWidth: number;
+  amplifier?: number; // Waveform height multiplier (amplifies drawing taller without expanding box size)
 }
 
 export const WEBSCOPE_PRESETS: Record<WebScopePreset, {
@@ -91,6 +93,36 @@ class WebScopeEngine {
   }
 
   /**
+   * Estimate fundamental frequency in Hz to dynamically govern unsynced horizontal phase drift
+   */
+  private estimateFrequency(data: Float32Array): number {
+    let firstCross = -1;
+    let crossCount = 0;
+    let totalPeriod = 0;
+    let prevCross = -1;
+    for (let i = 0; i < data.length - 1; i++) {
+      if (data[i] <= 0 && data[i + 1] > 0.008) {
+        if (firstCross === -1) {
+          firstCross = i;
+          prevCross = i;
+        } else {
+          totalPeriod += (i - prevCross);
+          prevCross = i;
+          crossCount++;
+          if (crossCount >= 6) break;
+        }
+      }
+    }
+    if (crossCount > 0) {
+      const avgPeriodSamples = totalPeriod / crossCount;
+      if (avgPeriodSamples > 0) {
+        return Math.max(25, Math.min(6000, 44100 / avgPeriodSamples));
+      }
+    }
+    return 220;
+  }
+
+  /**
    * Render single CRT oscilloscope frame onto HTML5 Canvas
    * Retrieves live audio data from SpessaSynth or Chiptune-3
    */
@@ -111,8 +143,9 @@ class WebScopeEngine {
     const scanlines = opts.scanlines ?? true;
     const glowBloom = opts.glowBloom ?? true;
     const gridDividers = opts.gridDividers ?? true;
-    const triggerLock = opts.triggerLock ?? true;
+    const phaseSync = opts.phaseSync ?? opts.triggerLock ?? true;
     const strokeWidth = opts.strokeWidth ?? 1.8;
+    const amplifier = Math.max(0.2, Math.min(12.0, opts.amplifier ?? 1.0));
 
     // 1. Resolve AnalyserNode from SpessaSynth (MIDI) or Chiptune-3 (Tracker)
     let analyser: AnalyserNode | null = null;
@@ -171,19 +204,37 @@ class WebScopeEngine {
       }
     }
 
-    // 4. Extract Waveform Points
+    // 4. Extract Waveform Points with Phase Sync (Stabilized) or Free Drift (moving left/right based on frequency)
     const halfH = height / 2;
-    const triggerOffset = (triggerLock && hasSignal) ? this.findTriggerIndex(this.timeDomainBuffer) : 0;
-    const windowLength = Math.min(width, this.timeDomainBuffer.length - triggerOffset);
+    let triggerOffset = 0;
+
+    if (hasSignal) {
+      if (phaseSync) {
+        // Phase Sync ON: Zero-crossing trigger lock keeps waveform stabilized in normal stationary position
+        triggerOffset = this.findTriggerIndex(this.timeDomainBuffer);
+      } else {
+        // Phase Sync OFF: Waveforms move left or right depending on the sound frequency
+        const freq = this.estimateFrequency(this.timeDomainBuffer);
+        // Frequency-scaled speed: higher pitches move faster, bass notes drift gently
+        const driftSpeed = (freq * 0.045) + 0.12;
+        triggerOffset = Math.floor((performance.now() * driftSpeed) % this.timeDomainBuffer.length);
+      }
+    }
+
+    const windowLength = Math.min(width, this.timeDomainBuffer.length);
 
     ctx.beginPath();
     let started = false;
 
     if (hasSignal) {
       for (let x = 0; x < width; x++) {
-        const sampleIdx = triggerOffset + Math.floor((x / width) * windowLength);
+        // Continuous wrapping across circular time-domain buffer prevents clipping or edge jumps
+        const sampleIdx = (triggerOffset + Math.floor((x / width) * windowLength)) % this.timeDomainBuffer.length;
         const sample = this.timeDomainBuffer[sampleIdx] || 0;
-        const y = halfH - sample * (halfH * 0.9);
+        // Amplify drawing height to user's preference without changing oscilloscope box size
+        const amplified = sample * amplifier;
+        const clamped = Math.max(-1.45, Math.min(1.45, amplified));
+        const y = halfH - clamped * (halfH * 0.9);
 
         if (!started) {
           ctx.moveTo(x, y);

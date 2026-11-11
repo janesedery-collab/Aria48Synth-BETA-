@@ -88,6 +88,11 @@ class Chiptune3Engine {
     return this.audioCtx!;
   }
 
+  public getMasterGain(): GainNode | null {
+    if (!this.masterGain) this.init();
+    return this.masterGain;
+  }
+
   public getChannelAnalyser(index: number): AnalyserNode | null {
     if (this.channelAnalysers.length === 0) this.init();
     if (index >= 0 && index < this.channelAnalysers.length) {

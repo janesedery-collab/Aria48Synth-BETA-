@@ -1,4 +1,5 @@
 import { SoundFontInstrument, SoundFontBankInfo } from '../types';
+export type { SoundFontInstrument, SoundFontBankInfo };
 
 export interface SoundFontSampleVoice {
   buffer: AudioBuffer;
