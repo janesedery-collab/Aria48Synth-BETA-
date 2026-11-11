@@ -44,6 +44,13 @@ export interface OscilloscopeConfig {
   phaseSync: boolean; // Stabilize waveform at zero-crossing (true) or free-drifting phase (false)
 }
 
+export interface SoundEnginesConfig {
+  spessaSynth: boolean;    // SpessaSynth (SF2/SF3 SoundFont & 16-channel MIDI)
+  tinySynth: boolean;      // WebAudio TinySynth (GM FM Synthesis)
+  syntheticOsc: boolean;   // Hardware Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3)
+  chiptune3: boolean;      // Chiptune-3 (Amiga ProTracker / MOD / XM / S3M / IT PCM)
+}
+
 export interface ChatMessage {
   id: string;
   userId: string;

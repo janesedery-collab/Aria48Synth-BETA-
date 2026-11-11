@@ -1,6 +1,6 @@
 // @ts-ignore
 import WebAudioTinySynth from 'webaudio-tinysynth';
-import { Channel } from '../types';
+import { Channel, SoundEnginesConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
@@ -8,6 +8,73 @@ import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/websc
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
 export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
+export type { SoundEnginesConfig };
+
+export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
+  spessaSynth: true,
+  tinySynth: true,
+  syntheticOsc: true,
+  chiptune3: true,
+};
+
+let activeEnginesConfig: SoundEnginesConfig = (() => {
+  try {
+    const saved = localStorage.getItem('aria48_sound_engines');
+    if (saved) return { ...DEFAULT_SOUND_ENGINES, ...JSON.parse(saved) };
+  } catch (e) {}
+  return { ...DEFAULT_SOUND_ENGINES };
+})();
+
+const engineChangeListeners: ((config: SoundEnginesConfig) => void)[] = [];
+
+export function getSoundEnginesConfig(): SoundEnginesConfig {
+  return { ...activeEnginesConfig };
+}
+
+export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
+  activeEnginesConfig = { ...activeEnginesConfig, ...config };
+  
+  if (tinySynthMasterGain && audioCtx) {
+    tinySynthMasterGain.gain.setValueAtTime(activeEnginesConfig.tinySynth ? 0.55 : 0, audioCtx.currentTime);
+  }
+  if (syntheticMasterGain && audioCtx) {
+    syntheticMasterGain.gain.setValueAtTime(activeEnginesConfig.syntheticOsc ? 0.35 : 0, audioCtx.currentTime);
+  }
+  const spessaMaster = SpessaSynth.getMasterGain();
+  if (spessaMaster && audioCtx) {
+    spessaMaster.gain.setValueAtTime(activeEnginesConfig.spessaSynth ? 0.7 : 0, audioCtx.currentTime);
+  }
+  const chipMaster = Chiptune3.getMasterGain();
+  if (chipMaster && audioCtx) {
+    chipMaster.gain.setValueAtTime(activeEnginesConfig.chiptune3 ? 0.85 : 0, audioCtx.currentTime);
+  }
+
+  if (!activeEnginesConfig.syntheticOsc) {
+    activeSyntheticVoices.forEach(v => { try { v.stop(); } catch(e) {} });
+    activeSyntheticVoices.length = 0;
+  }
+  if (!activeEnginesConfig.spessaSynth) {
+    SpessaSynth.allNotesOff();
+  }
+  if (!activeEnginesConfig.tinySynth && tinySynthInstance) {
+    try {
+      for (let ch = 0; ch < 16; ch++) tinySynthInstance.allSoundOff?.(ch);
+    } catch(e) {}
+  }
+
+  engineChangeListeners.forEach(cb => cb({ ...activeEnginesConfig }));
+  try {
+    localStorage.setItem('aria48_sound_engines', JSON.stringify(activeEnginesConfig));
+  } catch (e) {}
+}
+
+export function onSoundEnginesChange(callback: (config: SoundEnginesConfig) => void): () => void {
+  engineChangeListeners.push(callback);
+  return () => {
+    const idx = engineChangeListeners.indexOf(callback);
+    if (idx !== -1) engineChangeListeners.splice(idx, 1);
+  };
+}
 
 let audioCtx: AudioContext | null = null;
 let tinySynthInstance: any = null;
@@ -100,18 +167,20 @@ export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
     if (ctx.state === 'suspended') ctx.resume();
 
     const synth = getTinySynth();
-    if (synth) {
+    if (synth && activeEnginesConfig.tinySynth) {
       synth.loadMIDI(arrayBuffer);
     }
 
     // Both sound engines start with a calibrated 100ms lookahead (0.10s),
     // matching TinySynth's internal playTime = actx.currentTime + 0.10s!
-    SpessaSynth.playMidi(arrayBuffer, () => {
-      isMidiPlayingInternal = false;
-      onEnded?.();
-    }, 0.10);
+    if (activeEnginesConfig.spessaSynth) {
+      SpessaSynth.playMidi(arrayBuffer, () => {
+        isMidiPlayingInternal = false;
+        onEnded?.();
+      }, 0.10);
+    }
 
-    if (synth) {
+    if (synth && activeEnginesConfig.tinySynth) {
       synth.playMIDI();
     }
 
@@ -660,14 +729,16 @@ export function playNote(
     const targetTime = ctx.currentTime + 0.005;
 
     // 1. SpessaSynth Engine
-    SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
+    if (activeEnginesConfig.spessaSynth) {
+      SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
+    }
 
     // 2. WebAudio TinySynth Engine
-    if (tinySynthInstance) {
+    if (activeEnginesConfig.tinySynth && tinySynthInstance) {
       try {
         tinySynthInstance.send([0x90 | chIdx, midiNum, volNorm], targetTime);
         setTimeout(() => {
-          if (tinySynthInstance) {
+          if (tinySynthInstance && activeEnginesConfig.tinySynth) {
             tinySynthInstance.send([0x80 | chIdx, midiNum, 0], targetTime + duration);
           }
         }, duration * 1000);
@@ -675,7 +746,9 @@ export function playNote(
     }
 
     // 3. Redundant Synthetic Oscillators Layer
-    playSyntheticOscillator(ctx, channelId, chip, freq, targetTime, duration, volume / 100, pan);
+    if (activeEnginesConfig.syntheticOsc) {
+      playSyntheticOscillator(ctx, channelId, chip, freq, targetTime, duration, volume / 100, pan);
+    }
 
   } catch (error) {
     console.log("Audio synthesis preview bypassed:", error);
@@ -734,6 +807,7 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
     Chiptune3.init(ctx);
     const masterGain = Chiptune3.getMasterGain();
     if (masterGain) {
+      masterGain.gain.setValueAtTime(activeEnginesConfig.chiptune3 ? 0.85 : 0, ctx.currentTime);
       source.connect(masterGain);
     } else {
       source.connect(ctx.destination);

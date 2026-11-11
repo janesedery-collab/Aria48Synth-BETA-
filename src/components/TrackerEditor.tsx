@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle } from 'lucide-react';
-import { Channel, SoundFontInstrument } from '../types';
-import { playNote, getAudioContext } from './AudioEngine';
+import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle, Cpu } from 'lucide-react';
+import { Channel, SoundFontInstrument, SoundEnginesConfig } from '../types';
+import { playNote, getAudioContext, getSoundEnginesConfig, setSoundEnginesConfig, onSoundEnginesChange } from './AudioEngine';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
@@ -80,9 +80,31 @@ export default function TrackerEditor({
   const [importFeedback, setImportFeedback] = useState<{ success: boolean; msg: string } | null>(null);
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
+  const [enginesConfig, setEnginesConfig] = useState<SoundEnginesConfig>(getSoundEnginesConfig());
+
   useEffect(() => {
     setSoundFontInstruments(getAvailableSoundFontInstruments());
+    return onSoundEnginesChange((newCfg) => {
+      setEnginesConfig(newCfg);
+    });
   }, []);
+
+  const handleToggleEngine = (engineKey: keyof SoundEnginesConfig) => {
+    setSoundEnginesConfig({
+      [engineKey]: !enginesConfig[engineKey]
+    });
+  };
+
+  const handleEnableAllEngines = () => {
+    setSoundEnginesConfig({
+      spessaSynth: true,
+      tinySynth: true,
+      syntheticOsc: true,
+      chiptune3: true
+    });
+  };
+
+  const activeEnginesCount = Object.values(enginesConfig).filter(Boolean).length;
 
   const totalPatterns = songPatterns?.length || 1;
   const currentPatternRows = (songPatterns && songPatterns[currentPatternIndex]) ? songPatterns[currentPatternIndex] : patterns;
@@ -520,6 +542,90 @@ export default function TrackerEditor({
 
           <span className="flex items-center gap-1 text-[10px] text-zinc-500 pl-2 border-l border-zinc-800">
             <Volume2 size={12} className="text-cyan-400"/> Click cell to edit
+          </span>
+        </div>
+      </div>
+
+      {/* SOUND ENGINES RACK (ENABLE / DISABLE SPECIFIC ENGINES) */}
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-zinc-950/85 border border-zinc-850 rounded-lg text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 text-amber-400 font-bold text-[10px] uppercase tracking-wider pr-1">
+            <Cpu size={13} className="text-amber-400" />
+            <span>Sound Engines:</span>
+          </div>
+
+          {/* SpessaSynth Engine */}
+          <button
+            id="engine-toggle-spessasynth"
+            onClick={() => handleToggleEngine('spessaSynth')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.spessaSynth
+                ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.25)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={enginesConfig.spessaSynth ? 'SpessaSynth (SF2 SoundFont & 16-CH MIDI): ACTIVE. Click to disable.' : 'SpessaSynth: MUTED. Click to enable.'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.spessaSynth ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]' : 'bg-zinc-600'}`} />
+            <span>SpessaSynth (SF2)</span>
+          </button>
+
+          {/* WebAudio TinySynth Engine */}
+          <button
+            id="engine-toggle-tinysynth"
+            onClick={() => handleToggleEngine('tinySynth')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.tinySynth
+                ? 'bg-amber-950/70 border-amber-500/60 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.25)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={enginesConfig.tinySynth ? 'WebAudio TinySynth (GM FM Synth): ACTIVE. Click to disable.' : 'TinySynth: MUTED. Click to enable.'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.tinySynth ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]' : 'bg-zinc-600'}`} />
+            <span>TinySynth (GM)</span>
+          </button>
+
+          {/* Synthetic Oscillators Engine */}
+          <button
+            id="engine-toggle-syntheticosc"
+            onClick={() => handleToggleEngine('syntheticOsc')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.syntheticOsc
+                ? 'bg-cyan-950/70 border-cyan-500/60 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.25)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={enginesConfig.syntheticOsc ? 'Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3): ACTIVE. Click to disable.' : 'Synthetic Oscillators: MUTED. Click to enable.'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.syntheticOsc ? 'bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.8)]' : 'bg-zinc-600'}`} />
+            <span>Chip Osc (Synth)</span>
+          </button>
+
+          {/* Chiptune-3 Tracker Engine */}
+          <button
+            id="engine-toggle-chiptune3"
+            onClick={() => handleToggleEngine('chiptune3')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.chiptune3
+                ? 'bg-fuchsia-950/70 border-fuchsia-500/60 text-fuchsia-300 shadow-[0_0_8px_rgba(217,70,239,0.25)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={enginesConfig.chiptune3 ? 'Chiptune-3 Tracker Engine (MOD, XM, S3M, IT PCM): ACTIVE. Click to disable.' : 'Chiptune-3: MUTED. Click to enable.'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.chiptune3 ? 'bg-fuchsia-400 shadow-[0_0_6px_rgba(232,121,249,0.8)]' : 'bg-zinc-600'}`} />
+            <span>Chiptune-3 (MOD)</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 text-[9.5px]">
+          <button
+            onClick={handleEnableAllEngines}
+            className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800 cursor-pointer font-sans"
+            title="Enable all sound engines simultaneously"
+          >
+            All On
+          </button>
+          <span className="text-zinc-600">|</span>
+          <span className="text-zinc-500 font-sans">
+            <strong className="text-zinc-300">{activeEnginesCount}</strong>/4 Active
           </span>
         </div>
       </div>
