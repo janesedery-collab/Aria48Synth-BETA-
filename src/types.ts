@@ -17,10 +17,12 @@ export interface SoundFontInstrument {
   name: string;
   bank: number;
   program: number;
+  category?: string;
   sampleRate?: number;
   rootKey?: number;
   isCustom?: boolean;
 }
+
 
 export interface SoundFontBankInfo {
   name: string;

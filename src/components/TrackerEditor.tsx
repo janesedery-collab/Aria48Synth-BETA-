@@ -698,7 +698,9 @@ export default function TrackerEditor({
                   )}
                 </div>
                 <div className="text-[8.5px] text-cyan-400 truncate uppercase mt-0.5 tracking-wider font-semibold" title={ch.chip}>
-                  {ch.chip}
+                  {ch.soundFontPreset
+                    ? (soundFontInstruments.find(i => i.id === ch.soundFontPreset)?.name.replace(/^\d+:\s*/, '') || ch.chip)
+                    : ch.chip}
                 </div>
               </div>
             ))}
@@ -796,17 +798,30 @@ export default function TrackerEditor({
 
               {/* SoundFont Instrument Assign for this Channel */}
               <div>
-                <label className="text-[10px] text-zinc-400 block mb-1">Assign Channel Instrument:</label>
+                <label className="text-[10px] text-zinc-400 block mb-1">
+                  Assign Channel Instrument ({soundFontInstruments.length} Available):
+                </label>
                 <select
                   value={channels.find(c => c.id === selectedCell.col)?.soundFontPreset || ''}
                   onChange={(e) => updateChannelInstrument(selectedCell.col, e.target.value)}
                   className="w-full bg-black border border-zinc-800 rounded p-1.5 text-[10.5px] text-cyan-300 font-mono focus:outline-none cursor-pointer"
                 >
                   <option value="">Default Chip ({channels.find(c => c.id === selectedCell.col)?.chip})</option>
-                  {soundFontInstruments.map(inst => (
-                    <option key={inst.id} value={inst.id}>
-                      {inst.name} {inst.isCustom ? '(Custom SF2)' : ''}
-                    </option>
+                  {Object.entries(
+                    soundFontInstruments.reduce((acc, inst) => {
+                      const cat = inst.category || (inst.isCustom ? 'Custom SF2 Presets' : 'General MIDI');
+                      if (!acc[cat]) acc[cat] = [];
+                      acc[cat].push(inst);
+                      return acc;
+                    }, {} as Record<string, typeof soundFontInstruments>)
+                  ).map(([category, insts]) => (
+                    <optgroup key={category} label={category} className="bg-zinc-900 text-zinc-300 font-bold">
+                      {insts.map(inst => (
+                        <option key={inst.id} value={inst.id} className="bg-black text-cyan-300 font-normal">
+                          {inst.name} {inst.isCustom ? '(SF2)' : ''}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </div>
