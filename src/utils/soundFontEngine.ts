@@ -1035,7 +1035,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
 }
 
 /**
- * Register custom audio sample into SoundFont Engine (used by MOD/XM/SF2 decoders)
+ * Register custom audio sample into SoundFont Engine (used by MOD/XM/SF2/SF3/DLS/SFZ decoders)
  */
 export function registerCustomInstrument(
   id: string, 
@@ -1045,14 +1045,16 @@ export function registerCustomInstrument(
   sampleRate = 44100,
   loopStart?: number,
   loopEnd?: number,
-  category = "Custom SF2/Samples"
+  category = "Custom SF2/Samples",
+  program?: number,
+  bank = 0
 ) {
   registeredPresets.set(id, {
     id,
     name,
     category,
-    bank: 1,
-    program: registeredPresets.size,
+    bank,
+    program: program !== undefined ? program : registeredPresets.size,
     isCustom: true,
     samples: {
       buffer,
@@ -1123,7 +1125,7 @@ export function getSoundFontBankInfo(): SoundFontBankInfo {
 }
 
 /**
- * Parse an authentic binary SoundFont 2 (.sf2) or SoundFont 3 (.sf3) file
+ * Parse any binary or definition SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, etc.)
  * Directly powered by spressasynth_core-master.zip as the responsible reader
  * and linked to spressasynth_lib-master.zip and the audio engine!
  */
@@ -1132,7 +1134,7 @@ export async function parseSoundFontFile(
   fileName: string,
   audioCtx: AudioContext
 ): Promise<{ bankInfo: SoundFontBankInfo; instruments: SoundFontInstrument[]; logs: string[] }> {
-  const result = SpessaSynthCore.parse(arrayBuffer, audioCtx, fileName);
+  const result = await SpessaSynthCore.parseAsync(arrayBuffer, audioCtx, fileName);
   loadedBankInfo = result.bankInfo;
   return {
     bankInfo: result.bankInfo,

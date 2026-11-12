@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, HelpCircle, FileAudio, RotateCw, CheckCircle2, Download, Disc3, Music, Play, Volume2 } from 'lucide-react';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
-import { parseSoundFontFile, getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
-import { getAudioContext } from './AudioEngine';
+import { getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { getAudioContext, loadSoundFontIntoCoreAndLib, isSoundFontFileName } from './AudioEngine';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { SoundFontBankInfo, SoundFontInstrument } from '../types';
 
@@ -65,33 +65,35 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   };
 
   const handleSoundFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const sfFile = e.target.files[0];
+    const inputEl = e.target;
+    if (inputEl.files && inputEl.files[0]) {
+      const sfFile = inputEl.files[0];
       const reader = new FileReader();
       reader.onload = async (event) => {
         if (event.target?.result instanceof ArrayBuffer) {
           try {
-            const ctx = getAudioContext();
-            if (!ctx) return;
-            const res = await parseSoundFontFile(event.target.result, sfFile.name, ctx);
-            SpessaSynth.loadSoundFont(event.target.result, sfFile.name);
+            const res = await loadSoundFontIntoCoreAndLib(event.target.result, sfFile.name);
+            const allInst = getAvailableSoundFontInstruments();
             setBankInfo(res.bankInfo);
-            setInstruments(res.instruments);
+            setInstruments(allInst);
             setConversionLog(prev => [
               ...prev,
-              `[SUCCESS] Uploaded SoundFont Bank: "${res.bankInfo.name}" to spressasynth_lib-master.zip`,
+              `[SUCCESS] Decoded SoundFont Bank "${res.bankInfo.name}" (${res.soundFont.format || 'SoundBank'}) via spressasynth_core-master.zip & linked into spressasynth_lib-master.zip`,
               ...res.logs
             ]);
             if (res.instruments.length > 0) {
               setSelectedAuditionInst(res.instruments[0].id);
+            } else if (allInst.length > 0) {
+              setSelectedAuditionInst(allInst[0].id);
             }
           } catch (err: any) {
             setConversionLog(prev => [
               ...prev,
-              `[ERROR] Failed reading SoundFont: ${err.message || 'Invalid SF2 file'}`
+              `[ERROR] Failed reading SoundFont: ${err.message || 'Invalid SoundFont file'}`
             ]);
           }
         }
+        inputEl.value = '';
       };
       reader.readAsArrayBuffer(sfFile);
     }
@@ -110,17 +112,12 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
     
     setTimeout(() => {
       try {
-        const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-        
-        if (ext === '.sf2' || ext === '.sf3') {
-          const ctx = getAudioContext();
-          if (ctx) {
-            parseSoundFontFile(fileBuffer, file.name, ctx).then(sfRes => {
-              setBankInfo(sfRes.bankInfo);
-              setInstruments(sfRes.instruments);
-              setConversionLog(prev => [...prev, ...sfRes.logs]);
-            });
-          }
+        if (isSoundFontFileName(file.name)) {
+          loadSoundFontIntoCoreAndLib(fileBuffer, file.name).then(sfRes => {
+            setBankInfo(sfRes.bankInfo);
+            setInstruments(getAvailableSoundFontInstruments());
+            setConversionLog(prev => [...prev, ...sfRes.logs]);
+          });
         }
 
         const result = parseChiptuneFile(file.name, fileBuffer);
@@ -268,16 +265,15 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
              type="file"
              ref={sfInputRef}
              onChange={handleSoundFontUpload}
-             accept=".sf2,.sf3"
              className="hidden"
            />
            <button
              onClick={() => sfInputRef.current?.click()}
              className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded text-[10.5px] font-bold flex items-center gap-1.5 transition cursor-pointer"
-             title="Upload custom SoundFont file"
+             title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, or any format) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
            >
              <Upload size={11} />
-             <span>Upload SF2/SF3</span>
+             <span>Load SoundFont</span>
            </button>
          </div>
        </div>

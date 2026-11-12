@@ -13,6 +13,7 @@ export interface SpessaSoundFont {
   id: string;
   name: string;
   version: string;
+  format?: string;
   instrumentCount: number;
   presets: string[];
   isCustom: boolean;
@@ -21,6 +22,7 @@ export interface SpessaSoundFont {
 
 export interface MidiChannelState {
   index: number; // 0 to 15
+  bank: number; // 0 to 128 (CC 0 Bank Select)
   program: number; // 0 to 127
   programName: string;
   volume: number; // 0 to 127 (CC 7)
@@ -38,8 +40,11 @@ export interface MidiChannelState {
 }
 
 interface SpessaVoiceRecord {
-  osc: OscillatorNode;
+  osc?: OscillatorNode;
   subOsc?: OscillatorNode;
+  bufferSource?: AudioBufferSourceNode;
+  rootKey?: number;
+  pitchCorrection?: number;
   noteGain: GainNode;
   baseNote: number;
   subRatio: number;
@@ -84,6 +89,7 @@ class SpessaSynthEngine {
   // Active soundfonts
   private soundFonts: SpessaSoundFont[] = [];
   private activeSoundFontId = "spessa-default-gm";
+  private soundFontListeners: Array<(fonts: SpessaSoundFont[], activeId: string) => void> = [];
 
   // Active playback tracking
   private isPlaying = false;
@@ -96,6 +102,7 @@ class SpessaSynthEngine {
       id: "spessa-default-gm",
       name: "SpessaSynth General MIDI SoundFont",
       version: "2.04",
+      format: "Built-in GM",
       instrumentCount: 128,
       presets: DEFAULT_GM_PROGRAMS.slice(0, 32),
       isCustom: false
@@ -105,6 +112,7 @@ class SpessaSynthEngine {
       id: "spessa-chiptune-sf2",
       name: "SpessaSynth Retro 8-bit & FM SoundFont",
       version: "1.20",
+      format: "Built-in Chip",
       instrumentCount: 64,
       presets: ["C64 SID Pulse", "Amiga Paula Lead", "OPL3 FM Brass", "GameBoy Wave", "NES Triangle Bass"],
       isCustom: false
@@ -115,6 +123,7 @@ class SpessaSynthEngine {
       const defaultProg = i === 9 ? 0 : i % 8; // Channel 10 (idx 9) is standard GM Percussion
       this.channelStates.push({
         index: i,
+        bank: i === 9 ? 128 : 0,
         program: defaultProg,
         programName: i === 9 ? "GM Standard Drum Kit" : (DEFAULT_GM_PROGRAMS[defaultProg] || `Program ${defaultProg}`),
         volume: 100,
@@ -219,30 +228,68 @@ class SpessaSynthEngine {
   public setActiveSoundFont(id: string) {
     if (this.soundFonts.some(s => s.id === id)) {
       this.activeSoundFontId = id;
+      SpessaSynthCore.setActiveSoundFont(id);
+      this.notifySoundFontListeners();
     }
   }
 
-  /**
-   * SoundFont2 (.sf2 / .sf3) intake parser
-   * Directly powered by spressasynth_core-master.zip as the responsible reader
-   * and linked into spressasynth_lib-master.zip for 16-channel synthesis!
-   */
-  public loadSoundFont(arrayBuffer: ArrayBuffer, fileName = "Custom_Bank.sf2"): SpessaSoundFont {
-    const ctx = this.audioCtx || undefined;
-    const { soundFont: coreSf } = SpessaSynthCore.parse(arrayBuffer, ctx, fileName);
+  public onSoundFontChange(listener: (fonts: SpessaSoundFont[], activeId: string) => void): () => void {
+    this.soundFontListeners.push(listener);
+    return () => {
+      this.soundFontListeners = this.soundFontListeners.filter(l => l !== listener);
+    };
+  }
 
+  private notifySoundFontListeners() {
+    const fontsCopy = [...this.soundFonts];
+    this.soundFontListeners.forEach(cb => {
+      try { cb(fontsCopy, this.activeSoundFontId); } catch (e) {}
+    });
+  }
+
+  private registerCoreSoundFont(coreSf: ReturnType<typeof SpessaSynthCore.parse>['soundFont']): SpessaSoundFont {
     const newSf: SpessaSoundFont = {
       id: coreSf.id,
       name: coreSf.name,
       version: coreSf.version,
+      format: coreSf.format,
       instrumentCount: coreSf.instrumentCount,
       presets: coreSf.presets,
       isCustom: true
     };
-
-    this.soundFonts.unshift(newSf);
+    this.soundFonts = [newSf, ...this.soundFonts.filter(s => s.id !== newSf.id)];
     this.activeSoundFontId = newSf.id;
+    SpessaSynthCore.setActiveSoundFont(newSf.id);
+    this.notifySoundFontListeners();
     return newSf;
+  }
+
+  /**
+   * Synchronous SoundFont intake parser
+   * Feeds directly into spressasynth_core-master.zip and links decoded banks into spressasynth_lib-master.zip!
+   */
+  public loadSoundFont(arrayBuffer: ArrayBuffer, fileName = "Custom_Bank.sf2", externalCtx?: AudioContext): SpessaSoundFont {
+    const ctx = this.init(externalCtx);
+    const { soundFont: coreSf } = SpessaSynthCore.parse(arrayBuffer, ctx, fileName);
+    return this.registerCoreSoundFont(coreSf);
+  }
+
+  /**
+   * Async SoundFont intake parser (supports SF2, SF3 compressed Ogg/Vorbis, DLS, GIG, SFZ, PAT, SFPACK, etc.)
+   * Feeds directly into spressasynth_core-master.zip and binds decoded sample zones into spressasynth_lib-master.zip!
+   */
+  public async loadSoundFontAsync(
+    arrayBuffer: ArrayBuffer,
+    fileName = "Custom_Bank.sf2",
+    externalCtx?: AudioContext
+  ) {
+    const ctx = this.init(externalCtx);
+    const result = await SpessaSynthCore.parseAsync(arrayBuffer, ctx, fileName);
+    const soundFont = this.registerCoreSoundFont(result.soundFont);
+    return {
+      soundFont,
+      coreResult: result
+    };
   }
 
   public getCoreEngine(): typeof SpessaSynthCore {
@@ -351,6 +398,170 @@ class SpessaSynthEngine {
 
     chState.portamentoControl = null;
     chState.lastNote = midiNote;
+
+    // Check if spressasynth_core-master.zip has a real decoded SoundFont sample for this (bank, program, midiNote)
+    const activeSf = this.getActiveSoundFont();
+    const coreBank = chIdx === 9 ? 128 : (chState.bank || 0);
+    const resolvedSample = activeSf?.isCustom
+      ? SpessaSynthCore.resolveSampleVoice(coreBank, chState.program, midiNote)
+      : null;
+
+    if (resolvedSample && resolvedSample.buffer) {
+      const noteGain = ctx.createGain();
+      const source = ctx.createBufferSource();
+      source.buffer = resolvedSample.buffer;
+
+      const rootPitch = resolvedSample.rootKey || 60;
+      const corrSemis = (resolvedSample.pitchCorrection || 0) / 100;
+      const semitoneDelta = chIdx === 9 ? 0 : (midiNote + bendSemitones - rootPitch + corrSemis);
+      const rate = Math.max(0.0625, Math.min(16.0, Math.pow(2, semitoneDelta / 12)));
+      source.playbackRate.setValueAtTime(rate, now);
+
+      if (
+        resolvedSample.loopStart !== undefined &&
+        resolvedSample.loopEnd !== undefined &&
+        resolvedSample.loopEnd > resolvedSample.loopStart
+      ) {
+        source.loop = true;
+        source.loopStart = resolvedSample.loopStart;
+        source.loopEnd = resolvedSample.loopEnd;
+      }
+
+      const sampleVol = Math.max(0.0005, (velocity / 127) * (resolvedSample.attenuationGain ?? 1.0) * 0.42);
+      noteGain.gain.setValueAtTime(0.0001, now);
+      noteGain.gain.linearRampToValueAtTime(sampleVol, now + 0.008);
+
+      source.connect(noteGain);
+      noteGain.connect(chGain);
+      source.start(now);
+
+      const sampleVoiceRecord: SpessaVoiceRecord = {
+        bufferSource: source,
+        rootKey: rootPitch,
+        pitchCorrection: resolvedSample.pitchCorrection,
+        noteGain,
+        baseNote: midiNote,
+        subRatio: 1.0,
+        startTime: now,
+        hasScheduledStop: false,
+        pendingRelease: false,
+        fallbackTimer: null,
+        release: () => {},
+        forceStop: () => {}
+      };
+
+      const voiceObj = {
+        stop: () => sampleVoiceRecord.forceStop()
+      };
+
+      sampleVoiceRecord.release = (releaseTime?: number) => {
+        if (sampleVoiceRecord.hasScheduledStop) return;
+        sampleVoiceRecord.hasScheduledStop = true;
+        sampleVoiceRecord.pendingRelease = false;
+        if (sampleVoiceRecord.fallbackTimer) {
+          clearTimeout(sampleVoiceRecord.fallbackTimer);
+          sampleVoiceRecord.fallbackTimer = null;
+        }
+
+        const tReq = releaseTime !== undefined && Number.isFinite(releaseTime)
+          ? releaseTime
+          : ctx.currentTime;
+        const effectiveRelease = Math.max(ctx.currentTime, sampleVoiceRecord.startTime + 0.03, tReq);
+        const releaseTau = chIdx === 9 ? 0.045 : 0.06;
+        const stopTail = releaseTau * 5.2;
+
+        try {
+          if (typeof noteGain.gain.cancelAndHoldAtTime === 'function') {
+            noteGain.gain.cancelAndHoldAtTime(effectiveRelease);
+          } else {
+            noteGain.gain.cancelScheduledValues(effectiveRelease);
+          }
+          noteGain.gain.setTargetAtTime(0.0001, effectiveRelease, releaseTau);
+          const stopAt = effectiveRelease + stopTail;
+          source.stop(stopAt);
+
+          const cleanupMs = Math.max(80, (stopAt - ctx.currentTime) * 1000 + 60);
+          setTimeout(() => {
+            try {
+              source.disconnect();
+              noteGain.disconnect();
+            } catch (e) {}
+            this.activeVoices = this.activeVoices.filter(v => v !== voiceObj);
+            if (this.activeOscillators[chIdx]) {
+              this.activeOscillators[chIdx] = this.activeOscillators[chIdx].filter(o => o !== sampleVoiceRecord);
+            }
+            if (chState.activeNoteCount > 0) chState.activeNoteCount--;
+          }, cleanupMs);
+        } catch (e) {}
+      };
+
+      sampleVoiceRecord.forceStop = () => {
+        if (sampleVoiceRecord.fallbackTimer) {
+          clearTimeout(sampleVoiceRecord.fallbackTimer);
+          sampleVoiceRecord.fallbackTimer = null;
+        }
+        const nowTime = ctx.currentTime;
+        try {
+          if (typeof noteGain.gain.cancelAndHoldAtTime === 'function') {
+            noteGain.gain.cancelAndHoldAtTime(nowTime);
+          } else {
+            noteGain.gain.cancelScheduledValues(nowTime);
+          }
+          noteGain.gain.setTargetAtTime(0.0001, nowTime, 0.008);
+          if (!sampleVoiceRecord.hasScheduledStop) {
+            sampleVoiceRecord.hasScheduledStop = true;
+            source.stop(Math.max(nowTime + 0.045, sampleVoiceRecord.startTime + 0.005));
+          }
+        } catch (e) {}
+        setTimeout(() => {
+          try {
+            source.disconnect();
+            noteGain.disconnect();
+          } catch (e) {}
+          this.activeVoices = this.activeVoices.filter(v => v !== voiceObj);
+          if (this.activeOscillators[chIdx]) {
+            this.activeOscillators[chIdx] = this.activeOscillators[chIdx].filter(o => o !== sampleVoiceRecord);
+          }
+          if (chState.activeNoteCount > 0) chState.activeNoteCount--;
+        }, 65);
+      };
+
+      if (chIdx !== 9) {
+        const existingList = this.activeOscillators[chIdx] || [];
+        for (const prev of existingList) {
+          if (prev.baseNote === midiNote && !prev.hasScheduledStop) {
+            prev.release(now);
+          }
+        }
+      }
+
+      if (!this.activeOscillators[chIdx]) this.activeOscillators[chIdx] = [];
+      this.activeOscillators[chIdx].push(sampleVoiceRecord);
+      this.activeVoices.push(voiceObj);
+      chState.activeNoteCount++;
+
+      if (duration !== undefined && Number.isFinite(duration)) {
+        const safeDur = Math.max(0.06, duration);
+        sampleVoiceRecord.release(now + safeDur);
+      } else if (!source.loop) {
+        // Non-looped sample finishes naturally at buffer end, plus safety watchdog
+        const naturalDur = resolvedSample.buffer.duration / rate;
+        const watchMs = Math.max(200, (now + naturalDur + 0.15 - ctx.currentTime) * 1000);
+        sampleVoiceRecord.fallbackTimer = setTimeout(() => {
+          if (!sampleVoiceRecord.hasScheduledStop) {
+            sampleVoiceRecord.release(ctx.currentTime);
+          }
+        }, watchMs);
+      } else {
+        const safetyMs = Math.max(5000, (now + 24 - ctx.currentTime) * 1000);
+        sampleVoiceRecord.fallbackTimer = setTimeout(() => {
+          if (!sampleVoiceRecord.hasScheduledStop) {
+            sampleVoiceRecord.release(ctx.currentTime);
+          }
+        }, safetyMs);
+      }
+      return;
+    }
 
     // Distinguish GM Drums (Channel 10, idx 9) vs Melodic instruments
     if (chIdx === 9) {
@@ -858,6 +1069,13 @@ class SpessaSynthEngine {
     }
   }
 
+  public setChannelBank(channel: number, bank: number) {
+    const ch = Math.max(0, Math.min(15, channel));
+    if (this.channelStates[ch]) {
+      this.channelStates[ch].bank = Math.max(0, Math.min(128, bank));
+    }
+  }
+
   public setChannelProgram(channel: number, program: number) {
     const ch = Math.max(0, Math.min(15, channel));
     const prog = Math.max(0, Math.min(127, program));
@@ -891,10 +1109,17 @@ class SpessaSynthEngine {
 
       (this.activeOscillators[ch] || []).forEach(v => {
         try {
-          const newFreq = Math.max(16, 440 * Math.pow(2, (v.baseNote + bendSemitones - 69) / 12));
-          v.osc.frequency.setTargetAtTime(newFreq, t, 0.008);
-          if (v.subOsc) {
-            v.subOsc.frequency.setTargetAtTime(newFreq * v.subRatio, t, 0.008);
+          if (v.osc) {
+            const newFreq = Math.max(16, 440 * Math.pow(2, (v.baseNote + bendSemitones - 69) / 12));
+            v.osc.frequency.setTargetAtTime(newFreq, t, 0.008);
+            if (v.subOsc) {
+              v.subOsc.frequency.setTargetAtTime(newFreq * v.subRatio, t, 0.008);
+            }
+          } else if (v.bufferSource) {
+            const rootPitch = v.rootKey ?? 60;
+            const corrSemis = (v.pitchCorrection ?? 0) / 100;
+            const newRate = Math.max(0.0625, Math.min(16.0, Math.pow(2, (v.baseNote + bendSemitones - rootPitch + corrSemis) / 12)));
+            v.bufferSource.playbackRate.setTargetAtTime(newRate, t, 0.008);
           }
         } catch (e) {}
       });
@@ -992,6 +1217,7 @@ class SpessaSynthEngine {
       const defProg = i === 9 ? 0 : i % 8;
       this.channelStates[i] = {
         index: i,
+        bank: i === 9 ? 128 : 0,
         program: defProg,
         programName: i === 9 ? "GM Standard Drum Kit" : (DEFAULT_GM_PROGRAMS[defProg] || `Program ${defProg}`),
         volume: 100,
@@ -1024,6 +1250,7 @@ class SpessaSynthEngine {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
       const defProg = 0;
+      this.channelStates[i].bank = i === 9 ? 128 : 0;
       this.channelStates[i].program = defProg;
       this.channelStates[i].programName = i === 9 ? "GS Standard Drum Kit" : (DEFAULT_GM_PROGRAMS[defProg] || `Program ${defProg}`);
       this.channelStates[i].volume = 100;
@@ -1053,6 +1280,7 @@ class SpessaSynthEngine {
   public sendXGReset(): { message: string; timestamp: number } {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
+      this.channelStates[i].bank = i === 9 ? 128 : 0;
       this.channelStates[i].volume = 100;
       this.channelStates[i].expression = 127;
       this.channelStates[i].pan = 64;
@@ -1074,6 +1302,7 @@ class SpessaSynthEngine {
   public sendGM2Reset(): { message: string; timestamp: number } {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
+      this.channelStates[i].bank = i === 9 ? 128 : 0;
       this.channelStates[i].expression = 127;
       this.channelStates[i].sustainPedal = false;
       this.channelStates[i].pitchBend = 0;

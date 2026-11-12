@@ -1,5 +1,6 @@
 import { INITIAL_PATTERNS } from '../initialPatterns';
-import { getAudioContext, renderModToAudioBuffer } from '../components/AudioEngine';
+import { getAudioContext, loadSoundFontIntoCoreAndLib, renderModToAudioBuffer } from '../components/AudioEngine';
+import { isSoundFontFileName } from '../engines/spressasynthCore';
 import { registerCustomInstrument } from './soundFontEngine';
 
 // Exact ProTracker Period Table (Octaves 2 through 6)
@@ -175,7 +176,7 @@ export function parseChiptuneFile(
     result = parseSunVox(arrayBuffer, logs);
   } else if (extension === '.wav' || extension === '.mp3' || extension === '.ogg' || extension === '.flac') {
     result = parseAudioStream(fileName, arrayBuffer, logs);
-  } else if (extension === '.sf2' || extension === '.sf3') {
+  } else if (isSoundFontFileName(fileName)) {
     result = parseSoundFontAsSequence(fileName, arrayBuffer, logs);
   } else {
     // Fallback JSON format
@@ -1301,6 +1302,9 @@ function parseAudioStream(fileName: string, arrayBuffer: ArrayBuffer, logs: stri
  * 13. SOUNDFONT DEMO SEQUENCE (.sf2 / .sf3)
  */
 function parseSoundFontAsSequence(fileName: string, arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
+  // Feed the uploaded SoundFont into spressasynth_core-master.zip -> spressasynth_lib-master.zip
+  void loadSoundFontIntoCoreAndLib(arrayBuffer, fileName).catch(() => {});
+
   const allPats: any[][] = [];
   const chords = [
     ["C-4", "E-4", "G-4", "B-4"],

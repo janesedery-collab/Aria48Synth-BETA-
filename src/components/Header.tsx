@@ -9,9 +9,8 @@ import RecentSongsModal from './RecentSongsModal';
 import ShareApkModal from './ShareApkModal';
 import CloudSongsModal from './CloudSongsModal';
 import { addRecentSong, RecentSong, saveSelectedSoundFont } from '../utils/recentSongsManager';
-import { SpessaSynth } from '../engines/spressasynthLib';
-import { parseSoundFontFile, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
-import { getAudioContext } from './AudioEngine';
+import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { loadSoundFontIntoCoreAndLib, SOUNDFONT_ACCEPT_ATTR } from './AudioEngine';
 import { onAuthUserChanged, User } from '../utils/cloudSongsService';
 
 interface HeaderProps {
@@ -136,24 +135,19 @@ export default function Header({
   };
 
   const handleHeaderSoundFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const inputEl = e.target;
+    const file = inputEl.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = async (event) => {
         const buffer = event.target?.result as ArrayBuffer;
         if (buffer) {
           try {
-            // Load into spressasynth_lib
-            const spessaSf = SpessaSynth.loadSoundFont(buffer, file.name);
+            // Feed directly into spressasynth_core-master.zip and link into spressasynth_lib-master.zip
+            const { soundFont: spessaSf } = await loadSoundFontIntoCoreAndLib(buffer, file.name);
             saveSelectedSoundFont(spessaSf.id);
-            
-            // Also parse into WebAudio Sampler for custom instruments
-            const ctx = getAudioContext();
-            if (ctx) {
-              await parseSoundFontFile(buffer, file.name, ctx);
-            }
-            
-            // Put the SoundFont's instruments into the song channels
+
+            // Map decoded SoundFont instruments onto song channels
             if (setChannels && channels) {
               const sfInstruments = getAvailableSoundFontInstruments();
               if (sfInstruments.length > 0) {
@@ -168,13 +162,14 @@ export default function Header({
               }
             }
 
-            setSfBannerMessage(`SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip into spressasynth_lib and assigned to song channels!`);
+            setSfBannerMessage(`SoundFont "${spessaSf.name}" (${spessaSf.format || 'SoundBank'}, ${spessaSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip into spressasynth_lib!`);
             setTimeout(() => setSfBannerMessage(null), 4500);
           } catch (err: any) {
             setSfBannerMessage(`SoundFont error: ${err.message}`);
             setTimeout(() => setSfBannerMessage(null), 4500);
           }
         }
+        inputEl.value = '';
       };
       reader.readAsArrayBuffer(file);
     }
@@ -376,7 +371,7 @@ export default function Header({
                <span>Import Song</span>
              </button>
 
-             {/* SEPARATE BUTTON TO ADD SOUNDFONTS INTO SPRESSASYNTH */}
+             {/* SEPARATE BUTTON TO ADD SOUNDFONTS INTO SPRESSASYNTH_CORE -> SPRESSASYNTH_LIB */}
              <button
                id="header-soundfont-btn"
                onClick={() => {
@@ -384,7 +379,7 @@ export default function Header({
                  if (sfInput) sfInput.click();
                }}
                className="p-1 px-2.5 bg-emerald-950/40 border border-emerald-600/50 hover:border-emerald-400 text-emerald-300 hover:text-white hover:bg-emerald-900/50 rounded font-bold text-[9.5px] uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ml-2"
-               title="Add SoundFont (.sf2, .sf3, .dls) directly into spressasynth_lib-master.zip"
+               title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, or any format) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
              >
                <Disc3 size={11} className="text-emerald-400 animate-pulse" />
                <span>+ SoundFont</span>
@@ -393,7 +388,6 @@ export default function Header({
                id="header-soundfont-file-input"
                type="file"
                className="hidden"
-               accept=".sf2,.sf3,.dls"
                onChange={handleHeaderSoundFontUpload}
              />
 
@@ -401,7 +395,7 @@ export default function Header({
                id="player-tracker-file-file-btn"
                type="file" 
                className="hidden"
-               accept=".mid,.midi,.mod,.xm,.s3m,.it,.sid,.nsf,.gbs,.vgm,.spc,.ftm,.sf2,.sf3,.wav,.mp3,.json"
+               accept={`.mid,.midi,.mod,.xm,.s3m,.it,.sid,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
                onChange={(e) => {
                  const file = e.target.files?.[0];
                  if (file) {

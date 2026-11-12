@@ -9,8 +9,8 @@ import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS, WebScopePreset } from '../engines/webscopeOscilloscope';
 import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
-import { getAvailableSoundFontInstruments, parseSoundFontFile } from '../utils/soundFontEngine';
-import { getAudioContext } from './AudioEngine';
+import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { loadSoundFontIntoCoreAndLib } from './AudioEngine';
 import { saveAmplifier } from '../utils/cookieStorage';
 
 interface MixerEQProps {
@@ -191,40 +191,44 @@ export default function MixerEQ({
 
   const sfUploadInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    return SpessaSynth.onSoundFontChange((fonts) => {
+      setSoundFonts(fonts);
+      setActiveSoundFont(SpessaSynth.getActiveSoundFont());
+    });
+  }, []);
+
   const handleSoundFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
+    const inputEl = e.target;
+    if (inputEl.files && inputEl.files[0]) {
+      const file = inputEl.files[0];
       const reader = new FileReader();
       reader.onload = async (evt) => {
         if (evt.target?.result instanceof ArrayBuffer) {
           try {
-            const newSf = SpessaSynth.loadSoundFont(evt.target.result, file.name);
+            const { soundFont: newSf } = await loadSoundFontIntoCoreAndLib(evt.target.result, file.name);
+            saveSelectedSoundFont(newSf.id);
             setSoundFonts(SpessaSynth.getLoadedSoundFonts());
             setActiveSoundFont(newSf);
-            const ctx = getAudioContext();
-            if (ctx) {
-              await parseSoundFontFile(evt.target.result, file.name, ctx);
+
+            const sfInstruments = getAvailableSoundFontInstruments();
+            if (setChannels && channels && sfInstruments.length > 0) {
+              setChannels(prev => prev.map((ch, idx) => {
+                const inst = sfInstruments[idx % sfInstruments.length];
+                return {
+                  ...ch,
+                  chip: 'General MIDI (SoundFont)',
+                  soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                };
+              }));
             }
-            // Put the SoundFont's real instruments into the song's channels
-            if (setChannels && channels) {
-              const sfInstruments = getAvailableSoundFontInstruments();
-              if (sfInstruments.length > 0) {
-                setChannels(prev => prev.map((ch, idx) => {
-                  const inst = sfInstruments[idx % sfInstruments.length];
-                  return {
-                    ...ch,
-                    chip: 'General MIDI (SoundFont)',
-                    soundFontPreset: inst ? inst.id : ch.soundFontPreset
-                  };
-                }));
-              }
-            }
-            setSfFeedback(`Loaded SoundFont Bank "${newSf.name}" (${newSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip into spressasynth_lib and applied to song channels!`);
+            setSfFeedback(`Loaded SoundFont "${newSf.name}" (${newSf.format || 'SoundBank'}, ${newSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip into spressasynth_lib!`);
             setTimeout(() => setSfFeedback(null), 4500);
           } catch (err: any) {
             setSfFeedback(`Error loading SoundFont: ${err.message}`);
           }
         }
+        inputEl.value = '';
       };
       reader.readAsArrayBuffer(file);
     }
@@ -279,7 +283,6 @@ export default function MixerEQ({
             type="file" 
             ref={sfUploadInputRef} 
             onChange={handleSoundFontUpload} 
-            accept=".sf2,.sf3,.dls" 
             className="hidden" 
           />
 
@@ -305,10 +308,10 @@ export default function MixerEQ({
           <button
             onClick={() => sfUploadInputRef.current?.click()}
             className="px-2.5 py-1 bg-zinc-850 hover:bg-zinc-750 text-zinc-200 border border-zinc-700 rounded-lg text-[10px] font-bold flex items-center gap-1 transition cursor-pointer"
-            title="Load external SoundFont2 (.sf2 / .sf3) into spressasynth_lib-master.zip"
+            title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, etc.) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
           >
             <Upload size={11} />
-            <span>Load SF2</span>
+            <span>Load SoundFont</span>
           </button>
 
           <button

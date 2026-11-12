@@ -1,11 +1,19 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle, Cpu } from 'lucide-react';
 import { Channel, SoundFontInstrument, SoundEnginesConfig } from '../types';
-import { playNote, getAudioContext, getSoundEnginesConfig, setSoundEnginesConfig, onSoundEnginesChange } from './AudioEngine';
+import {
+  playNote,
+  getSoundEnginesConfig,
+  setSoundEnginesConfig,
+  onSoundEnginesChange,
+  loadSoundFontIntoCoreAndLib,
+  isSoundFontFileName,
+  SOUNDFONT_ACCEPT_ATTR
+} from './AudioEngine';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
-import { parseSoundFontFile, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import ExportStudioModal from './ExportStudioModal';
 import { addRecentSong } from '../utils/recentSongsManager';
 
@@ -152,22 +160,18 @@ export default function TrackerEditor({
       const selected = e.target.files[0];
       const extension = selected.name.substring(selected.name.lastIndexOf('.')).toLowerCase();
 
-      if (extension === '.sf2' || extension === '.sf3') {
+      if (isSoundFontFileName(selected.name)) {
         const reader = new FileReader();
         reader.onload = async (event) => {
           if (event.target?.result instanceof ArrayBuffer) {
             try {
-              const ctx = getAudioContext();
-              if (!ctx) throw new Error("Audio Context unavailable");
-              // Ingest into spressasynth_lib
-              const spessaSf = SpessaSynth.loadSoundFont(event.target.result, selected.name);
+              // Feed directly into spressasynth_core-master.zip -> spressasynth_lib-master.zip
+              const { soundFont: spessaSf } = await loadSoundFontIntoCoreAndLib(event.target.result, selected.name);
               saveSelectedSoundFont(spessaSf.id);
-
-              const res = await parseSoundFontFile(event.target.result, selected.name, ctx);
-              setSoundFontInstruments(res.instruments);
+              setSoundFontInstruments(getAvailableSoundFontInstruments());
               setImportFeedback({
                 success: true,
-                msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} instruments) decoded via spressasynth_core into spressasynth_lib!`
+                msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.format || 'SoundBank'}, ${spessaSf.instrumentCount} presets) via spressasynth_core-master.zip -> spressasynth_lib!`
               });
               setTimeout(() => {
                 setIsImportModalOpen(false);
@@ -176,7 +180,7 @@ export default function TrackerEditor({
             } catch (err: any) {
               setImportFeedback({
                 success: false,
-                msg: `SoundFont parsing error: ${err.message || "Corrupt SF2 structure"}`
+                msg: `SoundFont parsing error: ${err.message || "Invalid SoundFont file"}`
               });
             }
           }
@@ -273,33 +277,38 @@ export default function TrackerEditor({
   const activeRowRef = useRef<HTMLDivElement>(null);
   const sfDirectInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    return SpessaSynth.onSoundFontChange(() => {
+      setSoundFontInstruments(getAvailableSoundFontInstruments());
+    });
+  }, []);
+
   const handleDirectSoundFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
+    const inputEl = e.target;
+    if (inputEl.files && inputEl.files[0]) {
+      const file = inputEl.files[0];
       const reader = new FileReader();
       reader.onload = async (evt) => {
         if (evt.target?.result instanceof ArrayBuffer) {
           try {
-            const ctx = getAudioContext();
-            const spessaSf = SpessaSynth.loadSoundFont(evt.target.result, file.name);
+            const { soundFont: spessaSf } = await loadSoundFontIntoCoreAndLib(evt.target.result, file.name);
             saveSelectedSoundFont(spessaSf.id);
-            if (ctx) {
-              const res = await parseSoundFontFile(evt.target.result, file.name, ctx);
-              setSoundFontInstruments(res.instruments);
-              if (setChannels && channels && res.instruments.length > 0) {
-                setChannels(prev => prev.map((ch, idx) => {
-                  const inst = res.instruments[idx % res.instruments.length];
-                  return {
-                    ...ch,
-                    chip: 'General MIDI (SoundFont)',
-                    soundFontPreset: inst ? inst.id : ch.soundFontPreset
-                  };
-                }));
-              }
+            const updatedInstruments = getAvailableSoundFontInstruments();
+            setSoundFontInstruments(updatedInstruments);
+
+            if (setChannels && channels && updatedInstruments.length > 0) {
+              setChannels(prev => prev.map((ch, idx) => {
+                const inst = updatedInstruments[idx % updatedInstruments.length];
+                return {
+                  ...ch,
+                  chip: 'General MIDI (SoundFont)',
+                  soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                };
+              }));
             }
             setImportFeedback({
               success: true,
-              msg: `SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) decoded by spressasynth_core and registered into spressasynth_lib!`
+              msg: `SoundFont "${spessaSf.name}" (${spessaSf.format || 'SoundBank'}, ${spessaSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip and linked to spressasynth_lib!`
             });
             setTimeout(() => setImportFeedback(null), 3500);
           } catch (err: any) {
@@ -310,6 +319,7 @@ export default function TrackerEditor({
             setTimeout(() => setImportFeedback(null), 3500);
           }
         }
+        inputEl.value = '';
       };
       reader.readAsArrayBuffer(file);
     }
@@ -538,12 +548,12 @@ export default function TrackerEditor({
             <span>Export Studio</span>
           </button>
 
-          {/* DEDICATED BUTTON TO ADD SOUNDFONTS INTO SPRESSASYNTH */}
+          {/* DEDICATED BUTTON TO ADD SOUNDFONTS INTO SPRESSASYNTH_CORE -> SPRESSASYNTH_LIB */}
           <button
             id="tracker-add-soundfont-btn"
             onClick={() => sfDirectInputRef.current?.click()}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950/50 text-emerald-300 border border-emerald-600/50 hover:bg-emerald-900/60 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm"
-            title="Add SoundFont (.sf2, .sf3, .dls) into spressasynth_lib-master.zip"
+            title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, or any format) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
           >
             <Disc3 size={12} className="text-emerald-400 animate-pulse" />
             <span>+ SoundFont</span>
@@ -552,7 +562,6 @@ export default function TrackerEditor({
             type="file"
             ref={sfDirectInputRef}
             className="hidden"
-            accept=".sf2,.sf3,.dls"
             onChange={handleDirectSoundFontUpload}
           />
 
@@ -912,7 +921,7 @@ export default function TrackerEditor({
                   type="file"
                   ref={fileInputRef2}
                   onChange={handleFileImport}
-                  accept=".mid,.midi,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sf2,.sf3,.wav,.mp3,.ogg,.flac,.json"
+                  accept={`.mid,.midi,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                   className="hidden"
                 />
                 <Disc3 size={28} className="text-cyan-400 animate-spin-slow" />
@@ -920,7 +929,7 @@ export default function TrackerEditor({
                   Choose Music or SoundFont File
                 </span>
                 <span className="text-[9px] text-zinc-500 font-sans max-w-sm leading-normal">
-                  Standard MIDI (.mid), ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3), WAV, MP3, and JSON.
+                  Standard MIDI (.mid), ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat), WAV, MP3, and JSON.
                 </span>
               </div>
 

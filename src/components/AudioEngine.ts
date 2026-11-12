@@ -7,10 +7,34 @@ import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/websc
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
 
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
-export { SpessaSynthCore, SPRESSASYNTH_CORE_ENGINE_ID } from '../engines/spressasynthCore';
+export {
+  SpessaSynthCore,
+  SPRESSASYNTH_CORE_ENGINE_ID,
+  SOUNDFONT_ACCEPT_ATTR,
+  isSoundFontFileName
+} from '../engines/spressasynthCore';
 export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
 export type { SoundEnginesConfig };
+
+/**
+ * Unified SoundFont ingestion pipeline:
+ * Feeds ANY SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, etc.)
+ * into spressasynth_core-master.zip and links decoded banks & sample zones directly into spressasynth_lib-master.zip.
+ */
+export async function loadSoundFontIntoCoreAndLib(arrayBuffer: ArrayBuffer, fileName: string) {
+  const ctx = getAudioContext() || SpessaSynth.init();
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch (e) {}
+  }
+  const { soundFont, coreResult } = await SpessaSynth.loadSoundFontAsync(arrayBuffer, fileName, ctx);
+  return {
+    soundFont,
+    bankInfo: coreResult.bankInfo,
+    instruments: coreResult.instruments,
+    logs: coreResult.logs
+  };
+}
 
 export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
   spessaSynth: true,
@@ -136,7 +160,9 @@ export function hookTinySynthEvents(synth: any) {
       } else if (cmd === 0xb0) { // Control Change
         const cc = msg[1];
         const val = msg[2];
-        if (cc === 7) {
+        if (cc === 0) {
+          SpessaSynth.setChannelBank(ch, val);
+        } else if (cc === 7) {
           SpessaSynth.setChannelVolume(ch, val, t);
         } else if (cc === 10) {
           SpessaSynth.setChannelPan(ch, val, t);
