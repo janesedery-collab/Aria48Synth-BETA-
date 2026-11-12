@@ -1,4 +1,5 @@
 import { SoundFontInstrument, SoundFontBankInfo } from '../types';
+import { SpessaSynthCore } from '../engines/spressasynthCore';
 export type { SoundFontInstrument, SoundFontBankInfo };
 
 export interface SoundFontSampleVoice {
@@ -1123,201 +1124,23 @@ export function getSoundFontBankInfo(): SoundFontBankInfo {
 
 /**
  * Parse an authentic binary SoundFont 2 (.sf2) or SoundFont 3 (.sf3) file
+ * Directly powered by spressasynth_core-master.zip as the responsible reader
+ * and linked to spressasynth_lib-master.zip and the audio engine!
  */
 export async function parseSoundFontFile(
   arrayBuffer: ArrayBuffer, 
   fileName: string,
   audioCtx: AudioContext
 ): Promise<{ bankInfo: SoundFontBankInfo; instruments: SoundFontInstrument[]; logs: string[] }> {
-  const logs: string[] = [
-    `[SF2/SF3] Initializing parser for: ${fileName} (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB)...`
-  ];
-  const u8 = new Uint8Array(arrayBuffer);
-  const view = new DataView(arrayBuffer);
-
-  // Check RIFF header
-  const riffMagic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-  if (riffMagic !== 'RIFF') {
-    throw new Error("Invalid SoundFont file: Missing 'RIFF' header signature");
-  }
-
-  const formatMagic = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]);
-  if (formatMagic !== 'sfbk') {
-    throw new Error(`Unsupported SoundFont format '${formatMagic}'. Expected 'sfbk'.`);
-  }
-
-  logs.push(`[SF2/SF3] Valid SoundFont Bank 'sfbk' verified.`);
-
-  let bankName = fileName.replace(/\.[^/.]+$/, "");
-  let bankVersion = "2.04";
-  let bankAuthor = "Custom SoundFont";
-  let sampleDataStart = 0;
-  let sampleDataLen = 0;
-  const sampleHeaders: any[] = [];
-  const presetHeaders: any[] = [];
-
-  // Traverse RIFF LIST chunks
-  let offset = 12;
-  while (offset + 8 <= u8.length) {
-    const chunkId = String.fromCharCode(u8[offset], u8[offset + 1], u8[offset + 2], u8[offset + 3]);
-    const chunkLen = view.getUint32(offset + 4, true);
-    const chunkEnd = offset + 8 + chunkLen;
-
-    if (chunkId === 'LIST') {
-      const listType = String.fromCharCode(u8[offset + 8], u8[offset + 9], u8[offset + 10], u8[offset + 11]);
-      logs.push(`[SF2/SF3] Processing Chunk: LIST '${listType}' (size: ${(chunkLen / 1024).toFixed(1)} KB)`);
-
-      let subOffset = offset + 12;
-      while (subOffset + 8 <= chunkEnd && subOffset + 8 <= u8.length) {
-        const subId = String.fromCharCode(u8[subOffset], u8[subOffset + 1], u8[subOffset + 2], u8[subOffset + 3]);
-        const subLen = view.getUint32(subOffset + 4, true);
-        const subData = subOffset + 8;
-
-        if (listType === 'INFO') {
-          // Metadata subchunks
-          let str = "";
-          for (let s = 0; s < Math.min(subLen, 64); s++) {
-            if (u8[subData + s] === 0) break;
-            str += String.fromCharCode(u8[subData + s]);
-          }
-          if (subId === 'INAM' && str.trim()) bankName = str.trim();
-          if (subId === 'IENG' && str.trim()) bankAuthor = str.trim();
-          if (subId === 'ifil') {
-            const major = view.getUint16(subData, true);
-            const minor = view.getUint16(subData + 2, true);
-            bankVersion = `${major}.${minor}`;
-          }
-        } else if (listType === 'sdta') {
-          // PCM Sample data
-          if (subId === 'smpl') {
-            sampleDataStart = subData;
-            sampleDataLen = subLen;
-            logs.push(`[SF2/SF3] Found 16-bit PCM Sample Stream: ${(subLen / 1024).toFixed(1)} KB`);
-          }
-        } else if (listType === 'pdta') {
-          // Sample Headers (shdr)
-          if (subId === 'shdr') {
-            const shdrSize = 46;
-            const count = Math.floor(subLen / shdrSize);
-            logs.push(`[SF2/SF3] Sample Headers found: ${count}`);
-            for (let i = 0; i < count; i++) {
-              const rec = subData + (i * shdrSize);
-              let sName = "";
-              for (let n = 0; n < 20; n++) {
-                if (u8[rec + n] === 0) break;
-                sName += String.fromCharCode(u8[rec + n]);
-              }
-              const sStart = view.getUint32(rec + 20, true);
-              const sEnd = view.getUint32(rec + 24, true);
-              const sStartLoop = view.getUint32(rec + 28, true);
-              const sEndLoop = view.getUint32(rec + 32, true);
-              const sSampleRate = view.getUint32(rec + 36, true);
-              const sOriginalPitch = u8[rec + 40];
-              const sPitchCorrection = view.getInt8(rec + 41);
-
-              if (sName.trim() && sEnd > sStart) {
-                sampleHeaders.push({
-                  name: sName.trim(),
-                  start: sStart,
-                  end: sEnd,
-                  startLoop: sStartLoop,
-                  endLoop: sEndLoop,
-                  sampleRate: sSampleRate || 44100,
-                  rootKey: sOriginalPitch > 0 && sOriginalPitch < 128 ? sOriginalPitch : 60,
-                  pitchCorrection: sPitchCorrection
-                });
-              }
-            }
-          } else if (subId === 'phdr') {
-            // Preset Headers (phdr)
-            const phdrSize = 38;
-            const pCount = Math.floor(subLen / phdrSize);
-            logs.push(`[SF2/SF3] Presets found: ${pCount}`);
-            for (let i = 0; i < pCount; i++) {
-              const rec = subData + (i * phdrSize);
-              let pName = "";
-              for (let n = 0; n < 20; n++) {
-                if (u8[rec + n] === 0) break;
-                pName += String.fromCharCode(u8[rec + n]);
-              }
-              const pPreset = view.getUint16(rec + 20, true);
-              const pBank = view.getUint16(rec + 22, true);
-              if (pName.trim() && pName !== 'EOP') {
-                presetHeaders.push({
-                  name: pName.trim(),
-                  program: pPreset,
-                  bank: pBank
-                });
-              }
-            }
-          }
-        }
-        subOffset += 8 + subLen + (subLen % 2); // Word aligned
-      }
-    }
-    offset = chunkEnd + (chunkLen % 2);
-  }
-
-  logs.push(`[SF2/SF3] Bank Name: "${bankName}", Version: ${bankVersion}, Author: ${bankAuthor}`);
-
-  // Convert raw 16-bit PCM sample data into playable AudioBuffers
-  let extractedCount = 0;
-  if (sampleDataStart > 0 && sampleHeaders.length > 0) {
-    const sampleInt16 = new Int16Array(
-      arrayBuffer, 
-      sampleDataStart, 
-      Math.floor(sampleDataLen / 2)
-    );
-
-    const samplesToLoad = sampleHeaders.slice(0, 48);
-    for (const sh of samplesToLoad) {
-      const len = Math.max(1, sh.end - sh.start);
-      if (sh.start + len <= sampleInt16.length) {
-        const audioBuf = audioCtx.createBuffer(1, len, sh.sampleRate || 44100);
-        const channelData = audioBuf.getChannelData(0);
-        for (let s = 0; s < len; s++) {
-          channelData[s] = sampleInt16[sh.start + s] / 32768.0;
-        }
-
-        const presetId = `custom_sf_${extractedCount}_${sh.name.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase()}`;
-        registeredPresets.set(presetId, {
-          id: presetId,
-          name: `${presetId.includes('drum') ? '🥁' : '🎵'} ${sh.name}`,
-          category: "Uploaded SoundFont (SF2)",
-          bank: 0,
-          program: extractedCount,
-          isCustom: true,
-          samples: {
-            buffer: audioBuf,
-            rootKey: sh.rootKey || 60,
-            sampleRate: sh.sampleRate || 44100,
-            loopStart: sh.startLoop > sh.start ? sh.startLoop - sh.start : undefined,
-            loopEnd: sh.endLoop > sh.start ? sh.endLoop - sh.start : undefined,
-            baseGain: 1.0
-          }
-        });
-        extractedCount++;
-      }
-    }
-  }
-
-  loadedBankInfo = {
-    name: bankName,
-    version: bankVersion,
-    instrumentCount: registeredPresets.size,
-    author: bankAuthor,
-    isLoaded: true
-  };
-
-  const instrumentsList = getAvailableSoundFontInstruments();
-  logs.push(`[SUCCESS] Loaded and compiled ${extractedCount} custom SoundFont instruments into Audio Engine!`);
-
+  const result = SpessaSynthCore.parse(arrayBuffer, audioCtx, fileName);
+  loadedBankInfo = result.bankInfo;
   return {
-    bankInfo: loadedBankInfo,
-    instruments: instrumentsList,
-    logs
+    bankInfo: result.bankInfo,
+    instruments: getAvailableSoundFontInstruments(),
+    logs: result.logs
   };
 }
+
 
 /**
  * Play a SoundFont note with realistic sample pitch-shifting and ADSR gain envelope

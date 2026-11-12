@@ -4,6 +4,9 @@
  * Features 16 dedicated channel AudioNodes & AnalyserNodes for oscilloscope monitoring
  */
 
+import { SpessaSynthCore, SPRESSASYNTH_CORE_ENGINE_ID } from './spressasynthCore';
+export { SpessaSynthCore, SPRESSASYNTH_CORE_ENGINE_ID };
+
 export const SPRESSASYNTH_ENGINE_ID = "spressasynth_lib-master.zip";
 
 export interface SpessaSoundFont {
@@ -209,91 +212,29 @@ class SpessaSynthEngine {
 
   /**
    * SoundFont2 (.sf2 / .sf3) intake parser
-   * Allows spressasynth_lib-master.zip to ingest real SoundFont banks
+   * Directly powered by spressasynth_core-master.zip as the responsible reader
+   * and linked into spressasynth_lib-master.zip for 16-channel synthesis!
    */
   public loadSoundFont(arrayBuffer: ArrayBuffer, fileName = "Custom_Bank.sf2"): SpessaSoundFont {
-    const u8 = new Uint8Array(arrayBuffer);
-    let bankName = fileName.replace(/\.[^/.]+$/, "");
-    let version = "2.04";
-    const foundPresets: string[] = [];
-
-    // Parse RIFF header
-    if (u8.length >= 12) {
-      const riffHeader = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-      const sfbkForm = String.fromCharCode(u8[8], u8[9], u8[10], u8[11]);
-      if (riffHeader === "RIFF" && sfbkForm === "sfbk") {
-        let offset = 12;
-        while (offset + 8 < u8.length) {
-          const chunkId = String.fromCharCode(u8[offset], u8[offset + 1], u8[offset + 2], u8[offset + 3]);
-          const chunkSize = (u8[offset + 4]) | (u8[offset + 5] << 8) | (u8[offset + 6] << 16) | (u8[offset + 7] << 24);
-          
-          if (chunkId === "LIST" && offset + 12 <= u8.length) {
-            const listType = String.fromCharCode(u8[offset + 8], u8[offset + 9], u8[offset + 10], u8[offset + 11]);
-            if (listType === "INFO") {
-              let infoOffset = offset + 12;
-              const infoEnd = Math.min(offset + 8 + chunkSize, u8.length);
-              while (infoOffset + 8 < infoEnd) {
-                const subId = String.fromCharCode(u8[infoOffset], u8[infoOffset + 1], u8[infoOffset + 2], u8[infoOffset + 3]);
-                const subLen = (u8[infoOffset + 4]) | (u8[infoOffset + 5] << 8) | (u8[infoOffset + 6] << 16) | (u8[infoOffset + 7] << 24);
-                if (subId === "INAM" && subLen > 0) {
-                  let str = "";
-                  for (let i = 0; i < subLen && infoOffset + 8 + i < u8.length; i++) {
-                    const c = u8[infoOffset + 8 + i];
-                    if (c === 0) break;
-                    str += String.fromCharCode(c);
-                  }
-                  if (str.trim()) bankName = str.trim();
-                } else if (subId === "ifil") {
-                  version = `${u8[infoOffset + 8]}.${u8[infoOffset + 10]}`;
-                }
-                infoOffset += 8 + subLen + (subLen % 2);
-              }
-            } else if (listType === "pdta") {
-              let pdtaOffset = offset + 12;
-              const pdtaEnd = Math.min(offset + 8 + chunkSize, u8.length);
-              while (pdtaOffset + 8 < pdtaEnd) {
-                const subId = String.fromCharCode(u8[pdtaOffset], u8[pdtaOffset + 1], u8[pdtaOffset + 2], u8[pdtaOffset + 3]);
-                const subLen = (u8[pdtaOffset + 4]) | (u8[pdtaOffset + 5] << 8) | (u8[pdtaOffset + 6] << 16) | (u8[pdtaOffset + 7] << 24);
-                if (subId === "phdr" && subLen >= 38) {
-                  const pCount = Math.floor(subLen / 38);
-                  for (let p = 0; p < pCount; p++) {
-                    const rec = pdtaOffset + 8 + (p * 38);
-                    if (rec + 20 <= u8.length) {
-                      let pName = "";
-                      for (let n = 0; n < 20; n++) {
-                        const ch = u8[rec + n];
-                        if (ch === 0) break;
-                        pName += String.fromCharCode(ch);
-                      }
-                      if (pName.trim() && pName.trim() !== "EOP") {
-                        foundPresets.push(pName.trim());
-                      }
-                    }
-                  }
-                }
-                pdtaOffset += 8 + subLen + (subLen % 2);
-              }
-            }
-          }
-          offset += 8 + chunkSize + (chunkSize % 2);
-        }
-      }
-    }
+    const ctx = this.audioCtx || undefined;
+    const { soundFont: coreSf } = SpessaSynthCore.parse(arrayBuffer, ctx, fileName);
 
     const newSf: SpessaSoundFont = {
-      id: `spessa-sf-${Date.now()}`,
-      name: bankName,
-      version: version,
-      instrumentCount: foundPresets.length > 0 ? foundPresets.length : Math.max(16, Math.min(128, Math.round(u8.length / 32768))),
-      presets: foundPresets.length > 0 ? foundPresets : [
-        "Acoustic Grand (SF2)", "Warm Pad (SF2)", "Jazz Bass (SF2)", "Brass Section (SF2)", "Drum Kit (SF2)"
-      ],
+      id: coreSf.id,
+      name: coreSf.name,
+      version: coreSf.version,
+      instrumentCount: coreSf.instrumentCount,
+      presets: coreSf.presets,
       isCustom: true
     };
 
     this.soundFonts.unshift(newSf);
     this.activeSoundFontId = newSf.id;
     return newSf;
+  }
+
+  public getCoreEngine(): typeof SpessaSynthCore {
+    return SpessaSynthCore;
   }
 
   public noteOff(channel: number, midiNote?: number) {

@@ -7,6 +7,7 @@ import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/websc
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
 
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
+export { SpessaSynthCore, SPRESSASYNTH_CORE_ENGINE_ID } from '../engines/spressasynthCore';
 export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
 export type { SoundEnginesConfig };

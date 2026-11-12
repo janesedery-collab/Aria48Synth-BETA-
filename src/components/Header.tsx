@@ -168,7 +168,7 @@ export default function Header({
               }
             }
 
-            setSfBannerMessage(`SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) loaded into spressasynth_lib and assigned to song channels!`);
+            setSfBannerMessage(`SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip into spressasynth_lib and assigned to song channels!`);
             setTimeout(() => setSfBannerMessage(null), 4500);
           } catch (err: any) {
             setSfBannerMessage(`SoundFont error: ${err.message}`);

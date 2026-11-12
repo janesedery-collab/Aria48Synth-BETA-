@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle, Cpu } from 'lucide-react';
 import { Channel, SoundFontInstrument, SoundEnginesConfig } from '../types';
 import { playNote, getAudioContext, getSoundEnginesConfig, setSoundEnginesConfig, onSoundEnginesChange } from './AudioEngine';
@@ -167,7 +167,7 @@ export default function TrackerEditor({
               setSoundFontInstruments(res.instruments);
               setImportFeedback({
                 success: true,
-                msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} instruments) into spressasynth_lib!`
+                msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} instruments) decoded via spressasynth_core into spressasynth_lib!`
               });
               setTimeout(() => {
                 setIsImportModalOpen(false);
@@ -299,7 +299,7 @@ export default function TrackerEditor({
             }
             setImportFeedback({
               success: true,
-              msg: `SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) registered and assigned to song channels!`
+              msg: `SoundFont "${spessaSf.name}" (${spessaSf.instrumentCount} Presets) decoded by spressasynth_core and registered into spressasynth_lib!`
             });
             setTimeout(() => setImportFeedback(null), 3500);
           } catch (err: any) {
@@ -397,6 +397,22 @@ export default function TrackerEditor({
       }));
     }
   };
+
+  const groupedInstruments = useMemo(() => {
+    const groups: { category: string; instruments: SoundFontInstrument[] }[] = [];
+    const map = new Map<string, SoundFontInstrument[]>();
+    for (const inst of soundFontInstruments) {
+      const cat = inst.category || (inst.isCustom ? 'Custom SF2 Presets' : 'General MIDI');
+      let list = map.get(cat);
+      if (!list) {
+        list = [];
+        map.set(cat, list);
+        groups.push({ category: cat, instruments: list });
+      }
+      list.push(inst);
+    }
+    return groups;
+  }, [soundFontInstruments]);
 
   // Keyboard navigation inside tracker matrix
   useEffect(() => {
@@ -807,16 +823,9 @@ export default function TrackerEditor({
                   className="w-full bg-black border border-zinc-800 rounded p-1.5 text-[10.5px] text-cyan-300 font-mono focus:outline-none cursor-pointer"
                 >
                   <option value="">Default Chip ({channels.find(c => c.id === selectedCell.col)?.chip})</option>
-                  {Object.entries(
-                    soundFontInstruments.reduce((acc, inst) => {
-                      const cat = inst.category || (inst.isCustom ? 'Custom SF2 Presets' : 'General MIDI');
-                      if (!acc[cat]) acc[cat] = [];
-                      acc[cat].push(inst);
-                      return acc;
-                    }, {} as Record<string, typeof soundFontInstruments>)
-                  ).map(([category, insts]) => (
-                    <optgroup key={category} label={category} className="bg-zinc-900 text-zinc-300 font-bold">
-                      {insts.map(inst => (
+                  {groupedInstruments.map(group => (
+                    <optgroup key={group.category} label={group.category} className="bg-zinc-900 text-zinc-300 font-bold">
+                      {group.instruments.map(inst => (
                         <option key={inst.id} value={inst.id} className="bg-black text-cyan-300 font-normal">
                           {inst.name} {inst.isCustom ? '(SF2)' : ''}
                         </option>

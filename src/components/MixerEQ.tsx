@@ -218,7 +218,7 @@ export default function MixerEQ({
                 }));
               }
             }
-            setSfFeedback(`Loaded SoundFont Bank "${newSf.name}" (${newSf.instrumentCount} Presets) into spressasynth_lib and applied instruments to song channels!`);
+            setSfFeedback(`Loaded SoundFont Bank "${newSf.name}" (${newSf.instrumentCount} Presets) decoded by spressasynth_core-master.zip into spressasynth_lib and applied to song channels!`);
             setTimeout(() => setSfFeedback(null), 4500);
           } catch (err: any) {
             setSfFeedback(`Error loading SoundFont: ${err.message}`);
