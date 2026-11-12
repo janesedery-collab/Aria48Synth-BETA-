@@ -91,7 +91,9 @@ interface ActiveOscVoice {
 }
 const activeSyntheticVoices: ActiveOscVoice[] = [];
 let isTinySynthHooked = false;
+let suppressHookForward = false;
 let midiPlaybackWatchdogTimer: any = null;
+let midiEndTailTimer: any = null;
 
 /**
  * Phase-Locked Sound Engine Synchronizer:
@@ -109,35 +111,39 @@ export function hookTinySynthEvents(synth: any) {
     originalSend(msg, t);
 
     // 2. Synchronously forward to SpessaSynth on the exact same audio timeline
-    if (activeEnginesConfig.spessaSynth && msg && msg.length > 0) {
+    if (!suppressHookForward && activeEnginesConfig.spessaSynth && msg && msg.length > 0) {
       const status = msg[0];
       const cmd = status & 0xf0;
       const ch = status & 0x0f;
 
-      if (cmd === 0x90) { // Note On / Note Off
+      if (cmd === 0x90) { // Note On / Note Off (vel === 0)
         const note = msg[1];
         const vel = msg[2];
         if (vel > 0) {
-          SpessaSynth.noteOn(ch, note, vel, 0.42, t);
+          SpessaSynth.noteOn(ch, note, vel, undefined, t);
         } else {
-          SpessaSynth.noteOff(ch, note);
+          SpessaSynth.noteOff(ch, note, t);
         }
       } else if (cmd === 0x80) { // Note Off
         const note = msg[1];
-        SpessaSynth.noteOff(ch, note);
+        SpessaSynth.noteOff(ch, note, t);
       } else if (cmd === 0xc0) { // Program Change
         const prog = msg[1];
         SpessaSynth.setChannelProgram(ch, prog);
       } else if (cmd === 0xe0) { // Pitch Bend
         const bend = ((msg[2] << 7) | msg[1]) - 8192;
-        SpessaSynth.setChannelPitchBend(ch, bend);
+        SpessaSynth.setChannelPitchBend(ch, bend, t);
       } else if (cmd === 0xb0) { // Control Change
         const cc = msg[1];
         const val = msg[2];
         if (cc === 7) {
-          SpessaSynth.setChannelVolume(ch, val);
+          SpessaSynth.setChannelVolume(ch, val, t);
         } else if (cc === 10) {
-          SpessaSynth.setChannelPan(ch, val);
+          SpessaSynth.setChannelPan(ch, val, t);
+        } else if (cc === 11) {
+          SpessaSynth.setChannelExpression(ch, val, t);
+        } else if (cc === 64) {
+          SpessaSynth.setChannelSustain(ch, val >= 64, t);
         } else if (cc === 65) {
           SpessaSynth.setChannelPortamento(ch, val >= 64);
         } else if (cc === 5) {
@@ -145,8 +151,12 @@ export function hookTinySynthEvents(synth: any) {
         } else if (cc === 84) {
           SpessaSynth.setChannelPortamentoControl(ch, val);
         } else if (cc === 120 || cc === 123) {
-          SpessaSynth.allNotesOff(ch);
+          SpessaSynth.allNotesOff(ch, t);
+        } else if (cc === 121) {
+          SpessaSynth.resetChannelControllers(ch, t);
         }
+      } else if (status === 0xff) {
+        SpessaSynth.sendGMReset();
       }
     }
   };
@@ -237,8 +247,8 @@ export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
     if (synth) {
       hookTinySynthEvents(synth);
 
-      // Reset SpessaSynth channel states
-      SpessaSynth.allNotesOff();
+      // Reset SpessaSynth channel states cleanly before launching synchronized playback
+      SpessaSynth.sendGMReset();
 
       // Load SMF binary and launch synchronized playback
       synth.loadMIDI(arrayBuffer);
@@ -247,14 +257,22 @@ export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
 
       // Watchdog interval detects when master sequencer reaches end of song
       if (midiPlaybackWatchdogTimer) clearInterval(midiPlaybackWatchdogTimer);
+      if (midiEndTailTimer) {
+        clearTimeout(midiEndTailTimer);
+        midiEndTailTimer = null;
+      }
       midiPlaybackWatchdogTimer = setInterval(() => {
         const status = synth.getPlayStatus?.();
         if (status && !status.play && isMidiPlayingInternal) {
           isMidiPlayingInternal = false;
           clearInterval(midiPlaybackWatchdogTimer);
           midiPlaybackWatchdogTimer = null;
-          SpessaSynth.allNotesOff();
-          onEnded?.();
+          // Allow TinySynth's 200ms lookahead buffer + final note release tail to finish naturally
+          midiEndTailTimer = setTimeout(() => {
+            midiEndTailTimer = null;
+            SpessaSynth.allNotesOff();
+            onEnded?.();
+          }, 320);
         }
       }, 150);
     }
@@ -268,6 +286,10 @@ export function stopMidiPlayback() {
     if (midiPlaybackWatchdogTimer) {
       clearInterval(midiPlaybackWatchdogTimer);
       midiPlaybackWatchdogTimer = null;
+    }
+    if (midiEndTailTimer) {
+      clearTimeout(midiEndTailTimer);
+      midiEndTailTimer = null;
     }
     if (tinySynthInstance) {
       tinySynthInstance.stopMIDI();
@@ -819,19 +841,19 @@ export function playNote(
       SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
     }
 
-    // 2. WebAudio TinySynth Engine
+    // 2. WebAudio TinySynth Engine (suppress hook forwarding so SpessaSynth isn't double-triggered)
     if (activeEnginesConfig.tinySynth && tinySynthInstance) {
       try {
+        suppressHookForward = true;
         if (soundFontPreset) {
           tinySynthInstance.send([0xC0 | chIdx, gmProg], targetTime);
         }
         tinySynthInstance.send([0x90 | chIdx, midiNum, volNorm], targetTime);
-        setTimeout(() => {
-          if (tinySynthInstance && activeEnginesConfig.tinySynth) {
-            tinySynthInstance.send([0x80 | chIdx, midiNum, 0], targetTime + duration);
-          }
-        }, duration * 1000);
-      } catch (e) {}
+        tinySynthInstance.send([0x80 | chIdx, midiNum, 0], targetTime + duration);
+      } catch (e) {
+      } finally {
+        suppressHookForward = false;
+      }
     }
 
     // 3. Redundant Synthetic Oscillators Layer
@@ -847,9 +869,9 @@ export function playNote(
 export function stopChannelSound(channelId: number) {
   const chIdx = (channelId - 1) % 16;
   SpessaSynth.noteOff(chIdx);
-  if (tinySynthInstance && audioCtx) {
+  if (tinySynthInstance) {
     try {
-      tinySynthInstance.send([0x80 | chIdx, 60, 0], audioCtx.currentTime);
+      tinySynthInstance.allSoundOff?.(chIdx);
     } catch (e) {}
   }
   for (let i = activeSyntheticVoices.length - 1; i >= 0; i--) {

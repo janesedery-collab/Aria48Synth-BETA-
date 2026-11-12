@@ -17,6 +17,7 @@ import HardwareConnectionScript from './components/HardwareConnectionScript';
 import ShareApkModal from './components/ShareApkModal';
 import { 
   playNote, 
+  stopChannelSound,
   playDirectAudio, 
   stopDirectAudio, 
   playMidiBuffer, 
@@ -27,6 +28,7 @@ import {
   getTinySynth
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
+import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
 
 // --- MAIN APPLICATION ---
 export default function App() {
@@ -43,18 +45,34 @@ export default function App() {
   // Real-time pitch tracking per channel
   const [channelPitches, setChannelPitches] = useState<{ [key: number]: string }>({});
 
-  // Customizable Oscilloscope preferences
-  const [oscConfig, setOscConfig] = useState<OscilloscopeConfig>({
-    preset: 'protracker',
-    drawType: 'solid',
-    scanlines: true,
-    glowBloom: true,
-    gridDividers: true,
-    noiseFloor: 2,
-    amplifier: 1.0,
-    size: 'medium',
-    phaseSync: true
+  // Customizable Oscilloscope preferences (persisted in browser cookies)
+  const [oscConfig, setOscConfig] = useState<OscilloscopeConfig>(() => {
+    const savedAmp = getSavedAmplifier();
+    const savedConfig = getSavedOscConfig();
+    return {
+      preset: 'protracker',
+      drawType: 'solid',
+      scanlines: true,
+      glowBloom: true,
+      gridDividers: true,
+      noiseFloor: 2,
+      size: 'medium',
+      phaseSync: true,
+      ...savedConfig,
+      amplifier: savedAmp
+    };
   });
+
+  const handleSetOscConfig = (updater: React.SetStateAction<OscilloscopeConfig>) => {
+    setOscConfig(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (next.amplifier !== undefined) {
+        saveAmplifier(next.amplifier);
+      }
+      saveOscConfig(next);
+      return next;
+    });
+  };
 
   // Channels State (1-48)
   const [channels, setChannels] = useState<Channel[]>(
@@ -264,17 +282,29 @@ export default function App() {
       const activePat = (songPatterns && songPatterns[currentPatternIndex]) || patterns;
       const rowData = activePat?.[activeRow];
       if (rowData) {
+        const stepSec = Math.max(0.05, 60 / Math.max(30, bpm) / 4);
         for (let chId = 1; chId <= MAX_CHANNELS; chId++) {
           const cell = rowData[chId];
           const ch = channels.find(c => c.id === chId);
-          if (ch && ch.enabled && !ch.mute && cell && cell.note && cell.note !== '---' && cell.note !== '===') {
-            const vol = cell.vol && cell.vol !== '..' ? parseInt(cell.vol, 16) : ch.volume;
-            playNote(chId, ch.chip, cell.note, 0.22, vol, ch.pan, ch.soundFontPreset);
+          if (ch && ch.enabled && !ch.mute && cell && cell.note && cell.note !== '---') {
+            if (cell.note === '===' || cell.note === 'OFF') {
+              stopChannelSound(chId);
+            } else {
+              let sustainRows = 1;
+              for (let r = activeRow + 1; r < 64 && sustainRows < 16; r++) {
+                const nextNote = activePat[r]?.[chId]?.note;
+                if (nextNote && nextNote !== '---') break;
+                sustainRows++;
+              }
+              const noteDuration = Math.max(0.24, Math.min(3.5, stepSec * sustainRows));
+              const vol = cell.vol && cell.vol !== '..' ? parseInt(cell.vol, 16) : ch.volume;
+              playNote(chId, ch.chip, cell.note, noteDuration, vol, ch.pan, ch.soundFontPreset);
+            }
           }
         }
       }
     }
-  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, currentPatternIndex, songPatterns, patterns, channels]);
+  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, currentPatternIndex, songPatterns, patterns, channels, bpm]);
 
   const handleLoadTrack = (tracksJson: string, trackBpm: number) => {
     try {
@@ -583,7 +613,7 @@ export default function App() {
                   channelPitches={channelPitches}
                   bpm={bpm}
                   oscConfig={oscConfig}
-                  setOscConfig={setOscConfig}
+                  setOscConfig={handleSetOscConfig}
                 />
               )}
               {activeTab === 'convert' && (

@@ -23,9 +23,11 @@ export interface MidiChannelState {
   index: number; // 0 to 15
   program: number; // 0 to 127
   programName: string;
-  volume: number; // 0 to 127
-  pan: number; // 0 to 127
+  volume: number; // 0 to 127 (CC 7)
+  expression: number; // 0 to 127 (CC 11)
+  pan: number; // 0 to 127 (CC 10)
   pitchBend: number; // -8192 to 8191
+  sustainPedal: boolean; // CC 64
   isMuted: boolean;
   activeNoteCount: number;
   pitchBendRange: number; // Semitones, default 2 (range 1 to 24)
@@ -33,6 +35,20 @@ export interface MidiChannelState {
   portamentoTime: number; // CC 5 (Glide Rate 0 to 127)
   portamentoControl: number | null; // CC 84 (Source Note for Portamento 0 to 127)
   lastNote: number | null; // Previous played note for glide
+}
+
+interface SpessaVoiceRecord {
+  osc: OscillatorNode;
+  subOsc?: OscillatorNode;
+  noteGain: GainNode;
+  baseNote: number;
+  subRatio: number;
+  startTime: number;
+  hasScheduledStop: boolean;
+  pendingRelease: boolean;
+  fallbackTimer: any;
+  release: (releaseTime?: number) => void;
+  forceStop: () => void;
 }
 
 export const DEFAULT_GM_PROGRAMS: string[] = [
@@ -72,17 +88,8 @@ class SpessaSynthEngine {
   // Active playback tracking
   private isPlaying = false;
   private activeVoices: { stop: () => void }[] = [];
-  private activeOscillators: {
-    [channel: number]: {
-      osc: OscillatorNode;
-      subOsc?: OscillatorNode;
-      baseNote: number;
-      subRatio: number;
-      stop: () => void;
-    }[];
-  } = {};
+  private activeOscillators: { [channel: number]: SpessaVoiceRecord[] } = {};
   private playbackTimeoutIds: any[] = [];
-  private midiPlaybackTimer: any = null;
 
   constructor() {
     this.soundFonts.push({
@@ -111,8 +118,10 @@ class SpessaSynthEngine {
         program: defaultProg,
         programName: i === 9 ? "GM Standard Drum Kit" : (DEFAULT_GM_PROGRAMS[defaultProg] || `Program ${defaultProg}`),
         volume: 100,
+        expression: 127,
         pan: 64,
         pitchBend: 0,
+        sustainPedal: false,
         isMuted: false,
         activeNoteCount: 0,
         pitchBendRange: 2,
@@ -142,10 +151,13 @@ class SpessaSynthEngine {
 
       for (let i = 0; i < 16; i++) {
         const gain = this.audioCtx.createGain();
-        gain.gain.setValueAtTime(0.85, this.audioCtx.currentTime);
+        const chState = this.channelStates[i];
+        const initGain = chState?.isMuted
+          ? 0
+          : ((chState?.volume ?? 100) / 127) * ((chState?.expression ?? 127) / 127) * 0.85;
+        gain.gain.setValueAtTime(initGain, this.audioCtx.currentTime);
 
         const panner = this.audioCtx.createStereoPanner();
-        // Spread 16 channels gracefully across stereo field
         const panValue = ((i - 7.5) / 7.5) * 0.65;
         panner.pan.setValueAtTime(Math.max(-0.85, Math.min(0.85, panValue)), this.audioCtx.currentTime);
 
@@ -237,40 +249,91 @@ class SpessaSynthEngine {
     return SpessaSynthCore;
   }
 
-  public noteOff(channel: number, midiNote?: number) {
+  private resolveTime(atTime?: number): number {
+    if (!this.audioCtx) return 0;
+    if (atTime !== undefined && Number.isFinite(atTime)) {
+      return Math.max(this.audioCtx.currentTime, atTime);
+    }
+    return this.audioCtx.currentTime;
+  }
+
+  private updateChannelGainNode(ch: number, atTime?: number) {
+    const gainNode = this.channelGains[ch];
+    const chState = this.channelStates[ch];
+    if (!gainNode || !chState || !this.audioCtx) return;
+
+    const targetGain = chState.isMuted
+      ? 0
+      : (chState.volume / 127) * ((chState.expression ?? 127) / 127) * 0.85;
+    const t = this.resolveTime(atTime);
+    try {
+      gainNode.gain.setTargetAtTime(Math.max(0, targetGain), t, 0.006);
+    } catch (e) {
+      gainNode.gain.setValueAtTime(Math.max(0, targetGain), t);
+    }
+  }
+
+  public noteOff(channel: number, midiNote?: number, releaseTime?: number) {
     const chIdx = Math.max(0, Math.min(15, channel));
     const list = this.activeOscillators[chIdx];
     if (!list || list.length === 0) return;
-    for (const oscRec of list) {
-      if (midiNote === undefined || oscRec.baseNote === midiNote) {
-        oscRec.stop();
+
+    const chState = this.channelStates[chIdx];
+
+    // If an explicit future/scheduled MIDI NoteOff arrives while sustain pedal (CC 64) is pressed,
+    // keep the matching voices sounding until the sustain pedal is lifted.
+    if (releaseTime !== undefined && midiNote !== undefined && chState?.sustainPedal) {
+      for (const oscRec of list) {
+        if (oscRec.baseNote === midiNote && !oscRec.hasScheduledStop) {
+          oscRec.pendingRelease = true;
+        }
       }
+      return;
     }
-    if (midiNote === undefined) {
-      this.activeOscillators[chIdx] = [];
-    } else {
-      this.activeOscillators[chIdx] = list.filter(o => o.baseNote !== midiNote);
+
+    if (releaseTime === undefined) {
+      // Immediate/manual stop (user pressed Stop, mute, or tracker '===')
+      const remaining: SpessaVoiceRecord[] = [];
+      for (const oscRec of list) {
+        if (midiNote === undefined || oscRec.baseNote === midiNote) {
+          oscRec.forceStop();
+        } else {
+          remaining.push(oscRec);
+        }
+      }
+      this.activeOscillators[chIdx] = midiNote === undefined ? [] : remaining;
+      if (midiNote === undefined && chState) chState.activeNoteCount = 0;
+      return;
+    }
+
+    // Scheduled lookahead MIDI NoteOff: smooth release envelope at `releaseTime`
+    for (const oscRec of list) {
+      if ((midiNote === undefined || oscRec.baseNote === midiNote) && !oscRec.hasScheduledStop) {
+        oscRec.release(releaseTime);
+      }
     }
   }
 
   /**
    * Synthesize a note on a specific MIDI channel (0-15)
-   * Feeds directly through that channel's AnalyserNode for oscilloscope display
+   * Feeds directly through that channel's AnalyserNode for oscilloscope display.
+   * When `duration` is undefined, the note sustains naturally until `noteOff(channel, midiNote, releaseTime)` arrives.
    */
-  public noteOn(channel: number, midiNote: number, velocity = 85, duration = 0.4, startTime?: number) {
+  public noteOn(channel: number, midiNote: number, velocity = 85, duration?: number, startTime?: number) {
     const ctx = this.init();
     if (ctx.state === "suspended") ctx.resume();
 
     const chIdx = Math.max(0, Math.min(15, channel));
     const chGain = this.channelGains[chIdx];
-    if (!chGain || this.channelStates[chIdx]?.isMuted) return;
-
-    // Apply real-time pitch bend semitones
     const chState = this.channelStates[chIdx];
+    if (!chGain || !chState || chState.isMuted) return;
+
     const bendSemitones = (chState.pitchBend / 8192) * (chState.pitchBendRange || 2);
-    const targetFreq = 440 * Math.pow(2, (midiNote + bendSemitones - 69) / 12);
-    const now = startTime !== undefined ? Math.max(ctx.currentTime, startTime) : ctx.currentTime;
-    const vol = (velocity / 127) * (chState.volume / 127) * 0.18;
+    const targetFreq = Math.max(16, 440 * Math.pow(2, (midiNote + bendSemitones - 69) / 12));
+    const now = startTime !== undefined && Number.isFinite(startTime)
+      ? Math.max(ctx.currentTime, startTime)
+      : ctx.currentTime;
+    const vol = Math.max(0.0005, (velocity / 127) * 0.22);
 
     // Check Portamento Glide (CC 65 & CC 84)
     const isPortamentoActive = chState.portamentoEnabled || (chState.portamentoControl !== null);
@@ -280,55 +343,84 @@ class SpessaSynthEngine {
     let glideDurationSecs = 0.05;
 
     if (isPortamentoActive && sourceNote !== null && sourceNote !== midiNote) {
-      startFreq = 440 * Math.pow(2, (sourceNote + bendSemitones - 69) / 12);
+      startFreq = Math.max(16, 440 * Math.pow(2, (sourceNote + bendSemitones - 69) / 12));
       const pTime = chState.portamentoTime ?? 64;
-      // Map CC 5 (0-127) to smooth glide duration between 0.03s and 1.6s
       glideDurationSecs = 0.03 + (pTime / 127) * 1.57;
       isGliding = true;
     }
 
-    // Reset one-shot portamento control (CC 84) and save last note
     chState.portamentoControl = null;
     chState.lastNote = midiNote;
 
     // Distinguish GM Drums (Channel 10, idx 9) vs Melodic instruments
     if (chIdx === 9) {
-      // Drum synthesis (Kick, Snare, Hi-hat, Toms)
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
+      let drumLength = 0.24;
+      let drumStopped = false;
 
       if (midiNote === 35 || midiNote === 36) {
         // Bass Drum
-        osc.frequency.setValueAtTime(140, now);
-        osc.frequency.exponentialRampToValueAtTime(38, now + 0.18);
-        gain.gain.setValueAtTime(vol * 1.4, now);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+        drumLength = 0.28;
+        osc.frequency.setValueAtTime(145, now);
+        osc.frequency.exponentialRampToValueAtTime(38, now + 0.19);
+        gain.gain.setValueAtTime(Math.max(0.0005, vol * 1.45), now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + drumLength);
       } else if (midiNote === 38 || midiNote === 40) {
-        // Snare Drum (tone + noise)
+        // Snare Drum
+        drumLength = 0.22;
         osc.type = "triangle";
         osc.frequency.setValueAtTime(220, now);
-        osc.frequency.exponentialRampToValueAtTime(80, now + 0.12);
-        gain.gain.setValueAtTime(vol * 1.1, now);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+        osc.frequency.exponentialRampToValueAtTime(82, now + 0.13);
+        gain.gain.setValueAtTime(Math.max(0.0005, vol * 1.15), now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + drumLength);
       } else {
-        // Hi-Hat / Cymbal / Percussion (metallic high noise tone)
+        // Hi-Hat / Cymbal / Percussion
+        drumLength = duration !== undefined ? Math.min(0.28, Math.max(0.08, duration)) : 0.19;
         osc.type = "sawtooth";
         osc.frequency.setValueAtTime(targetFreq > 800 ? targetFreq : 4200, now);
-        gain.gain.setValueAtTime(vol * 0.8, now);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + Math.min(0.18, duration));
+        gain.gain.setValueAtTime(Math.max(0.0005, vol * 0.8), now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + drumLength);
       }
 
       osc.connect(gain);
       gain.connect(chGain);
       osc.start(now);
-      osc.stop(now + 0.3);
+      osc.stop(now + drumLength + 0.04);
 
-      const voice = { stop: () => { try { osc.stop(); } catch(e){} } };
+      const voice = {
+        stop: () => {
+          if (drumStopped) return;
+          drumStopped = true;
+          try {
+            gain.gain.cancelScheduledValues(ctx.currentTime);
+            gain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.005);
+          } catch (e) {}
+          setTimeout(() => {
+            try { osc.disconnect(); gain.disconnect(); } catch (e) {}
+          }, 40);
+        }
+      };
       this.activeVoices.push(voice);
+
+      const cleanupDelayMs = Math.max(100, (now + drumLength + 0.08 - ctx.currentTime) * 1000);
       setTimeout(() => {
+        if (!drumStopped) {
+          drumStopped = true;
+          try { osc.disconnect(); gain.disconnect(); } catch (e) {}
+        }
         this.activeVoices = this.activeVoices.filter(v => v !== voice);
-      }, 350);
+      }, cleanupDelayMs);
       return;
+    }
+
+    // Retrigger protection: if the exact same MIDI note is already held on this channel,
+    // softly release the older held voice at `now` so voices never pile up indefinitely.
+    const existingList = this.activeOscillators[chIdx] || [];
+    for (const prev of existingList) {
+      if (prev.baseNote === midiNote && !prev.hasScheduledStop) {
+        prev.release(now);
+      }
     }
 
     // Melodic SoundFont Voice Synthesis
@@ -338,34 +430,48 @@ class SpessaSynthEngine {
     const noteGain = ctx.createGain();
     let subRatio = 1.0;
 
-    // Select waveform based on General MIDI sound family
     if (program < 8) {
-      // Piano: rich triangle + sub sine
+      // Piano: rich triangle + harmonic sine
+      osc.type = "triangle";
+      subOsc.type = "sine";
+      subRatio = 2.0;
+    } else if (program >= 8 && program < 16) {
+      // Chromatic Percussion / Mallets: bright sine/triangle bell harmonics
+      osc.type = "sine";
+      subOsc.type = "triangle";
+      subRatio = 2.0;
+    } else if (program >= 16 && program < 24) {
+      // Organ: fundamental + upper octave drawbar
       osc.type = "triangle";
       subOsc.type = "sine";
       subRatio = 2.0;
     } else if (program >= 24 && program < 32) {
-      // Guitar: crisp sawtooth
+      // Guitar: crisp sawtooth + warm sub triangle
       osc.type = "sawtooth";
       subOsc.type = "triangle";
       subRatio = 0.5;
     } else if (program >= 32 && program < 40) {
-      // Bass: deep square/sawtooth
+      // Bass: deep square/sawtooth + sub sine
       osc.type = "square";
       subOsc.type = "sine";
       subRatio = 0.5;
     } else if (program >= 40 && program < 56) {
-      // Strings & Choir: warm saw
+      // Strings & Choir: lush detuned dual saw
       osc.type = "sawtooth";
       subOsc.type = "sawtooth";
-      subRatio = 1.004; // subtle detune chorusing
+      subRatio = 1.004;
     } else if (program >= 56 && program < 64) {
       // Brass: saw + square
       osc.type = "sawtooth";
       subOsc.type = "square";
       subRatio = 1.0;
+    } else if (program >= 64 && program < 80) {
+      // Woodwinds / Reed / Pipe
+      osc.type = "triangle";
+      subOsc.type = "sine";
+      subRatio = 1.002;
     } else {
-      // Synth / Leads: square / triangle
+      // Synth Leads / Pads / Effects
       osc.type = "square";
       subOsc.type = "triangle";
       subRatio = 1.002;
@@ -382,11 +488,27 @@ class SpessaSynthEngine {
       subOsc.frequency.setValueAtTime(targetFreq * subRatio, now);
     }
 
-    // Warm envelope
+    // Expressive Attack -> Decay -> Natural Sustain (never cuts off before NoteOff!)
+    const isPluckedOrStruck =
+      program < 16 ||
+      (program >= 24 && program < 32) ||
+      program === 45 ||
+      program === 46 ||
+      (program >= 104 && program <= 111);
+
+    const attackEnd = now + 0.012;
+    const decayEnd = now + 0.085;
+    const sustainLevel = Math.max(0.0005, vol * (isPluckedOrStruck ? 0.62 : 0.78));
+
     noteGain.gain.setValueAtTime(0.0001, now);
-    noteGain.gain.exponentialRampToValueAtTime(vol, now + 0.015);
-    noteGain.gain.exponentialRampToValueAtTime(vol * 0.7, now + 0.08);
-    noteGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    noteGain.gain.linearRampToValueAtTime(vol, attackEnd);
+    noteGain.gain.exponentialRampToValueAtTime(sustainLevel, decayEnd);
+
+    if (isPluckedOrStruck && duration === undefined) {
+      // Piano / Guitar / Harp ring smoothly down while held instead of sustaining flat or cutting off
+      const ringFloor = Math.max(0.0005, vol * 0.14);
+      noteGain.gain.setTargetAtTime(ringFloor, decayEnd + 0.005, 1.35);
+    }
 
     osc.connect(noteGain);
     subOsc.connect(noteGain);
@@ -394,36 +516,124 @@ class SpessaSynthEngine {
 
     osc.start(now);
     subOsc.start(now);
-    osc.stop(now + duration + 0.05);
-    subOsc.stop(now + duration + 0.05);
 
-    const oscRecord = {
+    const voiceRecord: SpessaVoiceRecord = {
       osc,
       subOsc,
+      noteGain,
       baseNote: midiNote,
       subRatio,
-      stop: () => {
-        try {
-          osc.stop();
-          subOsc.stop();
-        } catch (e) {}
+      startTime: now,
+      hasScheduledStop: false,
+      pendingRelease: false,
+      fallbackTimer: null,
+      release: () => {},
+      forceStop: () => {}
+    };
+
+    const voice = {
+      stop: () => voiceRecord.forceStop()
+    };
+
+    voiceRecord.release = (releaseTime?: number) => {
+      if (voiceRecord.hasScheduledStop) return;
+      voiceRecord.hasScheduledStop = true;
+      voiceRecord.pendingRelease = false;
+      if (voiceRecord.fallbackTimer) {
+        clearTimeout(voiceRecord.fallbackTimer);
+        voiceRecord.fallbackTimer = null;
       }
+
+      const tReq = releaseTime !== undefined && Number.isFinite(releaseTime)
+        ? releaseTime
+        : ctx.currentTime;
+      const effectiveRelease = Math.max(ctx.currentTime, voiceRecord.startTime + 0.028, tReq);
+
+      const isLongRelease = (program >= 40 && program <= 55) || (program >= 88 && program <= 95);
+      const isMediumRelease = program < 16 || (program >= 24 && program < 32);
+      const releaseTau = isLongRelease ? 0.075 : isMediumRelease ? 0.042 : 0.03;
+      const stopTail = releaseTau * 5.2;
+
+      try {
+        if (typeof noteGain.gain.cancelAndHoldAtTime === 'function') {
+          noteGain.gain.cancelAndHoldAtTime(effectiveRelease);
+        } else {
+          noteGain.gain.cancelScheduledValues(effectiveRelease);
+        }
+        noteGain.gain.setTargetAtTime(0.0001, effectiveRelease, releaseTau);
+
+        const stopAt = effectiveRelease + stopTail;
+        osc.stop(stopAt);
+        subOsc.stop(stopAt);
+
+        const cleanupMs = Math.max(80, (stopAt - ctx.currentTime) * 1000 + 60);
+        setTimeout(() => {
+          try {
+            osc.disconnect();
+            subOsc.disconnect();
+            noteGain.disconnect();
+          } catch (e) {}
+          this.activeVoices = this.activeVoices.filter(v => v !== voice);
+          if (this.activeOscillators[chIdx]) {
+            this.activeOscillators[chIdx] = this.activeOscillators[chIdx].filter(o => o !== voiceRecord);
+          }
+          if (chState.activeNoteCount > 0) chState.activeNoteCount--;
+        }, cleanupMs);
+      } catch (e) {}
+    };
+
+    voiceRecord.forceStop = () => {
+      if (voiceRecord.fallbackTimer) {
+        clearTimeout(voiceRecord.fallbackTimer);
+        voiceRecord.fallbackTimer = null;
+      }
+      const nowTime = ctx.currentTime;
+      try {
+        if (typeof noteGain.gain.cancelAndHoldAtTime === 'function') {
+          noteGain.gain.cancelAndHoldAtTime(nowTime);
+        } else {
+          noteGain.gain.cancelScheduledValues(nowTime);
+        }
+        noteGain.gain.setTargetAtTime(0.0001, nowTime, 0.008);
+        if (!voiceRecord.hasScheduledStop) {
+          voiceRecord.hasScheduledStop = true;
+          const stopAt = Math.max(nowTime + 0.045, voiceRecord.startTime + 0.005);
+          osc.stop(stopAt);
+          subOsc.stop(stopAt);
+        }
+      } catch (e) {}
+      setTimeout(() => {
+        try {
+          osc.disconnect();
+          subOsc.disconnect();
+          noteGain.disconnect();
+        } catch (e) {}
+        this.activeVoices = this.activeVoices.filter(v => v !== voice);
+        if (this.activeOscillators[chIdx]) {
+          this.activeOscillators[chIdx] = this.activeOscillators[chIdx].filter(o => o !== voiceRecord);
+        }
+        if (chState.activeNoteCount > 0) chState.activeNoteCount--;
+      }, 65);
     };
 
     if (!this.activeOscillators[chIdx]) this.activeOscillators[chIdx] = [];
-    this.activeOscillators[chIdx].push(oscRecord);
-
-    const voice = {
-      stop: () => oscRecord.stop()
-    };
+    this.activeOscillators[chIdx].push(voiceRecord);
     this.activeVoices.push(voice);
+    chState.activeNoteCount++;
 
-    setTimeout(() => {
-      this.activeVoices = this.activeVoices.filter(v => v !== voice);
-      if (this.activeOscillators[chIdx]) {
-        this.activeOscillators[chIdx] = this.activeOscillators[chIdx].filter(o => o !== oscRecord);
-      }
-    }, duration * 1000 + 80);
+    if (duration !== undefined && Number.isFinite(duration)) {
+      // Fixed-duration note (e.g. tracker preview / pattern step): hold full duration, then smooth release tail
+      const safeDur = Math.max(0.05, duration);
+      voiceRecord.release(now + safeDur);
+    } else {
+      // Sustained MIDI note: stay active until MIDI NoteOff arrives (24s safety watchdog for stuck notes)
+      const safetyDelayMs = Math.max(5000, (now + 24 - ctx.currentTime) * 1000);
+      voiceRecord.fallbackTimer = setTimeout(() => {
+        if (!voiceRecord.hasScheduledStop) {
+          voiceRecord.release(ctx.currentTime);
+        }
+      }, safetyDelayMs);
+    }
   }
 
   /**
@@ -457,7 +667,6 @@ class SpessaSynthEngine {
         type: number;
         note: number;
         velocity: number;
-        param?: number;
       }
       const events: TimedEvent[] = [];
 
@@ -492,25 +701,27 @@ class SpessaSynthEngine {
             const evtType = status & 0xF0;
             const ch = status & 0x0F;
 
-            if (evtType === 0x90) { // Note On
+            if (evtType === 0x90) { // Note On / Note Off (vel 0)
               const note = u8[tOffset++];
               const vel = u8[tOffset++];
-              if (vel > 0) {
-                events.push({ tick: absTick, channel: ch, type: 0x90, note, velocity: vel });
-              }
+              events.push({ tick: absTick, channel: ch, type: vel > 0 ? 0x90 : 0x80, note, velocity: vel });
             } else if (evtType === 0x80) { // Note Off
-              tOffset += 2;
+              const note = u8[tOffset++];
+              tOffset++; // skip off velocity
+              events.push({ tick: absTick, channel: ch, type: 0x80, note, velocity: 0 });
             } else if (evtType === 0xC0) { // Program Change
               const p = u8[tOffset++];
               events.push({ tick: absTick, channel: ch, type: 0xC0, note: p, velocity: 0 });
             } else if (evtType === 0xB0) { // Control Change
               const cc = u8[tOffset++];
               const val = u8[tOffset++];
-              if (cc === 7) { // Channel Volume
-                events.push({ tick: absTick, channel: ch, type: 0xB0, note: cc, velocity: val });
-              }
+              events.push({ tick: absTick, channel: ch, type: 0xB0, note: cc, velocity: val });
             } else if (evtType === 0xE0) { // Pitch Bend
-              tOffset += 2;
+              const lsb = u8[tOffset++];
+              const msb = u8[tOffset++];
+              events.push({ tick: absTick, channel: ch, type: 0xE0, note: lsb, velocity: msb });
+            } else if (evtType === 0xA0 || evtType === 0xD0) {
+              tOffset += evtType === 0xA0 ? 2 : 1;
             } else if (status === 0xFF) { // Meta Event
               const metaType = u8[tOffset++];
               let metaLen = 0;
@@ -524,20 +735,25 @@ class SpessaSynthEngine {
                 if (microseconds > 0) currentBpm = Math.round(60000000 / microseconds);
               }
               tOffset += metaLen;
+            } else if (status === 0xF0 || status === 0xF7) {
+              let syxLen = 0;
+              while (tOffset < tEnd) {
+                const b = u8[tOffset++];
+                syxLen = (syxLen << 7) | (b & 0x7F);
+                if (!(b & 0x80)) break;
+              }
+              tOffset += syxLen;
             }
           }
         }
         offset += 8 + chunkLen;
       }
 
-      // Sort events chronologically
       events.sort((a, b) => a.tick - b.tick);
 
-      // Schedule playback events
       const secondsPerTick = 60 / (currentBpm * ppq);
-      const startTime = ctx.currentTime;
-
       let lastTick = 0;
+
       events.forEach(ev => {
         const timeSec = startDelaySec + (ev.tick * secondsPerTick);
         if (ev.tick > lastTick) lastTick = ev.tick;
@@ -546,27 +762,30 @@ class SpessaSynthEngine {
           if (!this.isPlaying) return;
 
           if (ev.type === 0x90) {
-            this.noteOn(ev.channel, ev.note, ev.velocity, 0.35, ctx.currentTime);
+            this.noteOn(ev.channel, ev.note, ev.velocity, undefined, ctx.currentTime);
+          } else if (ev.type === 0x80) {
+            this.noteOff(ev.channel, ev.note, ctx.currentTime);
           } else if (ev.type === 0xC0) {
-            if (this.channelStates[ev.channel]) {
-              this.channelStates[ev.channel].program = ev.note;
-              this.channelStates[ev.channel].programName = DEFAULT_GM_PROGRAMS[ev.note] || `Program ${ev.note}`;
-            }
-          } else if (ev.type === 0xB0 && ev.note === 7) {
-            if (this.channelStates[ev.channel]) {
-              this.channelStates[ev.channel].volume = ev.velocity;
-            }
+            this.setChannelProgram(ev.channel, ev.note);
+          } else if (ev.type === 0xB0) {
+            if (ev.note === 7) this.setChannelVolume(ev.channel, ev.velocity, ctx.currentTime);
+            else if (ev.note === 10) this.setChannelPan(ev.channel, ev.velocity, ctx.currentTime);
+            else if (ev.note === 11) this.setChannelExpression(ev.channel, ev.velocity, ctx.currentTime);
+            else if (ev.note === 64) this.setChannelSustain(ev.channel, ev.velocity >= 64, ctx.currentTime);
+          } else if (ev.type === 0xE0) {
+            const bend = ((ev.velocity << 7) | ev.note) - 8192;
+            this.setChannelPitchBend(ev.channel, bend, ctx.currentTime);
           }
         }, timeSec * 1000);
 
         this.playbackTimeoutIds.push(timerId);
       });
 
-      // End of song listener
       const totalDurationSec = startDelaySec + (lastTick * secondsPerTick);
       const endTimer = setTimeout(() => {
         if (this.isPlaying) {
           this.isPlaying = false;
+          this.allNotesOff();
           onEnded?.();
         }
       }, (totalDurationSec + 0.5) * 1000);
@@ -582,8 +801,7 @@ class SpessaSynthEngine {
     this.isPlaying = false;
     this.playbackTimeoutIds.forEach(id => clearTimeout(id));
     this.playbackTimeoutIds = [];
-    this.activeVoices.forEach(v => v.stop());
-    this.activeVoices = [];
+    this.allNotesOff();
   }
 
   public isMidiPlaying(): boolean {
@@ -592,28 +810,51 @@ class SpessaSynthEngine {
 
   // --- MIDI CONTROLLER CHANNEL CONFIGURATION & CC METHODS ---
 
-  public setChannelVolume(channel: number, volume: number) {
+  public setChannelVolume(channel: number, volume: number, atTime?: number) {
     const ch = Math.max(0, Math.min(15, channel));
     const vol = Math.max(0, Math.min(127, volume));
     if (this.channelStates[ch]) {
       this.channelStates[ch].volume = vol;
     }
-    if (this.channelGains[ch] && this.audioCtx) {
-      const gainVal = (vol / 127) * 0.85;
-      this.channelGains[ch].gain.setValueAtTime(gainVal, this.audioCtx.currentTime);
+    this.updateChannelGainNode(ch, atTime);
+  }
+
+  public setChannelExpression(channel: number, expression: number, atTime?: number) {
+    const ch = Math.max(0, Math.min(15, channel));
+    const expr = Math.max(0, Math.min(127, expression));
+    if (this.channelStates[ch]) {
+      this.channelStates[ch].expression = expr;
+    }
+    this.updateChannelGainNode(ch, atTime);
+  }
+
+  public setChannelSustain(channel: number, active: boolean, atTime?: number) {
+    const ch = Math.max(0, Math.min(15, channel));
+    const chState = this.channelStates[ch];
+    if (!chState) return;
+    chState.sustainPedal = active;
+
+    if (!active) {
+      const releaseTime = this.resolveTime(atTime);
+      const list = this.activeOscillators[ch] || [];
+      for (const oscRec of list) {
+        if (oscRec.pendingRelease && !oscRec.hasScheduledStop) {
+          oscRec.release(releaseTime);
+        }
+      }
     }
   }
 
-  public setChannelPan(channel: number, pan: number) {
+  public setChannelPan(channel: number, pan: number, atTime?: number) {
     const ch = Math.max(0, Math.min(15, channel));
     const p = Math.max(0, Math.min(127, pan));
     if (this.channelStates[ch]) {
       this.channelStates[ch].pan = p;
     }
     if (this.channelPanners[ch] && this.audioCtx) {
-      // 0 = Full Left (-1.0), 64 = Center (0.0), 127 = Full Right (+1.0)
       const panRatio = (p - 64) / 64;
-      this.channelPanners[ch].pan.setValueAtTime(Math.max(-1.0, Math.min(1.0, panRatio)), this.audioCtx.currentTime);
+      const t = this.resolveTime(atTime);
+      this.channelPanners[ch].pan.setValueAtTime(Math.max(-1.0, Math.min(1.0, panRatio)), t);
     }
   }
 
@@ -633,28 +874,27 @@ class SpessaSynthEngine {
     if (this.channelStates[ch]) {
       this.channelStates[ch].isMuted = isMuted;
     }
-    if (this.channelGains[ch] && this.audioCtx) {
-      const vol = isMuted ? 0 : (this.channelStates[ch].volume / 127) * 0.85;
-      this.channelGains[ch].gain.setValueAtTime(vol, this.audioCtx.currentTime);
+    if (isMuted) {
+      this.noteOff(ch);
     }
+    this.updateChannelGainNode(ch);
   }
 
-  public setChannelPitchBend(channel: number, bend: number) {
+  public setChannelPitchBend(channel: number, bend: number, atTime?: number) {
     const ch = Math.max(0, Math.min(15, channel));
     const clampedBend = Math.max(-8192, Math.min(8191, bend));
     if (this.channelStates[ch]) {
       this.channelStates[ch].pitchBend = clampedBend;
       const range = this.channelStates[ch].pitchBendRange || 2;
       const bendSemitones = (clampedBend / 8192) * range;
-      const now = this.audioCtx?.currentTime || 0;
+      const t = this.resolveTime(atTime);
 
-      // Real-time pitch bend on currently sounding oscillators!
       (this.activeOscillators[ch] || []).forEach(v => {
         try {
-          const newFreq = 440 * Math.pow(2, (v.baseNote + bendSemitones - 69) / 12);
-          v.osc.frequency.setTargetAtTime(newFreq, now, 0.008);
+          const newFreq = Math.max(16, 440 * Math.pow(2, (v.baseNote + bendSemitones - 69) / 12));
+          v.osc.frequency.setTargetAtTime(newFreq, t, 0.008);
           if (v.subOsc) {
-            v.subOsc.frequency.setTargetAtTime(newFreq * v.subRatio, now, 0.008);
+            v.subOsc.frequency.setTargetAtTime(newFreq * v.subRatio, t, 0.008);
           }
         } catch (e) {}
       });
@@ -689,27 +929,38 @@ class SpessaSynthEngine {
     }
   }
 
+  public resetChannelControllers(channel: number, atTime?: number) {
+    const ch = Math.max(0, Math.min(15, channel));
+    const chState = this.channelStates[ch];
+    if (!chState) return;
+    chState.expression = 127;
+    chState.pitchBend = 0;
+    chState.portamentoEnabled = false;
+    chState.portamentoControl = null;
+    this.setChannelSustain(ch, false, atTime);
+    this.updateChannelGainNode(ch, atTime);
+  }
+
   public triggerPortamentoGlideTest(channel = 0, startNote = 48, endNote = 67) {
     this.setChannelPortamento(channel, true);
-    // Note 1 (e.g. C3 = 48)
     this.noteOn(channel, startNote, 95, 0.28);
-    // Note 2 (e.g. G4 = 67), glides smoothly from startNote!
     setTimeout(() => {
       this.noteOn(channel, endNote, 100, 0.65);
     }, 130);
   }
 
-  public allNotesOff(channel?: number) {
+  public allNotesOff(channel?: number, atTime?: number) {
     if (channel !== undefined) {
-      this.noteOff(channel);
+      this.noteOff(channel, undefined, atTime);
       return;
     }
     this.activeVoices.forEach(v => {
-      try { v.stop(); } catch(e) {}
+      try { v.stop(); } catch (e) {}
     });
     this.activeVoices = [];
     this.channelStates.forEach(ch => {
       ch.activeNoteCount = 0;
+      ch.sustainPedal = false;
     });
     for (let i = 0; i < 16; i++) {
       this.noteOff(i);
@@ -725,8 +976,7 @@ class SpessaSynthEngine {
       setTimeout(() => {
         if (!this.audioCtx) return;
         for (let i = 0; i < 16; i++) {
-          const vol = this.channelStates[i]?.isMuted ? 0 : (this.channelStates[i]?.volume / 127) * 0.85;
-          this.channelGains[i]?.gain.setValueAtTime(vol, this.audioCtx.currentTime);
+          this.updateChannelGainNode(i);
         }
       }, 50);
     }
@@ -745,8 +995,10 @@ class SpessaSynthEngine {
         program: defProg,
         programName: i === 9 ? "GM Standard Drum Kit" : (DEFAULT_GM_PROGRAMS[defProg] || `Program ${defProg}`),
         volume: 100,
+        expression: 127,
         pan: 64,
         pitchBend: 0,
+        sustainPedal: false,
         isMuted: false,
         activeNoteCount: 0,
         pitchBendRange: 2,
@@ -771,12 +1023,14 @@ class SpessaSynthEngine {
   public sendGSReset(): { message: string; timestamp: number } {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
-      const defProg = i === 9 ? 0 : 0; // Piano default across channels
+      const defProg = 0;
       this.channelStates[i].program = defProg;
       this.channelStates[i].programName = i === 9 ? "GS Standard Drum Kit" : (DEFAULT_GM_PROGRAMS[defProg] || `Program ${defProg}`);
       this.channelStates[i].volume = 100;
+      this.channelStates[i].expression = 127;
       this.channelStates[i].pan = 64;
       this.channelStates[i].pitchBend = 0;
+      this.channelStates[i].sustainPedal = false;
       this.channelStates[i].pitchBendRange = 2;
       this.channelStates[i].portamentoEnabled = false;
       this.channelStates[i].portamentoTime = 64;
@@ -800,8 +1054,10 @@ class SpessaSynthEngine {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
       this.channelStates[i].volume = 100;
+      this.channelStates[i].expression = 127;
       this.channelStates[i].pan = 64;
       this.channelStates[i].pitchBend = 0;
+      this.channelStates[i].sustainPedal = false;
       this.channelStates[i].isMuted = false;
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
@@ -818,9 +1074,11 @@ class SpessaSynthEngine {
   public sendGM2Reset(): { message: string; timestamp: number } {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
+      this.channelStates[i].expression = 127;
+      this.channelStates[i].sustainPedal = false;
+      this.channelStates[i].pitchBend = 0;
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
-      this.channelStates[i].pitchBend = 0;
     }
     return {
       message: "GM2 Reset: Sent SysEx F0 7E 7F 09 03 F7 (GM Level 2 Mode)",

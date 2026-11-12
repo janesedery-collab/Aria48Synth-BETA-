@@ -11,6 +11,7 @@ import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments, parseSoundFontFile } from '../utils/soundFontEngine';
 import { getAudioContext } from './AudioEngine';
+import { saveAmplifier } from '../utils/cookieStorage';
 
 interface MixerEQProps {
   channels: Channel[];
@@ -411,13 +412,16 @@ export default function MixerEQ({
                   <button
                     key={mult}
                     id={`osc-amp-btn-${mult}`}
-                    onClick={() => setOscConfig?.({ ...oscConfig, amplifier: mult })}
+                    onClick={() => {
+                      saveAmplifier(mult);
+                      setOscConfig?.({ ...oscConfig, amplifier: mult });
+                    }}
                     className={`px-2 py-0.5 rounded text-[8.5px] font-mono font-bold border transition cursor-pointer ${
                       (oscConfig.amplifier ?? 1.0) === mult
                         ? 'bg-cyan-600 text-white border-cyan-400 shadow-sm'
                         : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                     }`}
-                    title={`Set waveform amplifier to ${mult}x drawing height`}
+                    title={`Set waveform amplifier to ${mult}x drawing height (saved in browser cookies)`}
                   >
                     {mult === 1.0 ? '1.0x (Norm)' : `${mult}x`}
                   </button>
@@ -432,12 +436,22 @@ export default function MixerEQ({
                   max="8.0"
                   step="0.1"
                   value={oscConfig.amplifier ?? 1.0}
-                  onChange={(e) => setOscConfig?.({ ...oscConfig, amplifier: parseFloat(e.target.value) })}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value);
+                    saveAmplifier(val);
+                    setOscConfig?.({ ...oscConfig, amplifier: val });
+                  }}
                   className="w-24 accent-cyan-400 cursor-pointer h-1.5 bg-zinc-900 rounded"
-                  title="Smooth waveform amplifier height slider (0.2x - 8.0x)"
+                  title="Smooth waveform amplifier height slider (0.2x - 8.0x) - Saved in cookies"
                 />
                 <span className="text-[9.5px] font-mono font-black text-cyan-400 min-w-[32px]">
                   {(oscConfig.amplifier ?? 1.0).toFixed(1)}x
+                </span>
+                <span 
+                  className="hidden sm:inline-flex items-center gap-0.5 text-[8px] font-mono text-emerald-400/90 bg-emerald-950/60 border border-emerald-800/40 px-1 py-0.2 rounded"
+                  title="Amplifier setting is automatically saved in browser cookies (aria48_osc_amplifier)"
+                >
+                  🍪 Cookie Saved
                 </span>
               </div>
             </div>
