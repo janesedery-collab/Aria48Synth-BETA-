@@ -25,7 +25,8 @@ import {
   stopAllChannelsSound,
   getAudioContext,
   setAudioPlaybackRate,
-  getTinySynth
+  setMidiTempoBpm,
+  restoreSavedSoundFontsFromCookies
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
@@ -176,8 +177,9 @@ export default function App() {
     }
   }, []);
 
-  // Restore saved soundfont preference on initial load
+  // Restore saved soundfont preset preference & custom SoundFonts saved in browser cookies
   useEffect(() => {
+    void restoreSavedSoundFontsFromCookies();
     const savedSf = getSavedSelectedSoundFont();
     if (savedSf && savedSf !== 'gm_piano') {
       setChannels(prev => prev.map((ch, idx) => {
@@ -224,9 +226,14 @@ export default function App() {
   useEffect(() => {
     if (isPlaying) {
       if (loadedMidiBuffer) {
-        playMidiBuffer(loadedMidiBuffer, () => {
-          setIsPlaying(false);
-        });
+        playMidiBuffer(
+          loadedMidiBuffer,
+          () => {
+            setIsPlaying(false);
+          },
+          bpm,
+          baseSongBpm
+        );
       } else if (loadedAudioBuffer) {
         playDirectAudio(loadedAudioBuffer, 0, () => {
           setIsPlaying(false);
@@ -244,15 +251,12 @@ export default function App() {
 
   // Dynamic Audio Playback Rate / Tempo Scaling on BPM changes (does NOT restart the song!)
   useEffect(() => {
-    if (isPlaying && loadedAudioBuffer) {
+    if (loadedAudioBuffer) {
       const rate = bpm / (baseSongBpm || 125);
       setAudioPlaybackRate(rate);
     }
-    const synth = getTinySynth();
-    if (synth && synth.setBpm) {
-      synth.setBpm(bpm);
-    }
-  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer]);
+    setMidiTempoBpm(bpm, baseSongBpm);
+  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
 
   // Synchronous Visual Tracker Row Advance synchronized to BPM
   useEffect(() => {

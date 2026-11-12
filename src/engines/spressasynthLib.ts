@@ -90,6 +90,7 @@ class SpessaSynthEngine {
   private soundFonts: SpessaSoundFont[] = [];
   private activeSoundFontId = "spessa-default-gm";
   private soundFontListeners: Array<(fonts: SpessaSoundFont[], activeId: string) => void> = [];
+  private channelStateListeners: Array<(states: MidiChannelState[]) => void> = [];
 
   // Active playback tracking
   private isPlaying = false;
@@ -215,6 +216,25 @@ class SpessaSynthEngine {
 
   public getChannelStates(): MidiChannelState[] {
     return this.channelStates;
+  }
+
+  public isChannelMuted(channel: number): boolean {
+    const ch = Math.max(0, Math.min(15, channel));
+    return Boolean(this.channelStates[ch]?.isMuted);
+  }
+
+  public onChannelStateChange(listener: (states: MidiChannelState[]) => void): () => void {
+    this.channelStateListeners.push(listener);
+    return () => {
+      this.channelStateListeners = this.channelStateListeners.filter(l => l !== listener);
+    };
+  }
+
+  private notifyChannelStateListeners() {
+    const copy = this.channelStates.map(s => ({ ...s }));
+    this.channelStateListeners.forEach(cb => {
+      try { cb(copy); } catch (e) {}
+    });
   }
 
   public getLoadedSoundFonts(): SpessaSoundFont[] {
@@ -1096,6 +1116,7 @@ class SpessaSynthEngine {
       this.noteOff(ch);
     }
     this.updateChannelGainNode(ch);
+    this.notifyChannelStateListeners();
   }
 
   public setChannelPitchBend(channel: number, bend: number, atTime?: number) {
@@ -1211,10 +1232,11 @@ class SpessaSynthEngine {
    * General MIDI (GM) System Reset
    * Standard MIDI message: resets all controllers, programs, pitch bends, and centers pan
    */
-  public sendGMReset(): { message: string; timestamp: number } {
+  public sendGMReset(preserveMute = false): { message: string; timestamp: number } {
     this.allNotesOff();
     for (let i = 0; i < 16; i++) {
       const defProg = i === 9 ? 0 : i % 8;
+      const wasMuted = preserveMute ? Boolean(this.channelStates[i]?.isMuted) : false;
       this.channelStates[i] = {
         index: i,
         bank: i === 9 ? 128 : 0,
@@ -1225,7 +1247,7 @@ class SpessaSynthEngine {
         pan: 64,
         pitchBend: 0,
         sustainPedal: false,
-        isMuted: false,
+        isMuted: wasMuted,
         activeNoteCount: 0,
         pitchBendRange: 2,
         portamentoEnabled: false,
@@ -1235,7 +1257,9 @@ class SpessaSynthEngine {
       };
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
+      this.updateChannelGainNode(i);
     }
+    this.notifyChannelStateListeners();
     return {
       message: "GM Reset: Sent SysEx F0 7E 7F 09 01 F7 + Controller Reset (CC 121 / 123)",
       timestamp: Date.now()
@@ -1267,6 +1291,7 @@ class SpessaSynthEngine {
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
     }
+    this.notifyChannelStateListeners();
     return {
       message: "GS Reset: Sent SysEx F0 41 10 42 12 40 00 7F 00 41 F7 (Roland GS Mode)",
       timestamp: Date.now()
@@ -1290,6 +1315,7 @@ class SpessaSynthEngine {
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
     }
+    this.notifyChannelStateListeners();
     return {
       message: "XG Reset: Sent SysEx F0 43 10 4C 00 00 7E 00 F7 (Yamaha XG Mode)",
       timestamp: Date.now()
@@ -1309,6 +1335,7 @@ class SpessaSynthEngine {
       this.setChannelVolume(i, 100);
       this.setChannelPan(i, 64);
     }
+    this.notifyChannelStateListeners();
     return {
       message: "GM2 Reset: Sent SysEx F0 7E 7F 09 03 F7 (GM Level 2 Mode)",
       timestamp: Date.now()

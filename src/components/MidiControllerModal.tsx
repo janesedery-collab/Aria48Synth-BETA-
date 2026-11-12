@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sliders, Music, Volume2, RotateCcw, AlertOctagon, 
   Check, X, Activity, Play, Radio, Sparkles, Layers, Piano,
@@ -8,6 +8,7 @@ import { SpessaSynth, DEFAULT_GM_PROGRAMS, MidiChannelState } from '../engines/s
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { SoundFontInstrument } from '../types';
 import { saveSelectedSoundFont, getSavedSelectedSoundFont } from '../utils/recentSongsManager';
+import { setMidiChannelMuted } from './AudioEngine';
 
 interface MidiControllerModalProps {
   isOpen: boolean;
@@ -54,16 +55,44 @@ export default function MidiControllerModal({
   const [availableSoundFonts, setAvailableSoundFonts] = useState<SoundFontInstrument[]>([]);
   const [selectedSoundFontId, setSelectedSoundFontId] = useState<string>("gm_piano");
   const [systemLog, setSystemLog] = useState<string>("SpessaSynth Ready (16-Channel Engine Initialized)");
+  const [holdPitchWheel, setHoldPitchWheel] = useState(false);
+  const [pitchRange, setPitchRange] = useState(2);
+  const [isSlidingActive, setIsSlidingActive] = useState(false);
+
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (isOpen) {
-      setChannelStates([...SpessaSynth.getChannelStates()]);
+      const states = [...SpessaSynth.getChannelStates()];
+      setChannelStates(states);
+      setPitchRange(states[selectedChannel]?.pitchBendRange || 2);
       const insts = getAvailableSoundFontInstruments();
       setAvailableSoundFonts(insts);
       const savedSf = getSavedSelectedSoundFont();
       setSelectedSoundFontId(savedSf);
+      const unsubCh = SpessaSynth.onChannelStateChange((nextStates) => {
+        setChannelStates(nextStates);
+      });
+      const unsubSf = SpessaSynth.onSoundFontChange(() => {
+        setAvailableSoundFonts(getAvailableSoundFontInstruments());
+      });
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') onCloseRef.current();
+      };
+      window.addEventListener('keydown', onKeyDown);
+      return () => {
+        unsubCh();
+        unsubSf();
+        window.removeEventListener('keydown', onKeyDown);
+      };
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    const chRange = channelStates[selectedChannel]?.pitchBendRange;
+    if (chRange) setPitchRange(chRange);
+  }, [selectedChannel, channelStates]);
 
   if (!isOpen) return null;
 
@@ -72,6 +101,7 @@ export default function MidiControllerModal({
     program: selectedChannel === 9 ? 0 : selectedChannel % 8,
     programName: selectedChannel === 9 ? "GM Standard Drum Kit" : "Acoustic Grand Piano",
     volume: 100,
+    expression: 127,
     pan: 64,
     pitchBend: 0,
     isMuted: false,
@@ -82,10 +112,6 @@ export default function MidiControllerModal({
     portamentoControl: null,
     lastNote: null
   };
-
-  const [holdPitchWheel, setHoldPitchWheel] = useState(false);
-  const [pitchRange, setPitchRange] = useState(currentCh.pitchBendRange || 2);
-  const [isSlidingActive, setIsSlidingActive] = useState(false);
 
   const handleVolumeChange = (vol: number) => {
     SpessaSynth.setChannelVolume(selectedChannel, vol);
@@ -105,7 +131,7 @@ export default function MidiControllerModal({
 
   const handleMuteToggle = () => {
     const nextMute = !currentCh.isMuted;
-    SpessaSynth.setChannelMute(selectedChannel, nextMute);
+    setMidiChannelMuted(selectedChannel, nextMute);
     setChannelStates([...SpessaSynth.getChannelStates()]);
   };
 
@@ -222,7 +248,12 @@ export default function MidiControllerModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-150">
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-in fade-in duration-150"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="w-full max-w-4xl bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden text-zinc-300">
         
         {/* HEADER BAR */}

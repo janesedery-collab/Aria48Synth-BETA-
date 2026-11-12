@@ -115,11 +115,16 @@ export function clearRecentSongs(): void {
   }
 }
 
+import { getActiveSoundFontCookie, saveActiveSoundFontCookie } from './cookieStorage';
+
 /**
- * Persist user selected SoundFont preset across sessions
+ * Persist user selected SoundFont preset across sessions (cookies + localStorage)
  */
 export function saveSelectedSoundFont(presetId: string): void {
   try {
+    if (presetId) {
+      saveActiveSoundFontCookie(presetId);
+    }
     if (typeof window !== 'undefined' && window.localStorage && presetId) {
       localStorage.setItem(STORAGE_KEY_SELECTED_SOUNDFONT, presetId);
     }
@@ -130,6 +135,8 @@ export function saveSelectedSoundFont(presetId: string): void {
 
 export function getSavedSelectedSoundFont(): string {
   try {
+    const cookieVal = getActiveSoundFontCookie();
+    if (cookieVal) return cookieVal;
     if (typeof window !== 'undefined' && window.localStorage) {
       const saved = localStorage.getItem(STORAGE_KEY_SELECTED_SOUNDFONT);
       if (saved) return saved;

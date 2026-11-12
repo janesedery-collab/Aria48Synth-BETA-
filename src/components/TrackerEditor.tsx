@@ -89,6 +89,11 @@ export default function TrackerEditor({
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
   const [enginesConfig, setEnginesConfig] = useState<SoundEnginesConfig>(getSoundEnginesConfig());
+  const [trackerBpmText, setTrackerBpmText] = useState((bpm || 125).toString());
+
+  useEffect(() => {
+    setTrackerBpmText((bpm || 125).toString());
+  }, [bpm]);
 
   useEffect(() => {
     setSoundFontInstruments(getAvailableSoundFontInstruments());
@@ -509,21 +514,86 @@ export default function TrackerEditor({
           <div className="flex items-center gap-1 px-2 py-1 bg-zinc-900 border border-zinc-800 rounded-lg text-xs">
             <span className="text-zinc-500 text-[9.5px] uppercase font-bold tracking-wider mr-0.5">BPM</span>
             <button
+              id="tracker-bpm-decrement-btn"
               type="button"
-              onClick={() => setBpm && setBpm(Math.max(30, bpm - 1))}
+              onClick={(e) => {
+                const step = e.shiftKey ? -5 : -1;
+                const next = Math.max(30, Math.min(320, (bpm || 125) + step));
+                setBpm?.(next);
+                setTrackerBpmText(next.toString());
+              }}
               className="w-5 h-5 flex items-center justify-center bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-cyan-400 rounded border border-zinc-800 cursor-pointer text-xs active:scale-95 transition"
-              title="Decrease BPM (-1)"
+              title="Decrease BPM (-1, Shift+Click: -5)"
             >
               -
             </button>
-            <span className="min-w-[28px] text-center font-mono font-bold text-cyan-300 text-[11px]">
-              {bpm}
-            </span>
+            <input
+              id="tracker-bpm-input"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={trackerBpmText}
+              onChange={(e) => {
+                const text = e.target.value.replace(/[^0-9]/g, '');
+                setTrackerBpmText(text);
+                if (text.length >= 2) {
+                  const n = parseInt(text, 10);
+                  if (n >= 30 && n <= 320) {
+                    setBpm?.(n);
+                  }
+                }
+              }}
+              onBlur={() => {
+                const parsed = parseInt(trackerBpmText, 10);
+                if (!isNaN(parsed) && parsed > 0) {
+                  const clamped = Math.max(30, Math.min(320, parsed));
+                  setBpm?.(clamped);
+                  setTrackerBpmText(clamped.toString());
+                } else {
+                  setTrackerBpmText((bpm || 125).toString());
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const parsed = parseInt(trackerBpmText, 10);
+                  if (!isNaN(parsed) && parsed > 0) {
+                    const clamped = Math.max(30, Math.min(320, parsed));
+                    setBpm?.(clamped);
+                    setTrackerBpmText(clamped.toString());
+                  }
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  const next = Math.max(30, Math.min(320, (bpm || 125) + (e.shiftKey ? 5 : 1)));
+                  setBpm?.(next);
+                  setTrackerBpmText(next.toString());
+                } else if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  const next = Math.max(30, Math.min(320, (bpm || 125) + (e.shiftKey ? -5 : -1)));
+                  setBpm?.(next);
+                  setTrackerBpmText(next.toString());
+                }
+              }}
+              onWheel={(e) => {
+                e.preventDefault();
+                const next = Math.max(30, Math.min(320, (bpm || 125) + (e.deltaY < 0 ? 1 : -1)));
+                setBpm?.(next);
+                setTrackerBpmText(next.toString());
+              }}
+              className="w-11 bg-black border border-zinc-800 focus:border-cyan-500 rounded px-1 py-0.5 text-center font-mono font-bold text-cyan-300 text-[11px] focus:outline-none select-all"
+              title="Click & type, use arrow keys, or scroll wheel to adjust BPM"
+            />
             <button
+              id="tracker-bpm-increment-btn"
               type="button"
-              onClick={() => setBpm && setBpm(Math.min(320, bpm + 1))}
+              onClick={(e) => {
+                const step = e.shiftKey ? 5 : 1;
+                const next = Math.max(30, Math.min(320, (bpm || 125) + step));
+                setBpm?.(next);
+                setTrackerBpmText(next.toString());
+              }}
               className="w-5 h-5 flex items-center justify-center bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-cyan-400 rounded border border-zinc-800 cursor-pointer text-xs active:scale-95 transition"
-              title="Increase BPM (+1)"
+              title="Increase BPM (+1, Shift+Click: +5)"
             >
               +
             </button>

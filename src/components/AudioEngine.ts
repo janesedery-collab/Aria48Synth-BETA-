@@ -5,6 +5,13 @@ import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib'
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
+import {
+  getActiveSoundFontCookie,
+  getSavedSoundFontsFromCookies,
+  loadSavedSoundFontBinary,
+  saveActiveSoundFontCookie,
+  saveSoundFontToCookiesAndCache
+} from '../utils/cookieStorage';
 
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
 export {
@@ -17,23 +24,82 @@ export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
 export type { SoundEnginesConfig };
 
+let isRestoringSoundFonts = false;
+let soundFontRestorePromise: Promise<void> | null = null;
+
 /**
  * Unified SoundFont ingestion pipeline:
  * Feeds ANY SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, etc.)
- * into spressasynth_core-master.zip and links decoded banks & sample zones directly into spressasynth_lib-master.zip.
+ * into spressasynth_core-master.zip, links decoded banks & sample zones directly into spressasynth_lib-master.zip,
+ * and saves the added SoundFont into browser cookies (+ IndexedDB backing for large banks).
  */
-export async function loadSoundFontIntoCoreAndLib(arrayBuffer: ArrayBuffer, fileName: string) {
+export async function loadSoundFontIntoCoreAndLib(
+  arrayBuffer: ArrayBuffer,
+  fileName: string,
+  options?: { skipCookieSave?: boolean }
+) {
   const ctx = getAudioContext() || SpessaSynth.init();
   if (ctx.state === 'suspended') {
     try { await ctx.resume(); } catch (e) {}
   }
   const { soundFont, coreResult } = await SpessaSynth.loadSoundFontAsync(arrayBuffer, fileName, ctx);
+  if (!options?.skipCookieSave) {
+    try {
+      await saveSoundFontToCookiesAndCache(fileName, arrayBuffer, soundFont.id, {
+        name: soundFont.name,
+        format: soundFont.format
+      });
+    } catch (e) {}
+  }
   return {
     soundFont,
     bankInfo: coreResult.bankInfo,
     instruments: coreResult.instruments,
     logs: coreResult.logs
   };
+}
+
+/**
+ * Restore all user-added SoundFonts saved in browser cookies across sessions.
+ */
+export function restoreSavedSoundFontsFromCookies(): Promise<void> {
+  if (soundFontRestorePromise) return soundFontRestorePromise;
+  soundFontRestorePromise = (async () => {
+    const savedEntries = getSavedSoundFontsFromCookies();
+    if (savedEntries.length === 0) return;
+
+    isRestoringSoundFonts = true;
+    const savedActiveId = getActiveSoundFontCookie();
+    try {
+      const ctx = getAudioContext() || SpessaSynth.init();
+      // Load oldest -> newest so newest becomes active before applying savedActiveId
+      for (let i = savedEntries.length - 1; i >= 0; i--) {
+        const entry = savedEntries[i];
+        try {
+          const buf = await loadSavedSoundFontBinary(entry);
+          if (buf && buf.byteLength > 0) {
+            await SpessaSynth.loadSoundFontAsync(buf, entry.fileName, ctx);
+          }
+        } catch (err) {
+          console.warn(`Could not restore SoundFont "${entry.fileName}" from cookies:`, err);
+        }
+      }
+      if (savedActiveId && SpessaSynth.getLoadedSoundFonts().some(s => s.id === savedActiveId)) {
+        SpessaSynth.setActiveSoundFont(savedActiveId);
+      }
+    } finally {
+      isRestoringSoundFonts = false;
+    }
+  })();
+  return soundFontRestorePromise;
+}
+
+if (typeof window !== 'undefined') {
+  SpessaSynth.onSoundFontChange((_, activeId) => {
+    if (!isRestoringSoundFonts && activeId) {
+      saveActiveSoundFontCookie(activeId);
+    }
+  });
 }
 
 export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
@@ -120,6 +186,35 @@ let midiPlaybackWatchdogTimer: any = null;
 let midiEndTailTimer: any = null;
 
 /**
+ * Mute / Unmute a specific MIDI channel (0-15) across SpessaSynth, TinySynth, and Synthetic Oscillators.
+ */
+export function setMidiChannelMuted(channelIndex: number, isMuted: boolean): boolean {
+  const ch = Math.max(0, Math.min(15, Math.floor(channelIndex)));
+  SpessaSynth.setChannelMute(ch, isMuted);
+
+  if (isMuted) {
+    if (tinySynthInstance) {
+      try {
+        tinySynthInstance.allSoundOff?.(ch);
+      } catch (e) {}
+    }
+    for (let i = activeSyntheticVoices.length - 1; i >= 0; i--) {
+      if ((activeSyntheticVoices[i].channelId - 1) % 16 === ch) {
+        try { activeSyntheticVoices[i].stop(); } catch (e) {}
+        activeSyntheticVoices.splice(i, 1);
+      }
+    }
+  }
+  return isMuted;
+}
+
+export function toggleMidiChannelMute(channelIndex: number): boolean {
+  const ch = Math.max(0, Math.min(15, Math.floor(channelIndex)));
+  const nextMuted = !SpessaSynth.isChannelMuted(ch);
+  return setMidiChannelMuted(ch, nextMuted);
+}
+
+/**
  * Phase-Locked Sound Engine Synchronizer:
  * Hooks TinySynth's internal SMF event dispatcher (`send(msg, t)`).
  * Because TinySynth accurately parses all tracks, deltas, and mid-song tempo meta-events (0xff51),
@@ -131,15 +226,20 @@ export function hookTinySynthEvents(synth: any) {
   const originalSend = synth.send.bind(synth);
 
   synth.send = function(msg: number[], t?: number) {
+    const status = msg && msg.length > 0 ? msg[0] : 0;
+    const cmd = status & 0xf0;
+    const ch = status & 0x0f;
+
+    // Suppress Note-On on muted MIDI channels across both TinySynth and SpessaSynth
+    if (cmd === 0x90 && msg[2] > 0 && SpessaSynth.isChannelMuted(ch)) {
+      return;
+    }
+
     // 1. Process TinySynth voice synthesis
     originalSend(msg, t);
 
     // 2. Synchronously forward to SpessaSynth on the exact same audio timeline
     if (!suppressHookForward && activeEnginesConfig.spessaSynth && msg && msg.length > 0) {
-      const status = msg[0];
-      const cmd = status & 0xf0;
-      const ch = status & 0x0f;
-
       if (cmd === 0x90) { // Note On / Note Off (vel === 0)
         const note = msg[1];
         const vel = msg[2];
@@ -182,7 +282,7 @@ export function hookTinySynthEvents(synth: any) {
           SpessaSynth.resetChannelControllers(ch, t);
         }
       } else if (status === 0xff) {
-        SpessaSynth.sendGMReset();
+        SpessaSynth.sendGMReset(true);
       }
     }
   };
@@ -255,12 +355,40 @@ export function getSyntheticMasterGain(): GainNode | null {
 }
 
 /**
+ * Dynamically scale WebAudioTinySynth & SpessaSynth MIDI playback speed according to BPM controller.
+ * Scales `song.timebase` and recomputes `tick2Time` so both immediate ticks and subsequent
+ * 0xff51 tempo meta-events remain locked to the user's chosen BPM without restarting playback.
+ */
+export function setMidiTempoBpm(targetBpm: number, baseSongBpm?: number) {
+  const synth = tinySynthInstance;
+  if (!synth || !synth.song) return;
+
+  const baseBpm = Math.max(30, (synth as any).__ariaBaseBpm || baseSongBpm || 120);
+  const baseTimebase = (synth as any).__ariaBaseTimebase || synth.song.timebase || 1920;
+  if (!(synth as any).__ariaBaseTimebase) {
+    (synth as any).__ariaBaseTimebase = baseTimebase;
+  }
+
+  const clampedTarget = Math.max(30, Math.min(320, Number(targetBpm) || baseBpm));
+  const rate = Math.max(0.25, Math.min(4.0, clampedTarget / baseBpm));
+
+  synth.song.timebase = baseTimebase * rate;
+  const activeTempo = Math.max(20, synth.song.tempo || baseBpm);
+  synth.tick2Time = (4 * 60) / activeTempo / synth.song.timebase;
+}
+
+/**
  * Phase-locked Synchronized MIDI Player
  * TinySynth's master sequencer dynamically parses delta ticks, multi-tracks, and tempo changes (0xff51).
  * Both SpessaSynth and WebAudioTinySynth receive all events simultaneously on the shared AudioContext timeline,
  * eliminating sound engine delay, desync on tempo changes, and phasing jitter!
  */
-export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
+export function playMidiBuffer(
+  arrayBuffer: ArrayBuffer,
+  onEnded?: () => void,
+  targetBpm?: number,
+  baseSongBpm?: number
+) {
   try {
     stopMidiPlayback();
     stopDirectAudio();
@@ -273,12 +401,23 @@ export function playMidiBuffer(arrayBuffer: ArrayBuffer, onEnded?: () => void) {
     if (synth) {
       hookTinySynthEvents(synth);
 
-      // Reset SpessaSynth channel states cleanly before launching synchronized playback
-      SpessaSynth.sendGMReset();
+      // Reset SpessaSynth channel states cleanly (preserving user oscilloscope mutes) before launching playback
+      SpessaSynth.sendGMReset(true);
 
-      // Load SMF binary and launch synchronized playback
+      // Load SMF binary and snapshot original MIDI timebase/tempo for live BPM scaling
       synth.loadMIDI(arrayBuffer);
+      if (synth.song) {
+        (synth as any).__ariaBaseTimebase = synth.song.timebase || 1920;
+        const firstTempoEv = Array.isArray(synth.song.ev)
+          ? synth.song.ev.find((ev: any) => ev?.m?.[0] === 0xff51)
+          : null;
+        (synth as any).__ariaBaseBpm = baseSongBpm || firstTempoEv?.m?.[1] || synth.song.tempo || 120;
+      }
+
       synth.playMIDI();
+      if (targetBpm) {
+        setMidiTempoBpm(targetBpm, baseSongBpm);
+      }
       isMidiPlayingInternal = true;
 
       // Watchdog interval detects when master sequencer reaches end of song
@@ -849,6 +988,8 @@ export function playNote(
     if (midiNum === null) return;
 
     const chIdx = (channelId - 1) % 16;
+    if (SpessaSynth.isChannelMuted(chIdx)) return;
+
     const volNorm = Math.round((volume / 100) * 127);
     const freq = midiNoteToFrequency(midiNum);
 

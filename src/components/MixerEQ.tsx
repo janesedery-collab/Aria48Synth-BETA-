@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Settings, Volume2, ShieldAlert, Zap, Layers, Server, Sliders, 
+  Settings, Volume2, VolumeX, ShieldAlert, Zap, Layers, Server, Sliders, 
   ShieldCheck, HeartPulse, Disc3, Upload, Play, Radio, Cpu, Activity
 } from 'lucide-react';
 import { Channel, OscilloscopeConfig } from '../types';
-import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
+import { SpessaSynth, SPRESSASYNTH_ENGINE_ID, MidiChannelState } from '../engines/spressasynthLib';
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS, WebScopePreset } from '../engines/webscopeOscilloscope';
 import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
-import { loadSoundFontIntoCoreAndLib } from './AudioEngine';
+import { loadSoundFontIntoCoreAndLib, setMidiChannelMuted } from './AudioEngine';
 import { saveAmplifier } from '../utils/cookieStorage';
 
 interface MixerEQProps {
@@ -50,7 +50,10 @@ function WebScopeCRT({
   role,
   isPlaying,
   oscConfig,
-  pitch
+  pitch,
+  isMuted = false,
+  midiProgramName,
+  onToggleMute
 }: {
   key?: React.Key;
   channelIndex: number;
@@ -58,6 +61,9 @@ function WebScopeCRT({
   isPlaying: boolean;
   oscConfig: OscilloscopeConfig;
   pitch?: string;
+  isMuted?: boolean;
+  midiProgramName?: string;
+  onToggleMute?: (channelIndex: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [meter, setMeter] = useState({ peak: 0, rms: 0 });
@@ -78,7 +84,7 @@ function WebScopeCRT({
         const stats = WebScope.renderChannel(
           canvasRef.current,
           channelIndex,
-          isPlaying,
+          isPlaying && !isMuted,
           {
             preset: (oscConfig?.preset as WebScopePreset) || 'protracker',
             scanlines: oscConfig?.scanlines ?? true,
@@ -90,52 +96,104 @@ function WebScopeCRT({
             amplifier: amplifier
           }
         );
-        setMeter({ peak: stats.peakLevel, rms: stats.rmsLevel });
+        setMeter({ peak: isMuted ? 0 : stats.peakLevel, rms: isMuted ? 0 : stats.rmsLevel });
       }
       animId = requestAnimationFrame(renderLoop);
     };
 
     animId = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(animId);
-  }, [channelIndex, isPlaying, oscConfig, amplifier, size]);
+  }, [channelIndex, isPlaying, isMuted, oscConfig, amplifier, size]);
 
   const presetStyle = WEBSCOPE_PRESETS[(oscConfig?.preset as WebScopePreset) || 'protracker'];
-  const peakPct = Math.min(100, Math.round(meter.peak * 125));
+  const peakPct = isMuted ? 0 : Math.min(100, Math.round(meter.peak * 125));
 
   return (
-    <div className={`bg-black/95 border border-zinc-850 hover:border-zinc-700 rounded-lg flex flex-col relative overflow-hidden shadow-inner group transition-all ${cardPadding}`}>
+    <div
+      id={`oscilloscope-channel-${role.id}`}
+      role="button"
+      tabIndex={0}
+      aria-pressed={isMuted}
+      onClick={() => onToggleMute?.(channelIndex)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onToggleMute?.(channelIndex);
+        }
+      }}
+      title={
+        isMuted
+          ? `MIDI Channel ${role.id} is MUTED (${midiProgramName || role.full}) — Click to unmute`
+          : `Click to MUTE MIDI Channel ${role.id} (${midiProgramName || role.full})`
+      }
+      className={`rounded-lg flex flex-col relative overflow-hidden shadow-inner group transition-all cursor-pointer select-none focus:outline-none focus:ring-1 ${
+        isMuted
+          ? 'bg-red-950/20 border border-red-500/60 hover:border-red-400 focus:ring-red-400'
+          : 'bg-black/95 border border-zinc-850 hover:border-zinc-600 focus:ring-amber-400'
+      } ${cardPadding}`}
+    >
       {/* Scope Header */}
-      <div className="flex items-center justify-between text-[8px] font-mono tracking-wider mb-1 z-10">
-        <div className="flex items-center gap-1.5">
+      <div className="flex items-center justify-between text-[8px] font-mono tracking-wider mb-1 z-10 gap-1">
+        <div className="flex items-center gap-1.5 min-w-0">
           <span 
-            className="font-black px-1 py-0.5 rounded text-[8px] uppercase tracking-wider"
-            style={{ 
-              backgroundColor: `${presetStyle.stroke}20`, 
-              color: presetStyle.stroke,
-              border: `1px solid ${presetStyle.stroke}40`
-            }}
+            className="font-black px-1 py-0.5 rounded text-[8px] uppercase tracking-wider shrink-0"
+            style={
+              isMuted
+                ? {
+                    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                    color: '#fca5a5',
+                    border: '1px solid rgba(239, 68, 68, 0.5)'
+                  }
+                : { 
+                    backgroundColor: `${presetStyle.stroke}20`, 
+                    color: presetStyle.stroke,
+                    border: `1px solid ${presetStyle.stroke}40`
+                  }
+            }
           >
             CH {role.id.toString().padStart(2, '0')}
           </span>
-          <span className="font-bold text-zinc-300 truncate max-w-[80px]" title={role.full}>
+          <span
+            className={`font-bold truncate max-w-[80px] ${isMuted ? 'text-zinc-500 line-through' : 'text-zinc-300'}`}
+            title={midiProgramName || role.full}
+          >
             {role.name}
           </span>
         </div>
 
-        <div className="flex items-center gap-1 text-[7.5px] text-zinc-500">
-          <span className="text-zinc-600 hidden sm:inline">{role.category}</span>
-          <span className="font-mono text-cyan-400 font-bold">{pitch || role.defaultFreq}</span>
+        <div className="flex items-center gap-1 text-[7.5px] text-zinc-500 shrink-0">
+          {isMuted ? (
+            <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-red-950/90 border border-red-500/60 text-red-300 font-black uppercase text-[7px] tracking-wider">
+              <VolumeX size={9} className="text-red-400" />
+              MUTED
+            </span>
+          ) : (
+            <>
+              <span className="text-zinc-600 hidden sm:inline">{role.category}</span>
+              <span className="font-mono text-cyan-400 font-bold">{pitch || role.defaultFreq}</span>
+              <Volume2 size={9} className="text-zinc-600 group-hover:text-amber-400 transition-colors" />
+            </>
+          )}
         </div>
       </div>
 
       {/* HTML5 CRT Vector Canvas (Box size physically scaled by size preset, while drawing height is amplified by amplifier) */}
-      <div className={`relative flex-1 ${boxHeightClass} bg-black rounded border border-zinc-900/90 overflow-hidden flex items-center justify-center`}>
+      <div className={`relative flex-1 ${boxHeightClass} bg-black rounded border ${isMuted ? 'border-red-900/60' : 'border-zinc-900/90'} overflow-hidden flex items-center justify-center`}>
         <canvas 
           ref={canvasRef} 
           width={size === 'very-large' ? 360 : size === 'large' ? 280 : 220} 
           height={canvasHeight} 
-          className="w-full h-full block"
+          className={`w-full h-full block transition-opacity ${isMuted ? 'opacity-30' : 'opacity-100'}`}
         />
+
+        {isMuted && (
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center bg-black/35">
+            <span className="px-2 py-0.5 rounded bg-red-950/90 border border-red-500/60 text-red-200 font-mono font-black text-[8.5px] uppercase tracking-widest flex items-center gap-1 shadow">
+              <VolumeX size={10} className="text-red-400" />
+              CH {role.id.toString().padStart(2, '0')} MUTED
+            </span>
+          </div>
+        )}
 
         {/* Ambient CRT Vignette */}
         <div className="absolute inset-0 pointer-events-none shadow-[inset_0_0_12px_rgba(0,0,0,0.8)]"></div>
@@ -143,7 +201,9 @@ function WebScopeCRT({
 
       {/* Live Peak / Signal Level Bar */}
       <div className="mt-1 flex items-center gap-1.5 text-[7px] font-mono text-zinc-500">
-        <span className="text-zinc-600">PEAK</span>
+        <span className={isMuted ? 'text-red-400 font-bold' : 'text-zinc-600'}>
+          {isMuted ? 'MUTE' : 'PEAK'}
+        </span>
         <div className="flex-1 h-1.5 bg-zinc-950 rounded border border-zinc-900 overflow-hidden flex gap-0.5 p-0.5">
           <div 
             className="h-full rounded-sm transition-all duration-75"
@@ -154,8 +214,8 @@ function WebScopeCRT({
             }}
           />
         </div>
-        <span className="text-zinc-400 font-bold min-w-[24px] text-right">
-          {meter.peak > 0.01 ? `${Math.round(meter.peak * 100)}%` : 'IDLE'}
+        <span className={`font-bold min-w-[24px] text-right ${isMuted ? 'text-red-400' : 'text-zinc-400'}`}>
+          {isMuted ? 'OFF' : meter.peak > 0.01 ? `${Math.round(meter.peak * 100)}%` : 'IDLE'}
         </span>
       </div>
     </div>
@@ -188,15 +248,60 @@ export default function MixerEQ({
   const [activeSoundFont, setActiveSoundFont] = useState(SpessaSynth.getActiveSoundFont());
   const [sfFeedback, setSfFeedback] = useState<string | null>(null);
   const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
+  const [midiChannelStates, setMidiChannelStates] = useState<MidiChannelState[]>(() => [
+    ...SpessaSynth.getChannelStates()
+  ]);
 
   const sfUploadInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    return SpessaSynth.onSoundFontChange((fonts) => {
+    const unsubSf = SpessaSynth.onSoundFontChange((fonts) => {
       setSoundFonts(fonts);
       setActiveSoundFont(SpessaSynth.getActiveSoundFont());
     });
+    const unsubCh = SpessaSynth.onChannelStateChange((states) => {
+      setMidiChannelStates(states);
+    });
+    return () => {
+      unsubSf();
+      unsubCh();
+    };
   }, []);
+
+  const handleToggleOscilloscopeChannelMute = (channelIndex: number) => {
+    const currentlyMuted = Boolean(
+      midiChannelStates[channelIndex]?.isMuted ||
+      channels.find(c => c.id === channelIndex + 1)?.mute
+    );
+    const nextMuted = !currentlyMuted;
+    setMidiChannelMuted(channelIndex, nextMuted);
+    if (setChannels) {
+      setChannels(prev =>
+        prev.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c))
+      );
+    }
+    setMidiChannelStates([...SpessaSynth.getChannelStates()]);
+  };
+
+  const handleUnmuteAllMidiChannels = () => {
+    for (let i = 0; i < 16; i++) {
+      setMidiChannelMuted(i, false);
+    }
+    if (setChannels) {
+      setChannels(prev =>
+        prev.map(c => (c.id >= 1 && c.id <= 16 ? { ...c, mute: false } : c))
+      );
+    }
+    setMidiChannelStates([...SpessaSynth.getChannelStates()]);
+  };
+
+  const mutedChannelsCount = SIXTEEN_CHANNEL_ROLES.reduce((count, role, idx) => {
+    const isMuted = Boolean(
+      midiChannelStates[idx]?.isMuted ||
+      channels.find(c => c.id === role.id)?.mute
+    );
+    return count + (isMuted ? 1 : 0);
+  }, 0);
 
   const handleSoundFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const inputEl = e.target;
@@ -303,6 +408,14 @@ export default function MixerEQ({
                 </option>
               ))}
             </select>
+            {activeSoundFont?.isCustom && (
+              <span
+                className="text-[8px] font-mono text-emerald-400/90 bg-emerald-950/60 border border-emerald-800/40 px-1 py-0.2 rounded shrink-0"
+                title="Added SoundFonts are automatically saved in browser cookies (aria48_added_soundfonts)"
+              >
+                🍪 Saved
+              </span>
+            )}
           </div>
 
           <button
@@ -347,7 +460,7 @@ export default function MixerEQ({
         {/* WALL TOOLBAR */}
         <div className="flex flex-col gap-2.5 border-b border-zinc-800/80 pb-2.5">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Server size={14} className="text-amber-400" />
               <h3 className="font-bold text-xs uppercase tracking-wider text-white">
                 16-Channel Vector Oscilloscope Matrix
@@ -355,6 +468,20 @@ export default function MixerEQ({
               <span className="text-[9px] px-2 py-0.5 bg-amber-950/60 border border-amber-600/40 text-amber-300 rounded font-bold">
                 16 CHANNELS LOCKED
               </span>
+              <span className="text-[9px] px-2 py-0.5 bg-zinc-950/80 border border-zinc-800 text-zinc-400 rounded font-sans">
+                Click any oscilloscope to mute/unmute MIDI channel
+              </span>
+              {mutedChannelsCount > 0 && (
+                <button
+                  id="osc-unmute-all-btn"
+                  onClick={handleUnmuteAllMidiChannels}
+                  className="text-[9px] px-2 py-0.5 bg-red-950/70 hover:bg-red-900 border border-red-500/60 text-red-200 rounded font-bold flex items-center gap-1 transition cursor-pointer"
+                  title="Unmute all muted MIDI channels"
+                >
+                  <VolumeX size={10} className="text-red-400" />
+                  <span>Unmute All ({mutedChannelsCount})</span>
+                </button>
+              )}
             </div>
 
             {/* SEPARATE BUTTON TO CONFIGURE OSCILLOSCOPE SIZE FOR ALL OSCILLOSCOPES */}
@@ -519,16 +646,24 @@ export default function MixerEQ({
           oscConfig.size === 'very-large' ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-2' :
           'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'
         } gap-2 max-h-[640px] overflow-y-auto custom-scrollbar p-1`}>
-          {SIXTEEN_CHANNEL_ROLES.map((role, idx) => (
-            <WebScopeCRT
-              key={role.id}
-              channelIndex={idx}
-              role={role}
-              isPlaying={isPlaying}
-              oscConfig={oscConfig}
-              pitch={channelPitches[role.id]}
-            />
-          ))}
+          {SIXTEEN_CHANNEL_ROLES.map((role, idx) => {
+            const midiState = midiChannelStates[idx];
+            const trackerCh = channels.find(c => c.id === role.id);
+            const isMuted = Boolean(midiState?.isMuted || trackerCh?.mute);
+            return (
+              <WebScopeCRT
+                key={role.id}
+                channelIndex={idx}
+                role={role}
+                isPlaying={isPlaying}
+                oscConfig={oscConfig}
+                pitch={channelPitches[role.id]}
+                isMuted={isMuted}
+                midiProgramName={midiState?.programName}
+                onToggleMute={handleToggleOscilloscopeChannelMute}
+              />
+            );
+          })}
         </div>
       </div>
 
