@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle, Cpu } from 'lucide-react';
-import { Channel, SoundFontInstrument, SoundEnginesConfig } from '../types';
+import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle, Cpu, Activity } from 'lucide-react';
+import { Channel, SoundFontInstrument, SoundEnginesConfig, SoundFontInterpolationMode } from '../types';
 import {
   playNote,
   getSoundEnginesConfig,
@@ -11,6 +11,12 @@ import {
   SOUNDFONT_ACCEPT_ATTR
 } from './AudioEngine';
 import { SpessaSynth } from '../engines/spressasynthLib';
+import {
+  INTERPOLATION_MODES,
+  getInterpolationMode,
+  setInterpolationMode,
+  onInterpolationModeChange
+} from '../engines/soundFontInterpolation';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
@@ -89,6 +95,7 @@ export default function TrackerEditor({
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
   const [enginesConfig, setEnginesConfig] = useState<SoundEnginesConfig>(getSoundEnginesConfig());
+  const [interpolationMode, setInterpolationModeState] = useState<SoundFontInterpolationMode>(getInterpolationMode());
   const [trackerBpmText, setTrackerBpmText] = useState((bpm || 125).toString());
 
   useEffect(() => {
@@ -97,9 +104,16 @@ export default function TrackerEditor({
 
   useEffect(() => {
     setSoundFontInstruments(getAvailableSoundFontInstruments());
-    return onSoundEnginesChange((newCfg) => {
+    const unsubEngines = onSoundEnginesChange((newCfg) => {
       setEnginesConfig(newCfg);
     });
+    const unsubInterp = onInterpolationModeChange((mode) => {
+      setInterpolationModeState(mode);
+    });
+    return () => {
+      unsubEngines();
+      unsubInterp();
+    };
   }, []);
 
   const handleToggleEngine = (engineKey: keyof SoundEnginesConfig) => {
@@ -721,6 +735,49 @@ export default function TrackerEditor({
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-500 font-sans">
             <strong className="text-zinc-300">{activeEnginesCount}</strong>/4 Active
+          </span>
+        </div>
+      </div>
+
+      {/* SOUNDFONT INTERPOLATION MODES CONFIGURATOR */}
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-zinc-950/85 border border-zinc-850 rounded-lg text-xs">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex items-center gap-1.5 text-cyan-400 font-bold text-[10px] uppercase tracking-wider pr-1">
+            <Activity size={13} className="text-cyan-400" />
+            <span>SF Interpolation:</span>
+          </div>
+
+          {INTERPOLATION_MODES.map((m) => {
+            const isActive = interpolationMode === m.id;
+            return (
+              <button
+                key={m.id}
+                id={`sf-interp-btn-${m.id}`}
+                type="button"
+                onClick={() => {
+                  setInterpolationMode(m.id);
+                  setInterpolationModeState(m.id);
+                }}
+                className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+                  isActive
+                    ? 'bg-cyan-950/75 border-cyan-500/70 text-cyan-200 shadow-[0_0_8px_rgba(34,211,238,0.25)]'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+                title={`${m.label} (${m.order}): ${m.description}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.85)]' : 'bg-zinc-600'}`} />
+                <span>{m.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="text-[9.5px] text-zinc-400 font-sans hidden xl:flex items-center gap-1.5">
+          <span className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-cyan-300 font-mono text-[8.5px] font-bold">
+            {INTERPOLATION_MODES.find(m => m.id === interpolationMode)?.order}
+          </span>
+          <span className="text-zinc-400">
+            {INTERPOLATION_MODES.find(m => m.id === interpolationMode)?.description}
           </span>
         </div>
       </div>

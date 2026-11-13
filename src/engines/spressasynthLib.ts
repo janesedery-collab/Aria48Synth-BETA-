@@ -5,6 +5,8 @@
  */
 
 import { SpessaSynthCore, SPRESSASYNTH_CORE_ENGINE_ID } from './spressasynthCore';
+import { getInterpolationMode, interpolateSampleBuffer } from './soundFontInterpolation';
+import { getBuiltInSoundFontVoice } from '../utils/soundFontEngine';
 export { SpessaSynthCore, SPRESSASYNTH_CORE_ENGINE_ID };
 
 export const SPRESSASYNTH_ENGINE_ID = "spressasynth_lib-master.zip";
@@ -45,6 +47,8 @@ interface SpessaVoiceRecord {
   bufferSource?: AudioBufferSourceNode;
   rootKey?: number;
   pitchCorrection?: number;
+  usesPreInterpolatedBuffer?: boolean;
+  initialBendSemitones?: number;
   noteGain: GainNode;
   baseNote: number;
   subRatio: number;
@@ -419,32 +423,56 @@ class SpessaSynthEngine {
     chState.portamentoControl = null;
     chState.lastNote = midiNote;
 
-    // Check if spressasynth_core-master.zip has a real decoded SoundFont sample for this (bank, program, midiNote)
+    // Check if spressasynth_core-master.zip has a real decoded SoundFont sample,
+    // or use the built-in GM SoundBank PCM sample when SpessaSynth GM is active (so interpolation affects all SoundFonts).
     const activeSf = this.getActiveSoundFont();
     const coreBank = chIdx === 9 ? 128 : (chState.bank || 0);
-    const resolvedSample = activeSf?.isCustom
+    let resolvedSample: {
+      buffer: AudioBuffer;
+      rootKey: number;
+      pitchCorrection: number;
+      loopStart?: number;
+      loopEnd?: number;
+      attenuationGain: number;
+    } | null = activeSf?.isCustom
       ? SpessaSynthCore.resolveSampleVoice(coreBank, chState.program, midiNote)
       : null;
+
+    if (!resolvedSample && activeSf?.id !== 'spessa-chiptune-sf2') {
+      resolvedSample = getBuiltInSoundFontVoice(ctx, coreBank, chState.program, midiNote);
+    }
 
     if (resolvedSample && resolvedSample.buffer) {
       const noteGain = ctx.createGain();
       const source = ctx.createBufferSource();
-      source.buffer = resolvedSample.buffer;
 
       const rootPitch = resolvedSample.rootKey || 60;
       const corrSemis = (resolvedSample.pitchCorrection || 0) / 100;
-      const semitoneDelta = chIdx === 9 ? 0 : (midiNote + bendSemitones - rootPitch + corrSemis);
+      const semitoneDelta = chIdx === 9 && !activeSf?.isCustom
+        ? 0
+        : (midiNote + bendSemitones - rootPitch + corrSemis);
       const rate = Math.max(0.0625, Math.min(16.0, Math.pow(2, semitoneDelta / 12)));
-      source.playbackRate.setValueAtTime(rate, now);
+
+      const interpResult = interpolateSampleBuffer(
+        ctx,
+        resolvedSample.buffer,
+        rate,
+        getInterpolationMode(),
+        resolvedSample.loopStart,
+        resolvedSample.loopEnd
+      );
+
+      source.buffer = interpResult.buffer;
+      source.playbackRate.setValueAtTime(1.0, now);
 
       if (
-        resolvedSample.loopStart !== undefined &&
-        resolvedSample.loopEnd !== undefined &&
-        resolvedSample.loopEnd > resolvedSample.loopStart
+        interpResult.loopStart !== undefined &&
+        interpResult.loopEnd !== undefined &&
+        interpResult.loopEnd > interpResult.loopStart
       ) {
         source.loop = true;
-        source.loopStart = resolvedSample.loopStart;
-        source.loopEnd = resolvedSample.loopEnd;
+        source.loopStart = interpResult.loopStart;
+        source.loopEnd = interpResult.loopEnd;
       }
 
       const sampleVol = Math.max(0.0005, (velocity / 127) * (resolvedSample.attenuationGain ?? 1.0) * 0.42);
@@ -459,6 +487,8 @@ class SpessaSynthEngine {
         bufferSource: source,
         rootKey: rootPitch,
         pitchCorrection: resolvedSample.pitchCorrection,
+        usesPreInterpolatedBuffer: true,
+        initialBendSemitones: bendSemitones,
         noteGain,
         baseNote: midiNote,
         subRatio: 1.0,
@@ -565,7 +595,7 @@ class SpessaSynthEngine {
         sampleVoiceRecord.release(now + safeDur);
       } else if (!source.loop) {
         // Non-looped sample finishes naturally at buffer end, plus safety watchdog
-        const naturalDur = resolvedSample.buffer.duration / rate;
+        const naturalDur = interpResult.buffer.duration;
         const watchMs = Math.max(200, (now + naturalDur + 0.15 - ctx.currentTime) * 1000);
         sampleVoiceRecord.fallbackTimer = setTimeout(() => {
           if (!sampleVoiceRecord.hasScheduledStop) {
@@ -1137,10 +1167,16 @@ class SpessaSynthEngine {
               v.subOsc.frequency.setTargetAtTime(newFreq * v.subRatio, t, 0.008);
             }
           } else if (v.bufferSource) {
-            const rootPitch = v.rootKey ?? 60;
-            const corrSemis = (v.pitchCorrection ?? 0) / 100;
-            const newRate = Math.max(0.0625, Math.min(16.0, Math.pow(2, (v.baseNote + bendSemitones - rootPitch + corrSemis) / 12)));
-            v.bufferSource.playbackRate.setTargetAtTime(newRate, t, 0.008);
+            if (v.usesPreInterpolatedBuffer) {
+              const bendDelta = bendSemitones - (v.initialBendSemitones ?? 0);
+              const newRate = Math.max(0.0625, Math.min(16.0, Math.pow(2, bendDelta / 12)));
+              v.bufferSource.playbackRate.setTargetAtTime(newRate, t, 0.008);
+            } else {
+              const rootPitch = v.rootKey ?? 60;
+              const corrSemis = (v.pitchCorrection ?? 0) / 100;
+              const newRate = Math.max(0.0625, Math.min(16.0, Math.pow(2, (v.baseNote + bendSemitones - rootPitch + corrSemis) / 12)));
+              v.bufferSource.playbackRate.setTargetAtTime(newRate, t, 0.008);
+            }
           }
         } catch (e) {}
       });

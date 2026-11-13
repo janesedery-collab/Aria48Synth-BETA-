@@ -1,5 +1,6 @@
 import { SoundFontInstrument, SoundFontBankInfo } from '../types';
 import { SpessaSynthCore } from '../engines/spressasynthCore';
+import { getInterpolationMode, interpolateSampleBuffer } from '../engines/soundFontInterpolation';
 export type { SoundFontInstrument, SoundFontBankInfo };
 
 export interface SoundFontSampleVoice {
@@ -1145,7 +1146,89 @@ export async function parseSoundFontFile(
 
 
 /**
- * Play a SoundFont note with realistic sample pitch-shifting and ADSR gain envelope
+ * Resolve built-in SoundBank sample buffer by MIDI bank/program/note so built-in SoundFonts
+ * also pass through the configured Tracker DSP interpolation algorithm.
+ */
+export function getBuiltInSoundFontVoice(
+  ctx: AudioContext,
+  bank: number,
+  program: number,
+  midiNote: number
+): {
+  buffer: AudioBuffer;
+  rootKey: number;
+  pitchCorrection: number;
+  loopStart?: number;
+  loopEnd?: number;
+  attenuationGain: number;
+} | null {
+  try {
+    initBuiltInSoundFont(ctx);
+
+    let chosenPreset: SoundFontPresetData | undefined;
+    if (bank === 128) {
+      chosenPreset = registeredPresets.get('gm_drums');
+    } else {
+      for (const preset of registeredPresets.values()) {
+        if (!preset.isCustom && preset.bank === 0 && preset.program === program) {
+          chosenPreset = preset;
+          break;
+        }
+      }
+      if (!chosenPreset) {
+        // Fallback to nearest GM instrument family program
+        let bestDist = 9999;
+        for (const preset of registeredPresets.values()) {
+          if (!preset.isCustom && preset.bank === 0) {
+            const dist = Math.abs(preset.program - program);
+            if (dist < bestDist) {
+              bestDist = dist;
+              chosenPreset = preset;
+            }
+          }
+        }
+      }
+    }
+
+    if (!chosenPreset) return null;
+
+    let sample: SoundFontSampleVoice | null = null;
+    if ((chosenPreset.samples as any).buffer) {
+      sample = chosenPreset.samples as SoundFontSampleVoice;
+    } else {
+      const map = chosenPreset.samples as { [midiKey: number]: SoundFontSampleVoice };
+      sample = map[midiNote];
+      if (!sample) {
+        const vals = Object.values(map);
+        if (vals.length > 0) sample = vals[0];
+      }
+    }
+    if (!sample || !sample.buffer) return null;
+
+    const loopStartSec =
+      sample.loopStart !== undefined && sample.loopEnd !== undefined && sample.loopEnd > sample.loopStart
+        ? sample.loopStart / (sample.sampleRate || 44100)
+        : undefined;
+    const loopEndSec =
+      sample.loopStart !== undefined && sample.loopEnd !== undefined && sample.loopEnd > sample.loopStart
+        ? sample.loopEnd / (sample.sampleRate || 44100)
+        : undefined;
+
+    return {
+      buffer: sample.buffer,
+      rootKey: sample.rootKey || 60,
+      pitchCorrection: 0,
+      loopStart: loopStartSec,
+      loopEnd: loopEndSec,
+      attenuationGain: sample.baseGain ?? 1.0
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Play a SoundFont note with realistic sample pitch-shifting, Tracker DSP interpolation, and ADSR gain envelope
  */
 export function playSoundFontNote(
   ctx: AudioContext,
@@ -1181,14 +1264,32 @@ export function playSoundFontNote(
     const isDrum = preset.id === 'gm_drums' || preset.id === 'gm_electronic_drums' || preset.bank === 128;
     const playbackRate = isDrum ? 1.0 : Math.max(0.0625, Math.min(16.0, Math.pow(2, (midiNote - rootKey) / 12)));
 
-    const source = ctx.createBufferSource();
-    source.buffer = sample.buffer;
-    source.playbackRate.setValueAtTime(playbackRate, ctx.currentTime);
+    const rawLoopStart =
+      sample.loopStart !== undefined && sample.loopEnd !== undefined && sample.loopEnd > sample.loopStart
+        ? sample.loopStart / sample.sampleRate
+        : undefined;
+    const rawLoopEnd =
+      sample.loopStart !== undefined && sample.loopEnd !== undefined && sample.loopEnd > sample.loopStart
+        ? sample.loopEnd / sample.sampleRate
+        : undefined;
 
-    if (sample.loopStart !== undefined && sample.loopEnd !== undefined && sample.loopEnd > sample.loopStart) {
+    const interp = interpolateSampleBuffer(
+      ctx,
+      sample.buffer,
+      playbackRate,
+      getInterpolationMode(),
+      rawLoopStart,
+      rawLoopEnd
+    );
+
+    const source = ctx.createBufferSource();
+    source.buffer = interp.buffer;
+    source.playbackRate.setValueAtTime(1.0, ctx.currentTime);
+
+    if (interp.loopStart !== undefined && interp.loopEnd !== undefined && interp.loopEnd > interp.loopStart) {
       source.loop = true;
-      source.loopStart = sample.loopStart / sample.sampleRate;
-      source.loopEnd = sample.loopEnd / sample.sampleRate;
+      source.loopStart = interp.loopStart;
+      source.loopEnd = interp.loopEnd;
     }
 
     const gainNode = ctx.createGain();

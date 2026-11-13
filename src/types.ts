@@ -53,6 +53,13 @@ export interface SoundEnginesConfig {
   chiptune3: boolean;      // Chiptune-3 (Amiga ProTracker / MOD / XM / S3M / IT PCM)
 }
 
+export type SoundFontInterpolationMode =
+  | 'none'
+  | 'linear'
+  | 'cubic'
+  | 'poly4'
+  | 'sinc';
+
 export interface ChatMessage {
   id: string;
   userId: string;
