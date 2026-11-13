@@ -667,6 +667,11 @@ export default function Header({
       <MidiControllerModal
         isOpen={isMidiModalOpen}
         onClose={() => setIsMidiModalOpen(false)}
+        onChannelMuteSync={(chIdx0, isMuted) => {
+          setChannels?.(prev =>
+            prev.map(c => (c.id === chIdx0 + 1 ? { ...c, mute: isMuted } : c))
+          );
+        }}
       />
 
       {/* EXPORT STUDIO MODAL */}

@@ -26,6 +26,7 @@
     "pg": "^8.23.1",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "spessasynth_lib": "^4.4.8",
     "vite": "^6.2.3",
     "webaudio-tinysynth": "^1.1.3"
   },

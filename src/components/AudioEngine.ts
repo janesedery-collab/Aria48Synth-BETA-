@@ -2,6 +2,8 @@
 import WebAudioTinySynth from 'webaudio-tinysynth';
 import { Channel, SoundEnginesConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
+import { WorkletSynthBridge } from '../engines/workletSynthBridge';
+import { onInterpolationModeChange } from '../engines/soundFontInterpolation';
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
@@ -17,6 +19,7 @@ import {
 } from '../utils/cookieStorage';
 
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
+export { WorkletSynthBridge };
 export {
   SpessaSynthCore,
   SPRESSASYNTH_CORE_ENGINE_ID,
@@ -47,6 +50,7 @@ export function setDefaultSoundFontId(id: string): void {
   if (SpessaSynth.getLoadedSoundFonts().some(s => s.id === id)) {
     SpessaSynth.setActiveSoundFont(id);
   }
+  WorkletSynthBridge.setActiveSoundBank(id);
   notifyDefaultSoundFontListeners(id);
 }
 
@@ -62,6 +66,7 @@ export async function deleteSavedSoundFont(id: string): Promise<void> {
   const wasDefault = getDefaultSoundFontCookie() === id;
   await removeSavedSoundFontFromCookies(id);
   SpessaSynth.removeSoundFont(id);
+  await WorkletSynthBridge.removeSoundBank(id);
   if (wasDefault) {
     const nextDefault = getDefaultSoundFontCookie() || 'spessa-default-gm';
     notifyDefaultSoundFontListeners(nextDefault);
@@ -71,7 +76,7 @@ export async function deleteSavedSoundFont(id: string): Promise<void> {
 /**
  * Unified SoundFont ingestion pipeline:
  * Feeds ANY SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, etc.)
- * into spressasynth_core-master.zip, links decoded banks & sample zones directly into spressasynth_lib-master.zip,
+ * into spressasynth_core-master.zip, WorkletSynthesizer (spessasynth_lib),
  * and saves the added SoundFont into browser cookies (+ IndexedDB backing for large banks).
  */
 export async function loadSoundFontIntoCoreAndLib(
@@ -83,7 +88,11 @@ export async function loadSoundFontIntoCoreAndLib(
   if (ctx.state === 'suspended') {
     try { await ctx.resume(); } catch (e) {}
   }
+  const bufferCopy = arrayBuffer.slice(0);
   const { soundFont, coreResult } = await SpessaSynth.loadSoundFontAsync(arrayBuffer, fileName, ctx);
+  try {
+    await WorkletSynthBridge.loadSoundBank(bufferCopy, soundFont.id, true);
+  } catch (e) {}
   if (!options?.skipCookieSave) {
     try {
       await saveSoundFontToCookiesAndCache(fileName, arrayBuffer, soundFont.id, {
@@ -121,7 +130,9 @@ export function restoreSavedSoundFontsFromCookies(): Promise<void> {
           try {
             const buf = await loadSavedSoundFontBinary(entry);
             if (buf && buf.byteLength > 0) {
-              await SpessaSynth.loadSoundFontAsync(buf, entry.fileName, ctx);
+              const workletCopy = buf.slice(0);
+              const { soundFont } = await SpessaSynth.loadSoundFontAsync(buf, entry.fileName, ctx);
+              await WorkletSynthBridge.loadSoundBank(workletCopy, soundFont.id, false);
             }
           } catch (err) {
             console.warn(`Could not restore SoundFont "${entry.fileName}" from cookies:`, err);
@@ -136,6 +147,7 @@ export function restoreSavedSoundFontsFromCookies(): Promise<void> {
 
       if (targetId) {
         SpessaSynth.setActiveSoundFont(targetId);
+        WorkletSynthBridge.setActiveSoundBank(targetId);
       }
     } finally {
       isRestoringSoundFonts = false;
@@ -148,7 +160,11 @@ if (typeof window !== 'undefined') {
   SpessaSynth.onSoundFontChange((_, activeId) => {
     if (!isRestoringSoundFonts && activeId) {
       saveActiveSoundFontCookie(activeId);
+      WorkletSynthBridge.setActiveSoundBank(activeId);
     }
+  });
+  onInterpolationModeChange((mode) => {
+    WorkletSynthBridge.setInterpolationMode(mode);
   });
 }
 
@@ -186,6 +202,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
   if (spessaMaster && audioCtx) {
     spessaMaster.gain.setValueAtTime(activeEnginesConfig.spessaSynth ? 0.7 : 0, audioCtx.currentTime);
   }
+  WorkletSynthBridge.setMasterVolumeGain(activeEnginesConfig.spessaSynth ? 0.85 : 0);
   const chipMaster = Chiptune3.getMasterGain();
   if (chipMaster && audioCtx) {
     chipMaster.gain.setValueAtTime(activeEnginesConfig.chiptune3 ? 0.85 : 0, audioCtx.currentTime);
@@ -197,6 +214,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
   }
   if (!activeEnginesConfig.spessaSynth) {
     SpessaSynth.allNotesOff();
+    WorkletSynthBridge.stopAll(false);
   }
   if (!activeEnginesConfig.tinySynth && tinySynthInstance) {
     try {
@@ -246,12 +264,19 @@ let tsBurstWindowStartMs = 0;
 let tsBurstNoteCount = 0;
 const tsLastNoteAt = new Float64Array(16 * 128);
 
+function shouldUseWorkletPrimary(): boolean {
+  const activeSf = SpessaSynth.getActiveSoundFont();
+  if (activeSf?.id === 'spessa-chiptune-sf2') return false;
+  return WorkletSynthBridge.hasSoundBankReady();
+}
+
 /**
- * Mute / Unmute a specific MIDI channel (0-15) across SpessaSynth, TinySynth, and Synthetic Oscillators.
+ * Mute / Unmute a specific MIDI channel (0-15) across SpessaSynth, WorkletSynthesizer, TinySynth, and Synthetic Oscillators.
  */
 export function setMidiChannelMuted(channelIndex: number, isMuted: boolean): boolean {
   const ch = Math.max(0, Math.min(15, Math.floor(channelIndex)));
   SpessaSynth.setChannelMute(ch, isMuted);
+  WorkletSynthBridge.muteChannel(ch, isMuted);
 
   if (isMuted) {
     if (tinySynthInstance) {
@@ -271,7 +296,7 @@ export function setMidiChannelMuted(channelIndex: number, isMuted: boolean): boo
 
 export function toggleMidiChannelMute(channelIndex: number): boolean {
   const ch = Math.max(0, Math.min(15, Math.floor(channelIndex)));
-  const nextMuted = !SpessaSynth.isChannelMuted(ch);
+  const nextMuted = !(SpessaSynth.isChannelMuted(ch) || WorkletSynthBridge.isChannelMuted(ch));
   return setMidiChannelMuted(ch, nextMuted);
 }
 
@@ -292,8 +317,8 @@ export function hookTinySynthEvents(synth: any) {
     const isNoteOn = cmd === 0x90 && msg[2] > 0;
     const isNoteOff = cmd === 0x80 || (cmd === 0x90 && msg[2] === 0);
 
-    // Suppress Note-On on muted MIDI channels across both TinySynth and SpessaSynth
-    if (isNoteOn && SpessaSynth.isChannelMuted(ch)) {
+    // Suppress Note-On on muted MIDI channels across TinySynth, WorkletSynthesizer, and SpessaSynth
+    if (isNoteOn && (SpessaSynth.isChannelMuted(ch) || WorkletSynthBridge.isChannelMuted(ch))) {
       return;
     }
 
@@ -322,49 +347,54 @@ export function hookTinySynthEvents(synth: any) {
       }
     }
 
-    // 2. Synchronously forward full note throughput to SpessaSynth on the exact same audio timeline
+    // 2. Forward full MIDI stream to WorkletSynthesizer & SpessaSynth on the exact same audio timeline
     if (!suppressHookForward && activeEnginesConfig.spessaSynth && msg && msg.length > 0) {
-      if (cmd === 0x90) { // Note On / Note Off (vel === 0)
-        const note = msg[1];
-        const vel = msg[2];
-        if (vel > 0) {
-          SpessaSynth.noteOn(ch, note, vel, undefined, t);
+      const workletPrimary = shouldUseWorkletPrimary();
+
+      // Always send MIDI stream to real spessasynth_lib WorkletSynthesizer when ready
+      if (WorkletSynthBridge.isReadySync()) {
+        if (status === 0xff) {
+          WorkletSynthBridge.sendGMSystemOn();
         } else {
+          WorkletSynthBridge.sendRawMidiMessage(msg, t);
+        }
+      }
+
+      // Only trigger JS SpessaSynth audio voices when WorkletSynthesizer isn't handling primary output
+      if (!workletPrimary) {
+        if (cmd === 0x90) { // Note On / Note Off (vel === 0)
+          const note = msg[1];
+          const vel = msg[2];
+          if (vel > 0) {
+            SpessaSynth.noteOn(ch, note, vel, undefined, t);
+          } else {
+            SpessaSynth.noteOff(ch, note, t);
+          }
+        } else if (cmd === 0x80) { // Note Off
+          const note = msg[1];
           SpessaSynth.noteOff(ch, note, t);
         }
-      } else if (cmd === 0x80) { // Note Off
-        const note = msg[1];
-        SpessaSynth.noteOff(ch, note, t);
-      } else if (cmd === 0xc0) { // Program Change
-        const prog = msg[1];
-        SpessaSynth.setChannelProgram(ch, prog);
-      } else if (cmd === 0xe0) { // Pitch Bend
+      }
+
+      // Always keep SpessaSynth channel metadata synced
+      if (cmd === 0xc0) {
+        SpessaSynth.setChannelProgram(ch, msg[1]);
+      } else if (cmd === 0xe0) {
         const bend = ((msg[2] << 7) | msg[1]) - 8192;
         SpessaSynth.setChannelPitchBend(ch, bend, t);
-      } else if (cmd === 0xb0) { // Control Change
+      } else if (cmd === 0xb0) {
         const cc = msg[1];
         const val = msg[2];
-        if (cc === 0) {
-          SpessaSynth.setChannelBank(ch, val);
-        } else if (cc === 7) {
-          SpessaSynth.setChannelVolume(ch, val, t);
-        } else if (cc === 10) {
-          SpessaSynth.setChannelPan(ch, val, t);
-        } else if (cc === 11) {
-          SpessaSynth.setChannelExpression(ch, val, t);
-        } else if (cc === 64) {
-          SpessaSynth.setChannelSustain(ch, val >= 64, t);
-        } else if (cc === 65) {
-          SpessaSynth.setChannelPortamento(ch, val >= 64);
-        } else if (cc === 5) {
-          SpessaSynth.setChannelPortamentoTime(ch, val);
-        } else if (cc === 84) {
-          SpessaSynth.setChannelPortamentoControl(ch, val);
-        } else if (cc === 120 || cc === 123) {
-          SpessaSynth.allNotesOff(ch, t);
-        } else if (cc === 121) {
-          SpessaSynth.resetChannelControllers(ch, t);
-        }
+        if (cc === 0) SpessaSynth.setChannelBank(ch, val);
+        else if (cc === 7) SpessaSynth.setChannelVolume(ch, val, t);
+        else if (cc === 10) SpessaSynth.setChannelPan(ch, val, t);
+        else if (cc === 11) SpessaSynth.setChannelExpression(ch, val, t);
+        else if (cc === 64) SpessaSynth.setChannelSustain(ch, val >= 64, t);
+        else if (cc === 65) SpessaSynth.setChannelPortamento(ch, val >= 64);
+        else if (cc === 5) SpessaSynth.setChannelPortamentoTime(ch, val);
+        else if (cc === 84) SpessaSynth.setChannelPortamentoControl(ch, val);
+        else if (cc === 120 || cc === 123) SpessaSynth.allNotesOff(ch, t);
+        else if (cc === 121) SpessaSynth.resetChannelControllers(ch, t);
       } else if (status === 0xff) {
         SpessaSynth.sendGMReset(true);
       }
@@ -459,6 +489,7 @@ export function getAudioContext(): AudioContext | null {
     if (AudioContextClass) {
       audioCtx = new AudioContextClass();
       SpessaSynth.init(audioCtx);
+      void WorkletSynthBridge.init(audioCtx);
       Chiptune3.init(audioCtx);
       initTinySynth(audioCtx);
       initSyntheticEngine(audioCtx);
@@ -534,6 +565,8 @@ export function playMidiBuffer(
 
       // Reset SpessaSynth channel states cleanly (preserving user oscilloscope mutes) before launching playback
       SpessaSynth.sendGMReset(true);
+      WorkletSynthBridge.stopAll(true);
+      void WorkletSynthBridge.init(ctx);
 
       // Load SMF binary and snapshot original MIDI timebase/tempo for live BPM scaling
       synth.loadMIDI(arrayBuffer);
@@ -594,6 +627,7 @@ export function stopMidiPlayback() {
       }
     }
     SpessaSynth.allNotesOff();
+    WorkletSynthBridge.stopAll(false);
     isMidiPlayingInternal = false;
   } catch (e) {}
 }
@@ -1132,24 +1166,33 @@ export function playNote(
     if (midiNum === null) return;
 
     const chIdx = (channelId - 1) % 16;
-    if (SpessaSynth.isChannelMuted(chIdx)) return;
+    const workletChIdx = Math.max(0, Math.min(47, channelId - 1));
+    if (SpessaSynth.isChannelMuted(chIdx) || WorkletSynthBridge.isChannelMuted(workletChIdx)) return;
 
     const volNorm = Math.round((volume / 100) * 127);
     const freq = midiNoteToFrequency(midiNum);
 
     // CRITICAL: Precise 5ms lookahead audio timestamp ensures all sound engines
-    // (SpessaSynth, WebAudioTinySynth, and Synthetic Oscillators)
+    // (WorkletSynthesizer / SpessaSynth, WebAudioTinySynth, and Synthetic Oscillators)
     // start simultaneously on the exact same audio buffer frame with zero engine delay!
     const targetTime = ctx.currentTime + 0.005;
 
     const gmProg = getGmProgramForPreset(soundFontPreset);
 
-    // 1. SpessaSynth Engine
+    // 1. SpessaSynth / WorkletSynthesizer Engine (supports channels 0-47 natively)
     if (activeEnginesConfig.spessaSynth) {
-      if (soundFontPreset) {
-        SpessaSynth.setChannelProgram(chIdx, gmProg);
+      if (shouldUseWorkletPrimary()) {
+        if (soundFontPreset && !WorkletSynthBridge.getChannelState(workletChIdx).presetLocked) {
+          WorkletSynthBridge.programChange(workletChIdx, gmProg);
+        }
+        WorkletSynthBridge.noteOn(workletChIdx, midiNum, volNorm, targetTime);
+        WorkletSynthBridge.noteOff(workletChIdx, midiNum, targetTime + duration);
+      } else {
+        if (soundFontPreset) {
+          SpessaSynth.setChannelProgram(chIdx, gmProg);
+        }
+        SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
       }
-      SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
     }
 
     // 2. WebAudio TinySynth Engine (suppress hook forwarding so SpessaSynth isn't double-triggered)
@@ -1179,7 +1222,14 @@ export function playNote(
 
 export function stopChannelSound(channelId: number) {
   const chIdx = (channelId - 1) % 16;
+  const workletChIdx = Math.max(0, Math.min(47, channelId - 1));
   SpessaSynth.noteOff(chIdx);
+  for (let n = 0; n < 128; n++) {
+    // Only turn off active sounding notes tracked on this WorkletSynthesizer channel
+    if (WorkletSynthBridge.getChannelState(workletChIdx).activeNotes.includes(n)) {
+      WorkletSynthBridge.noteOff(workletChIdx, n);
+    }
+  }
   if (tinySynthInstance) {
     try {
       tinySynthInstance.allSoundOff?.(chIdx);
@@ -1195,6 +1245,7 @@ export function stopChannelSound(channelId: number) {
 
 export function stopAllChannelsSound() {
   SpessaSynth.allNotesOff();
+  WorkletSynthBridge.stopAll(false);
   if (tinySynthInstance) {
     try {
       for (let ch = 0; ch < 16; ch++) {

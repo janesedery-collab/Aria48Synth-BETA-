@@ -6,6 +6,7 @@
  */
 
 import { SpessaSynth } from './spressasynthLib';
+import { WorkletSynthBridge } from './workletSynthBridge';
 import { Chiptune3 } from './chiptune3';
 
 export const WEBSCOPE_ENGINE_ID = "webscope-oscilloscope-master.zip";
@@ -147,27 +148,44 @@ class WebScopeEngine {
     const strokeWidth = opts.strokeWidth ?? 1.8;
     const amplifier = Math.max(0.2, Math.min(12.0, opts.amplifier ?? 1.0));
 
-    // 1. Resolve AnalyserNode from SpessaSynth (MIDI) or Chiptune-3 (Tracker)
-    let analyser: AnalyserNode | null = null;
-    if (Chiptune3.isChiptunePlaying()) {
-      analyser = Chiptune3.getChannelAnalyser(channelIndex);
-    } else {
-      analyser = SpessaSynth.getChannelAnalyser(channelIndex);
-    }
-
+    // 1. Resolve AnalyserNode from Chiptune-3 (Tracker), WorkletSynthesizer, or SpessaSynth
     let hasSignal = false;
     let peakLevel = 0;
     let sumSquares = 0;
 
-    if (analyser && isPlaying) {
-      analyser.getFloatTimeDomainData(this.timeDomainBuffer);
-      for (let i = 0; i < this.timeDomainBuffer.length; i++) {
-        const absVal = Math.abs(this.timeDomainBuffer[i]);
-        if (absVal > peakLevel) peakLevel = absVal;
-        sumSquares += absVal * absVal;
+    const readAnalyser = (node: AnalyserNode | null): { peak: number; sumSq: number; buf: Float32Array } | null => {
+      if (!node) return null;
+      const buf = new Float32Array(this.timeDomainBuffer.length);
+      node.getFloatTimeDomainData(buf);
+      let pk = 0;
+      let ss = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const av = Math.abs(buf[i]);
+        if (av > pk) pk = av;
+        ss += av * av;
       }
-      if (peakLevel > 0.005) {
-        hasSignal = true;
+      return { peak: pk, sumSq: ss, buf };
+    };
+
+    if (isPlaying) {
+      if (Chiptune3.isChiptunePlaying()) {
+        const chipRes = readAnalyser(Chiptune3.getChannelAnalyser(channelIndex));
+        if (chipRes) {
+          this.timeDomainBuffer.set(chipRes.buf);
+          peakLevel = chipRes.peak;
+          sumSquares = chipRes.sumSq;
+          hasSignal = peakLevel > 0.005;
+        }
+      } else {
+        const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex));
+        const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex));
+        const best = (workletRes && workletRes.peak >= (spessaRes?.peak ?? 0)) ? workletRes : spessaRes;
+        if (best) {
+          this.timeDomainBuffer.set(best.buf);
+          peakLevel = best.peak;
+          sumSquares = best.sumSq;
+          hasSignal = peakLevel > 0.005;
+        }
       }
     }
 

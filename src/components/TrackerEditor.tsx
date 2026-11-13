@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Repeat, PlayCircle, Cpu, Activity, Star, Trash2, Check } from 'lucide-react';
+import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Repeat, PlayCircle, Cpu, Activity, Star, Trash2, Check, Sliders } from 'lucide-react';
 import { Channel, SoundFontInstrument, SoundEnginesConfig, SoundFontInterpolationMode } from '../types';
 import {
   playNote,
@@ -25,6 +25,7 @@ import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import ExportStudioModal from './ExportStudioModal';
+import SpessaMidiMixerPanel from './SpessaMidiMixerPanel';
 import { addRecentSong } from '../utils/recentSongsManager';
 
 interface TrackerEditorProps {
@@ -104,6 +105,7 @@ export default function TrackerEditor({
   const [activeSoundFontId, setActiveSoundFontId] = useState<string>(() => SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
   const [defaultSoundFontId, setDefaultSoundFontState] = useState<string>(() => getDefaultSoundFontId());
   const [showSavedSoundFonts, setShowSavedSoundFonts] = useState<boolean>(false);
+  const [showMidiMixer, setShowMidiMixer] = useState<boolean>(false);
   const [trackerBpmText, setTrackerBpmText] = useState((bpm || 125).toString());
 
   useEffect(() => {
@@ -680,6 +682,22 @@ export default function TrackerEditor({
             <span>Saved SoundFonts ({loadedSoundFonts.length})</span>
             {showSavedSoundFonts ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
+          <button
+            id="tracker-midi-mixer-toggle-btn"
+            type="button"
+            onClick={() => setShowMidiMixer(prev => !prev)}
+            aria-expanded={showMidiMixer}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm border ${
+              showMidiMixer
+                ? 'bg-indigo-900/70 text-indigo-100 border-indigo-400/80 shadow-[0_0_12px_rgba(99,102,241,0.3)]'
+                : 'bg-indigo-950/45 text-indigo-300 border-indigo-700/60 hover:bg-indigo-900/60 hover:text-white'
+            }`}
+            title="Show or hide the per-channel SpessaSynth WorkletSynthesizer MIDI Controller & Instrument Mixer"
+          >
+            <Sliders size={12} className="text-indigo-400" />
+            <span>MIDI Mixer (CH 1-48)</span>
+            {showMidiMixer ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
           <input
             type="file"
             ref={sfDirectInputRef}
@@ -889,6 +907,42 @@ export default function TrackerEditor({
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* INLINE SPRESSASYNTH WORKLETSYNTHESIZER MIDI CONTROLLER & INSTRUMENT MIXER */}
+      {showMidiMixer && (
+        <div
+          id="tracker-inline-midi-mixer-panel"
+          className="mb-2.5 p-3 bg-zinc-950/95 border border-indigo-800/60 rounded-xl shadow-[0_0_24px_rgba(99,102,241,0.12)] max-h-[540px] overflow-y-auto custom-scrollbar"
+        >
+          <div className="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-zinc-800">
+            <div className="flex items-center gap-2">
+              <Sliders size={13} className="text-indigo-400" />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-white">
+                SpessaSynth WorkletSynthesizer MIDI Controller &amp; Instrument Mixer
+              </span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-700/50 text-indigo-300">
+                Direct Engine Wire · Two-Way Sync
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowMidiMixer(false)}
+              className="text-[9.5px] px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-700 cursor-pointer uppercase font-bold"
+            >
+              Collapse
+            </button>
+          </div>
+
+          <SpessaMidiMixerPanel
+            compact={true}
+            onChannelMuteSync={(chIdx0, isMuted) => {
+              setChannels?.(prev =>
+                prev.map(c => (c.id === chIdx0 + 1 ? { ...c, mute: isMuted } : c))
+              );
+            }}
+          />
         </div>
       )}
 

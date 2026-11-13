@@ -856,6 +856,12 @@ export default function MixerEQ({
       <MidiControllerModal
         isOpen={isMidiModalOpen}
         onClose={() => setIsMidiModalOpen(false)}
+        onChannelMuteSync={(chIdx0, isMuted) => {
+          setChannels?.(prev =>
+            prev.map(c => (c.id === chIdx0 + 1 ? { ...c, mute: isMuted } : c))
+          );
+          setMidiChannelStates([...SpessaSynth.getChannelStates()]);
+        }}
       />
 
     </div>
