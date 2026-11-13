@@ -1,9 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, HelpCircle, FileAudio, RotateCw, CheckCircle2, Download, Disc3, Music, Play, Volume2 } from 'lucide-react';
+import { Upload, HelpCircle, FileAudio, RotateCw, CheckCircle2, Download, Disc3, Music, Play, Volume2, Star, Trash2, Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
 import { getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
-import { getAudioContext, loadSoundFontIntoCoreAndLib, isSoundFontFileName } from './AudioEngine';
-import { SpessaSynth } from '../engines/spressasynthLib';
+import {
+  deleteSavedSoundFont,
+  getAudioContext,
+  getDefaultSoundFontId,
+  isSoundFontFileName,
+  loadSoundFontIntoCoreAndLib,
+  onDefaultSoundFontChange,
+  setDefaultSoundFontId
+} from './AudioEngine';
+import { SpessaSynth, SpessaSoundFont } from '../engines/spressasynthLib';
 import { SoundFontBankInfo, SoundFontInstrument } from '../types';
 
 interface FileConverterUIProps {
@@ -45,6 +53,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   const [bankInfo, setBankInfo] = useState<SoundFontBankInfo>(getSoundFontBankInfo());
   const [instruments, setInstruments] = useState<SoundFontInstrument[]>(getAvailableSoundFontInstruments());
   const [selectedAuditionInst, setSelectedAuditionInst] = useState<string>("gm_piano");
+  const [savedSoundFonts, setSavedSoundFonts] = useState<SpessaSoundFont[]>(() => SpessaSynth.getLoadedSoundFonts());
+  const [activeSfId, setActiveSfId] = useState<string>(() => SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
+  const [defaultSfId, setDefaultSfId] = useState<string>(() => getDefaultSoundFontId());
+  const [showSavedSoundFonts, setShowSavedSoundFonts] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sfInputRef = useRef<HTMLInputElement>(null);
@@ -52,6 +64,19 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   useEffect(() => {
     setBankInfo(getSoundFontBankInfo());
     setInstruments(getAvailableSoundFontInstruments());
+    const unsubSf = SpessaSynth.onSoundFontChange((fonts, activeId) => {
+      setSavedSoundFonts(fonts);
+      setActiveSfId(activeId);
+      setBankInfo(getSoundFontBankInfo());
+      setInstruments(getAvailableSoundFontInstruments());
+    });
+    const unsubDef = onDefaultSoundFontChange((id) => {
+      setDefaultSfId(id);
+    });
+    return () => {
+      unsubSf();
+      unsubDef();
+    };
   }, []);
 
   const handleAuditionNote = (instId: string) => {
@@ -275,8 +300,114 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
              <Upload size={11} />
              <span>Load SoundFont</span>
            </button>
+
+           <button
+             id="converter-saved-soundfonts-toggle-btn"
+             type="button"
+             onClick={() => setShowSavedSoundFonts(prev => !prev)}
+             aria-expanded={showSavedSoundFonts}
+             className={`px-3 py-1 rounded text-[10.5px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+               showSavedSoundFonts
+                 ? 'bg-cyan-950/70 text-cyan-200 border-cyan-500/70'
+                 : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border-zinc-700'
+             }`}
+             title="Show or hide Saved SoundFonts and Set Default controls"
+           >
+             <Disc3 size={11} className="text-cyan-400" />
+             <span>Saved SoundFonts ({savedSoundFonts.length})</span>
+             {showSavedSoundFonts ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+           </button>
          </div>
        </div>
+
+       {/* SAVED SOUNDFONTS STRIP (SET DEFAULT & ACTIVATE - COLLAPSIBLE) */}
+       {showSavedSoundFonts && (
+         <div className="bg-zinc-950/80 border border-zinc-800 rounded-xl px-3 py-2 flex flex-col gap-2 text-xs">
+           <div className="flex flex-wrap items-center justify-between gap-2">
+             <div className="flex items-center gap-2">
+               <Disc3 size={13} className="text-cyan-400" />
+               <span className="font-bold text-[10.5px] uppercase tracking-wider text-zinc-200">
+                 Saved SoundFonts
+               </span>
+               <span className="text-[9px] text-zinc-500 font-sans">
+                 ({savedSoundFonts.filter(sf => sf.isCustom).length} saved in cookies · {savedSoundFonts.length} total)
+               </span>
+             </div>
+             <span className="text-[9px] text-zinc-500 font-sans">
+               Default loads automatically on startup
+             </span>
+           </div>
+
+           <div className="flex flex-wrap gap-1.5">
+             {savedSoundFonts.map((sf) => {
+               const isActive = activeSfId === sf.id;
+               const isDefault = defaultSfId === sf.id;
+               return (
+                 <div
+                   key={sf.id}
+                   className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] transition ${
+                     isActive
+                       ? 'bg-cyan-950/50 border-cyan-500/60 text-cyan-200'
+                       : 'bg-zinc-900/80 border-zinc-800 text-zinc-300'
+                   }`}
+                 >
+                   <button
+                     type="button"
+                     onClick={() => SpessaSynth.setActiveSoundFont(sf.id)}
+                     className="flex items-center gap-1.5 text-left cursor-pointer hover:text-white"
+                     title={`Activate "${sf.name}" (${sf.instrumentCount} presets)`}
+                   >
+                     {isActive && <Check size={10} className="text-cyan-400 shrink-0" />}
+                     <span className="font-bold max-w-[160px] truncate">{sf.name}</span>
+                     <span className="text-[8.5px] text-zinc-400 font-sans">
+                       {sf.format || (sf.isCustom ? 'Saved' : 'Built-in')}
+                     </span>
+                   </button>
+
+                   <button
+                     id={`converter-sf-default-btn-${sf.id}`}
+                     type="button"
+                     onClick={() => {
+                       setDefaultSoundFontId(sf.id);
+                       setConversionLog(prev => [
+                         ...prev,
+                         `[SYSTEM] Set "${sf.name}" as default startup SoundFont (saved in browser cookies).`
+                       ]);
+                     }}
+                     disabled={isDefault}
+                     className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition flex items-center gap-1 shrink-0 ${
+                       isDefault
+                         ? 'bg-amber-950/75 border-amber-500/70 text-amber-300 cursor-default'
+                         : 'bg-zinc-950 hover:bg-amber-950/60 border-zinc-700 hover:border-amber-500/60 text-zinc-300 hover:text-amber-200 cursor-pointer'
+                     }`}
+                     title={isDefault ? 'Default startup SoundFont' : `Set "${sf.name}" to default SoundFont`}
+                   >
+                     <Star size={9} fill={isDefault ? 'currentColor' : 'none'} />
+                     <span>{isDefault ? 'Default' : 'Set Default'}</span>
+                   </button>
+
+                   {sf.isCustom && (
+                     <button
+                       type="button"
+                       onClick={async () => {
+                         await deleteSavedSoundFont(sf.id);
+                         setConversionLog(prev => [
+                           ...prev,
+                           `[SYSTEM] Removed "${sf.name}" from saved SoundFonts.`
+                         ]);
+                       }}
+                       className="p-0.5 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/40 transition cursor-pointer shrink-0"
+                       title={`Remove "${sf.name}" from saved SoundFonts`}
+                     >
+                       <Trash2 size={10} />
+                     </button>
+                   )}
+                 </div>
+               );
+             })}
+           </div>
+         </div>
+       )}
 
        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 min-h-0">
           

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, Repeat, PlayCircle, Cpu, Activity } from 'lucide-react';
+import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Repeat, PlayCircle, Cpu, Activity, Star, Trash2, Check } from 'lucide-react';
 import { Channel, SoundFontInstrument, SoundEnginesConfig, SoundFontInterpolationMode } from '../types';
 import {
   playNote,
@@ -8,9 +8,13 @@ import {
   onSoundEnginesChange,
   loadSoundFontIntoCoreAndLib,
   isSoundFontFileName,
-  SOUNDFONT_ACCEPT_ATTR
+  SOUNDFONT_ACCEPT_ATTR,
+  getDefaultSoundFontId,
+  setDefaultSoundFontId,
+  onDefaultSoundFontChange,
+  deleteSavedSoundFont
 } from './AudioEngine';
-import { SpessaSynth } from '../engines/spressasynthLib';
+import { SpessaSynth, SpessaSoundFont } from '../engines/spressasynthLib';
 import {
   INTERPOLATION_MODES,
   getInterpolationMode,
@@ -96,6 +100,10 @@ export default function TrackerEditor({
 
   const [enginesConfig, setEnginesConfig] = useState<SoundEnginesConfig>(getSoundEnginesConfig());
   const [interpolationMode, setInterpolationModeState] = useState<SoundFontInterpolationMode>(getInterpolationMode());
+  const [loadedSoundFonts, setLoadedSoundFonts] = useState<SpessaSoundFont[]>(() => SpessaSynth.getLoadedSoundFonts());
+  const [activeSoundFontId, setActiveSoundFontId] = useState<string>(() => SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
+  const [defaultSoundFontId, setDefaultSoundFontState] = useState<string>(() => getDefaultSoundFontId());
+  const [showSavedSoundFonts, setShowSavedSoundFonts] = useState<boolean>(false);
   const [trackerBpmText, setTrackerBpmText] = useState((bpm || 125).toString());
 
   useEffect(() => {
@@ -104,15 +112,27 @@ export default function TrackerEditor({
 
   useEffect(() => {
     setSoundFontInstruments(getAvailableSoundFontInstruments());
+    setLoadedSoundFonts(SpessaSynth.getLoadedSoundFonts());
+    setActiveSoundFontId(SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
+    const unsubSf = SpessaSynth.onSoundFontChange((fonts, activeId) => {
+      setLoadedSoundFonts(fonts);
+      setActiveSoundFontId(activeId);
+      setSoundFontInstruments(getAvailableSoundFontInstruments());
+    });
     const unsubEngines = onSoundEnginesChange((newCfg) => {
       setEnginesConfig(newCfg);
     });
     const unsubInterp = onInterpolationModeChange((mode) => {
       setInterpolationModeState(mode);
     });
+    const unsubDefSf = onDefaultSoundFontChange((id) => {
+      setDefaultSoundFontState(id);
+    });
     return () => {
+      unsubSf();
       unsubEngines();
       unsubInterp();
+      unsubDefSf();
     };
   }, []);
 
@@ -297,8 +317,10 @@ export default function TrackerEditor({
   const sfDirectInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    return SpessaSynth.onSoundFontChange(() => {
+    return SpessaSynth.onSoundFontChange((fonts, activeId) => {
       setSoundFontInstruments(getAvailableSoundFontInstruments());
+      setLoadedSoundFonts(fonts);
+      setActiveSoundFontId(activeId);
     });
   }, []);
 
@@ -642,6 +664,22 @@ export default function TrackerEditor({
             <Disc3 size={12} className="text-emerald-400 animate-pulse" />
             <span>+ SoundFont</span>
           </button>
+          <button
+            id="tracker-saved-soundfonts-toggle-btn"
+            type="button"
+            onClick={() => setShowSavedSoundFonts(prev => !prev)}
+            aria-expanded={showSavedSoundFonts}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm border ${
+              showSavedSoundFonts
+                ? 'bg-emerald-900/60 text-emerald-200 border-emerald-500/70'
+                : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:bg-zinc-800 hover:text-emerald-300'
+            }`}
+            title="Show or hide Saved SoundFonts and Set Default controls"
+          >
+            <Disc3 size={12} className="text-emerald-400" />
+            <span>Saved SoundFonts ({loadedSoundFonts.length})</span>
+            {showSavedSoundFonts ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
           <input
             type="file"
             ref={sfDirectInputRef}
@@ -781,6 +819,78 @@ export default function TrackerEditor({
           </span>
         </div>
       </div>
+
+      {/* SAVED SOUNDFONTS BAR WITH SET DEFAULT BUTTON (TOGGLED) */}
+      {showSavedSoundFonts && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-zinc-950/85 border border-zinc-850 rounded-lg text-xs">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[10px] uppercase tracking-wider pr-1">
+              <Disc3 size={13} className="text-emerald-400" />
+              <span>Saved SoundFonts:</span>
+            </div>
+
+            {loadedSoundFonts.map((sf) => {
+              const isActive = activeSoundFontId === sf.id;
+              const isDefault = defaultSoundFontId === sf.id;
+              return (
+                <div
+                  key={sf.id}
+                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded border text-[10px] transition ${
+                    isActive
+                      ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-200'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => SpessaSynth.setActiveSoundFont(sf.id)}
+                    className="flex items-center gap-1 cursor-pointer hover:text-white font-bold"
+                    title={`Activate "${sf.name}" (${sf.instrumentCount} presets)`}
+                  >
+                    {isActive && <Check size={9} className="text-emerald-400 shrink-0" />}
+                    <span className="max-w-[150px] truncate">{sf.name}</span>
+                  </button>
+
+                  <button
+                    id={`tracker-sf-default-btn-${sf.id}`}
+                    type="button"
+                    onClick={() => {
+                      setDefaultSoundFontId(sf.id);
+                      setDefaultSoundFontState(sf.id);
+                      setImportFeedback({
+                        success: true,
+                        msg: `Set "${sf.name}" as your default SoundFont (saved in browser cookies).`
+                      });
+                      setTimeout(() => setImportFeedback(null), 3000);
+                    }}
+                    disabled={isDefault}
+                    className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition flex items-center gap-1 ${
+                      isDefault
+                        ? 'bg-amber-950/75 border-amber-500/70 text-amber-300 cursor-default'
+                        : 'bg-zinc-950 hover:bg-amber-950/60 border-zinc-700 hover:border-amber-500/60 text-zinc-300 hover:text-amber-200 cursor-pointer'
+                    }`}
+                    title={isDefault ? 'Default startup SoundFont' : `Set "${sf.name}" as default SoundFont`}
+                  >
+                    <Star size={8.5} fill={isDefault ? 'currentColor' : 'none'} />
+                    <span>{isDefault ? 'Default' : 'Set Default'}</span>
+                  </button>
+
+                  {sf.isCustom && (
+                    <button
+                      type="button"
+                      onClick={() => void deleteSavedSoundFont(sf.id)}
+                      className="p-0.5 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/40 transition cursor-pointer"
+                      title={`Remove "${sf.name}" from saved SoundFonts`}
+                    >
+                      <Trash2 size={9.5} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* CHANNEL BANK SELECTOR BAR */}
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 p-2 bg-zinc-900/70 border border-zinc-800 rounded-lg text-xs">

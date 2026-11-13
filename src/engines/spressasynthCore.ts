@@ -1552,6 +1552,14 @@ class SpessaSynthCoreEngine {
     }
   }
 
+  public removeSoundFont(id: string) {
+    if (!id) return;
+    this.loadedSoundFonts.delete(id);
+    if (this.activeSoundFontId === id) {
+      this.activeSoundFontId = null;
+    }
+  }
+
   public getLoadedSoundFonts(): SpessaCoreSoundFont[] {
     return Array.from(this.loadedSoundFonts.values());
   }

@@ -11,6 +11,7 @@ export const COOKIE_AMPLIFIER_KEY = "aria48_osc_amplifier";
 export const COOKIE_OSC_CONFIG_KEY = "aria48_osc_config";
 export const COOKIE_ADDED_SOUNDFONTS_KEY = "aria48_added_soundfonts";
 export const COOKIE_ACTIVE_SOUNDFONT_KEY = "aria48_active_soundfont";
+export const COOKIE_DEFAULT_SOUNDFONT_KEY = "aria48_default_soundfont";
 const COOKIE_SF_CHUNK_PREFIX = "aria48_sf_c_";
 
 // Safe cookie budget so large SF2/SF3 banks never trigger HTTP 431 Request Header Too Large
@@ -252,6 +253,19 @@ export function getActiveSoundFontCookie(): string | null {
   return getCookie(COOKIE_ACTIVE_SOUNDFONT_KEY);
 }
 
+export function saveDefaultSoundFontCookie(id: string): void {
+  if (!id) return;
+  setCookie(COOKIE_DEFAULT_SOUNDFONT_KEY, id, 365);
+}
+
+export function getDefaultSoundFontCookie(): string | null {
+  return getCookie(COOKIE_DEFAULT_SOUNDFONT_KEY);
+}
+
+export function clearDefaultSoundFontCookie(): void {
+  deleteCookie(COOKIE_DEFAULT_SOUNDFONT_KEY);
+}
+
 export function getSavedSoundFontsFromCookies(): SavedSoundFontCookieEntry[] {
   const raw = getCookie(COOKIE_ADDED_SOUNDFONTS_KEY);
   if (!raw) return [];
@@ -356,4 +370,10 @@ export async function removeSavedSoundFontFromCookies(id: string): Promise<void>
   await deleteSoundFontBinaryFromIDB(id);
   const remaining = getSavedSoundFontsFromCookies().filter(e => e.id !== id);
   setCookie(COOKIE_ADDED_SOUNDFONTS_KEY, JSON.stringify(remaining), 365);
+  if (getDefaultSoundFontCookie() === id) {
+    clearDefaultSoundFontCookie();
+  }
+  if (getActiveSoundFontCookie() === id) {
+    deleteCookie(COOKIE_ACTIVE_SOUNDFONT_KEY);
+  }
 }

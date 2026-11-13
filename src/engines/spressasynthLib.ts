@@ -404,6 +404,20 @@ class SpessaSynthEngine {
     }
   }
 
+  public removeSoundFont(id: string): boolean {
+    const target = this.soundFonts.find(s => s.id === id);
+    if (!target || !target.isCustom) return false;
+    this.soundFonts = this.soundFonts.filter(s => s.id !== id);
+    SpessaSynthCore.removeSoundFont(id);
+    if (this.activeSoundFontId === id) {
+      const nextId = this.soundFonts[0]?.id || "spessa-default-gm";
+      this.activeSoundFontId = nextId;
+      SpessaSynthCore.setActiveSoundFont(nextId);
+    }
+    this.notifySoundFontListeners();
+    return true;
+  }
+
   public onSoundFontChange(listener: (fonts: SpessaSoundFont[], activeId: string) => void): () => void {
     this.soundFontListeners.push(listener);
     return () => {

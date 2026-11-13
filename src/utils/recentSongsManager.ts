@@ -115,15 +115,17 @@ export function clearRecentSongs(): void {
   }
 }
 
-import { getActiveSoundFontCookie, saveActiveSoundFontCookie } from './cookieStorage';
+import { getCookie, setCookie } from './cookieStorage';
+
+const COOKIE_SELECTED_PRESET_KEY = "aria48_selected_preset";
 
 /**
- * Persist user selected SoundFont preset across sessions (cookies + localStorage)
+ * Persist user selected SoundFont instrument preset across sessions (cookies + localStorage)
  */
 export function saveSelectedSoundFont(presetId: string): void {
   try {
     if (presetId) {
-      saveActiveSoundFontCookie(presetId);
+      setCookie(COOKIE_SELECTED_PRESET_KEY, presetId, 365);
     }
     if (typeof window !== 'undefined' && window.localStorage && presetId) {
       localStorage.setItem(STORAGE_KEY_SELECTED_SOUNDFONT, presetId);
@@ -135,7 +137,7 @@ export function saveSelectedSoundFont(presetId: string): void {
 
 export function getSavedSelectedSoundFont(): string {
   try {
-    const cookieVal = getActiveSoundFontCookie();
+    const cookieVal = getCookie(COOKIE_SELECTED_PRESET_KEY);
     if (cookieVal) return cookieVal;
     if (typeof window !== 'undefined' && window.localStorage) {
       const saved = localStorage.getItem(STORAGE_KEY_SELECTED_SOUNDFONT);

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Settings, Volume2, VolumeX, ShieldAlert, Zap, Layers, Server, Sliders, 
-  ShieldCheck, HeartPulse, Disc3, Upload, Play, Radio, Cpu, Activity
+  ShieldCheck, HeartPulse, Disc3, Upload, Play, Radio, Cpu, Activity, Star, Trash2, Check, ChevronDown, ChevronUp
 } from 'lucide-react';
 import { Channel, OscilloscopeConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID, MidiChannelState } from '../engines/spressasynthLib';
@@ -10,8 +10,15 @@ import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS, WebScopePreset } from '
 import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
-import { loadSoundFontIntoCoreAndLib, setMidiChannelMuted } from './AudioEngine';
-import { saveAmplifier } from '../utils/cookieStorage';
+import {
+  deleteSavedSoundFont,
+  getDefaultSoundFontId,
+  loadSoundFontIntoCoreAndLib,
+  onDefaultSoundFontChange,
+  setDefaultSoundFontId,
+  setMidiChannelMuted
+} from './AudioEngine';
+import { getSavedSoundFontsFromCookies, saveAmplifier, SavedSoundFontCookieEntry } from '../utils/cookieStorage';
 
 interface MixerEQProps {
   channels: Channel[];
@@ -246,6 +253,9 @@ export default function MixerEQ({
   const [reverbSize, setReverbSize] = useState(40);
   const [soundFonts, setSoundFonts] = useState(SpessaSynth.getLoadedSoundFonts());
   const [activeSoundFont, setActiveSoundFont] = useState(SpessaSynth.getActiveSoundFont());
+  const [defaultSoundFontId, setDefaultSoundFontState] = useState<string>(() => getDefaultSoundFontId());
+  const [savedCookieFonts, setSavedCookieFonts] = useState<SavedSoundFontCookieEntry[]>(() => getSavedSoundFontsFromCookies());
+  const [showSavedSoundFonts, setShowSavedSoundFonts] = useState<boolean>(false);
   const [sfFeedback, setSfFeedback] = useState<string | null>(null);
   const [isMidiModalOpen, setIsMidiModalOpen] = useState(false);
   const [midiChannelStates, setMidiChannelStates] = useState<MidiChannelState[]>(() => [
@@ -258,15 +268,38 @@ export default function MixerEQ({
     const unsubSf = SpessaSynth.onSoundFontChange((fonts) => {
       setSoundFonts(fonts);
       setActiveSoundFont(SpessaSynth.getActiveSoundFont());
+      setSavedCookieFonts(getSavedSoundFontsFromCookies());
+    });
+    const unsubDefault = onDefaultSoundFontChange((id) => {
+      setDefaultSoundFontState(id);
     });
     const unsubCh = SpessaSynth.onChannelStateChange((states) => {
       setMidiChannelStates(states);
     });
     return () => {
       unsubSf();
+      unsubDefault();
       unsubCh();
     };
   }, []);
+
+  const handleSetDefaultSoundFont = (id: string, name?: string) => {
+    setDefaultSoundFontId(id);
+    setDefaultSoundFontState(id);
+    setActiveSoundFont(SpessaSynth.getActiveSoundFont());
+    setSfFeedback(`Set "${name || id}" as the default SoundFont (saved in browser cookies).`);
+    setTimeout(() => setSfFeedback(null), 3500);
+  };
+
+  const handleDeleteSavedSoundFont = async (id: string, name?: string) => {
+    await deleteSavedSoundFont(id);
+    setSoundFonts(SpessaSynth.getLoadedSoundFonts());
+    setActiveSoundFont(SpessaSynth.getActiveSoundFont());
+    setSavedCookieFonts(getSavedSoundFontsFromCookies());
+    setDefaultSoundFontState(getDefaultSoundFontId());
+    setSfFeedback(`Removed "${name || id}" from saved SoundFonts.`);
+    setTimeout(() => setSfFeedback(null), 3000);
+  };
 
   const handleToggleOscilloscopeChannelMute = (channelIndex: number) => {
     const currentlyMuted = Boolean(
@@ -404,17 +437,29 @@ export default function MixerEQ({
             >
               {soundFonts.map(sf => (
                 <option key={sf.id} value={sf.id} className="bg-zinc-950 text-zinc-300">
-                  {sf.name} ({sf.instrumentCount} presets)
+                  {sf.name} ({sf.instrumentCount} presets){defaultSoundFontId === sf.id ? ' ★ Default' : ''}
                 </option>
               ))}
             </select>
-            {activeSoundFont?.isCustom && (
-              <span
-                className="text-[8px] font-mono text-emerald-400/90 bg-emerald-950/60 border border-emerald-800/40 px-1 py-0.2 rounded shrink-0"
-                title="Added SoundFonts are automatically saved in browser cookies (aria48_added_soundfonts)"
+            {activeSoundFont && (
+              <button
+                id="mixer-set-default-active-sf-btn"
+                type="button"
+                onClick={() => handleSetDefaultSoundFont(activeSoundFont.id, activeSoundFont.name)}
+                className={`px-1.5 py-0.5 rounded text-[8.5px] font-mono font-bold border transition cursor-pointer flex items-center gap-1 shrink-0 ${
+                  defaultSoundFontId === activeSoundFont.id
+                    ? 'bg-amber-950/70 border-amber-500/60 text-amber-300'
+                    : 'bg-zinc-950 hover:bg-amber-950/50 border-zinc-700 hover:border-amber-500/50 text-zinc-300 hover:text-amber-200'
+                }`}
+                title={
+                  defaultSoundFontId === activeSoundFont.id
+                    ? 'This SoundFont is currently set as your startup default'
+                    : 'Set the selected SoundFont as the startup default (saved in browser cookies)'
+                }
               >
-                🍪 Saved
-              </span>
+                <Star size={9} fill={defaultSoundFontId === activeSoundFont.id ? 'currentColor' : 'none'} />
+                <span>{defaultSoundFontId === activeSoundFont.id ? 'Default' : 'Set Default'}</span>
+              </button>
             )}
           </div>
 
@@ -425,6 +470,23 @@ export default function MixerEQ({
           >
             <Upload size={11} />
             <span>Load SoundFont</span>
+          </button>
+
+          <button
+            id="mixer-saved-soundfonts-toggle-btn"
+            type="button"
+            onClick={() => setShowSavedSoundFonts(prev => !prev)}
+            aria-expanded={showSavedSoundFonts}
+            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition cursor-pointer border ${
+              showSavedSoundFonts
+                ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-200'
+                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border-zinc-700'
+            }`}
+            title="Show or hide Saved SoundFonts list and Set Default controls"
+          >
+            <Disc3 size={11} className="text-emerald-400" />
+            <span>Saved SoundFonts ({soundFonts.length})</span>
+            {showSavedSoundFonts ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
           </button>
 
           <button
@@ -446,6 +508,94 @@ export default function MixerEQ({
           </button>
         </div>
       </div>
+
+      {/* SAVED SOUNDFONTS MANAGER (SET DEFAULT & ACTIVATE - COLLAPSIBLE) */}
+      {showSavedSoundFonts && (
+        <div className="bg-zinc-950/90 border border-zinc-800 rounded-xl px-3 py-2 flex flex-col gap-2 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Disc3 size={13} className="text-emerald-400" />
+              <span className="font-bold text-[10.5px] uppercase tracking-wider text-zinc-200">
+                Saved SoundFonts
+              </span>
+              <span className="text-[9px] text-zinc-500 font-sans">
+                ({savedCookieFonts.length} saved in cookies · {soundFonts.length} total banks)
+              </span>
+            </div>
+            <span className="text-[9px] text-zinc-500 font-sans">
+              Default loads automatically on startup
+            </span>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {soundFonts.map((sf) => {
+              const cookieEntry = savedCookieFonts.find(c => c.id === sf.id);
+              const isActive = activeSoundFont?.id === sf.id;
+              const isDefault = defaultSoundFontId === sf.id;
+              const sizeLabel = cookieEntry
+                ? cookieEntry.size >= 1024 * 1024
+                  ? `${(cookieEntry.size / (1024 * 1024)).toFixed(1)} MB`
+                  : `${Math.max(1, Math.round(cookieEntry.size / 1024))} KB`
+                : null;
+
+              return (
+                <div
+                  key={sf.id}
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[10px] transition ${
+                    isActive
+                      ? 'bg-emerald-950/50 border-emerald-500/60 text-emerald-200'
+                      : 'bg-zinc-900/80 border-zinc-800 text-zinc-300'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      SpessaSynth.setActiveSoundFont(sf.id);
+                      setActiveSoundFont(SpessaSynth.getActiveSoundFont());
+                    }}
+                    className="flex items-center gap-1.5 text-left cursor-pointer hover:text-white"
+                    title={`Activate "${sf.name}" (${sf.instrumentCount} presets)`}
+                  >
+                    {isActive && <Check size={10} className="text-emerald-400 shrink-0" />}
+                    <span className="font-bold max-w-[170px] truncate">{sf.name}</span>
+                    <span className="text-[8.5px] text-zinc-400 font-sans">
+                      {sf.format || (sf.isCustom ? 'Saved' : 'Built-in')}
+                      {sizeLabel ? ` · ${sizeLabel}` : ''}
+                    </span>
+                  </button>
+
+                  <button
+                    id={`saved-sf-default-btn-${sf.id}`}
+                    type="button"
+                    onClick={() => handleSetDefaultSoundFont(sf.id, sf.name)}
+                    disabled={isDefault}
+                    className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition flex items-center gap-1 shrink-0 ${
+                      isDefault
+                        ? 'bg-amber-950/75 border-amber-500/70 text-amber-300 cursor-default'
+                        : 'bg-zinc-950 hover:bg-amber-950/60 border-zinc-700 hover:border-amber-500/60 text-zinc-300 hover:text-amber-200 cursor-pointer'
+                    }`}
+                    title={isDefault ? 'Default startup SoundFont' : `Set "${sf.name}" to default SoundFont`}
+                  >
+                    <Star size={9} fill={isDefault ? 'currentColor' : 'none'} />
+                    <span>{isDefault ? 'Default' : 'Set Default'}</span>
+                  </button>
+
+                  {sf.isCustom && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSavedSoundFont(sf.id, sf.name)}
+                      className="p-0.5 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/40 transition cursor-pointer shrink-0"
+                      title={`Remove "${sf.name}" from saved SoundFonts`}
+                    >
+                      <Trash2 size={10} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {sfFeedback && (
         <div className="bg-emerald-950/40 border border-emerald-500/40 rounded-lg px-3 py-1.5 text-[10px] text-emerald-300 flex items-center gap-2">

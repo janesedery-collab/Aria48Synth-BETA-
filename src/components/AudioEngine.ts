@@ -7,9 +7,12 @@ import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/websc
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
 import {
   getActiveSoundFontCookie,
+  getDefaultSoundFontCookie,
   getSavedSoundFontsFromCookies,
   loadSavedSoundFontBinary,
+  removeSavedSoundFontFromCookies,
   saveActiveSoundFontCookie,
+  saveDefaultSoundFontCookie,
   saveSoundFontToCookiesAndCache
 } from '../utils/cookieStorage';
 
@@ -26,6 +29,44 @@ export type { SoundEnginesConfig };
 
 let isRestoringSoundFonts = false;
 let soundFontRestorePromise: Promise<void> | null = null;
+const defaultSoundFontListeners: Array<(id: string) => void> = [];
+
+function notifyDefaultSoundFontListeners(id: string) {
+  defaultSoundFontListeners.forEach(cb => {
+    try { cb(id); } catch (e) {}
+  });
+}
+
+export function getDefaultSoundFontId(): string {
+  return getDefaultSoundFontCookie() || 'spessa-default-gm';
+}
+
+export function setDefaultSoundFontId(id: string): void {
+  if (!id) return;
+  saveDefaultSoundFontCookie(id);
+  if (SpessaSynth.getLoadedSoundFonts().some(s => s.id === id)) {
+    SpessaSynth.setActiveSoundFont(id);
+  }
+  notifyDefaultSoundFontListeners(id);
+}
+
+export function onDefaultSoundFontChange(listener: (id: string) => void): () => void {
+  defaultSoundFontListeners.push(listener);
+  return () => {
+    const idx = defaultSoundFontListeners.indexOf(listener);
+    if (idx !== -1) defaultSoundFontListeners.splice(idx, 1);
+  };
+}
+
+export async function deleteSavedSoundFont(id: string): Promise<void> {
+  const wasDefault = getDefaultSoundFontCookie() === id;
+  await removeSavedSoundFontFromCookies(id);
+  SpessaSynth.removeSoundFont(id);
+  if (wasDefault) {
+    const nextDefault = getDefaultSoundFontCookie() || 'spessa-default-gm';
+    notifyDefaultSoundFontListeners(nextDefault);
+  }
+}
 
 /**
  * Unified SoundFont ingestion pipeline:
@@ -60,32 +101,41 @@ export async function loadSoundFontIntoCoreAndLib(
 }
 
 /**
- * Restore all user-added SoundFonts saved in browser cookies across sessions.
+ * Restore all user-added SoundFonts saved in browser cookies across sessions,
+ * and automatically activate the user's chosen Default SoundFont (or last active bank).
  */
 export function restoreSavedSoundFontsFromCookies(): Promise<void> {
   if (soundFontRestorePromise) return soundFontRestorePromise;
   soundFontRestorePromise = (async () => {
     const savedEntries = getSavedSoundFontsFromCookies();
-    if (savedEntries.length === 0) return;
+    const defaultSfId = getDefaultSoundFontCookie();
+    const savedActiveId = getActiveSoundFontCookie();
 
     isRestoringSoundFonts = true;
-    const savedActiveId = getActiveSoundFontCookie();
     try {
-      const ctx = getAudioContext() || SpessaSynth.init();
-      // Load oldest -> newest so newest becomes active before applying savedActiveId
-      for (let i = savedEntries.length - 1; i >= 0; i--) {
-        const entry = savedEntries[i];
-        try {
-          const buf = await loadSavedSoundFontBinary(entry);
-          if (buf && buf.byteLength > 0) {
-            await SpessaSynth.loadSoundFontAsync(buf, entry.fileName, ctx);
+      if (savedEntries.length > 0) {
+        const ctx = getAudioContext() || SpessaSynth.init();
+        // Load oldest -> newest so newest becomes active unless a specific default/active ID is preferred
+        for (let i = savedEntries.length - 1; i >= 0; i--) {
+          const entry = savedEntries[i];
+          try {
+            const buf = await loadSavedSoundFontBinary(entry);
+            if (buf && buf.byteLength > 0) {
+              await SpessaSynth.loadSoundFontAsync(buf, entry.fileName, ctx);
+            }
+          } catch (err) {
+            console.warn(`Could not restore SoundFont "${entry.fileName}" from cookies:`, err);
           }
-        } catch (err) {
-          console.warn(`Could not restore SoundFont "${entry.fileName}" from cookies:`, err);
         }
       }
-      if (savedActiveId && SpessaSynth.getLoadedSoundFonts().some(s => s.id === savedActiveId)) {
-        SpessaSynth.setActiveSoundFont(savedActiveId);
+
+      const loaded = SpessaSynth.getLoadedSoundFonts();
+      const targetId =
+        (defaultSfId && loaded.some(s => s.id === defaultSfId) ? defaultSfId : null) ||
+        (savedActiveId && loaded.some(s => s.id === savedActiveId) ? savedActiveId : null);
+
+      if (targetId) {
+        SpessaSynth.setActiveSoundFont(targetId);
       }
     } finally {
       isRestoringSoundFonts = false;
