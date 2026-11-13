@@ -102,14 +102,29 @@ function getBufferId(buf: AudioBuffer): number {
   return id;
 }
 
-interface ResampledResult {
+export interface ResampledResult {
   buffer: AudioBuffer;
+  playbackRate: number;
   loopStart?: number;
   loopEnd?: number;
 }
 
-const MAX_RESAMPLED_CACHE = 240;
+const MAX_RESAMPLED_CACHE = 640;
 const resampledCache = new Map<string, ResampledResult>();
+
+// Sliding 50ms DSP CPU budget so uncached 10,000 notes/sec Black MIDI bursts never stall audio threads
+const DSP_WINDOW_MS = 50;
+const DSP_BUDGET_MS = 6.5;
+let dspWindowStartMs = 0;
+let dspWindowSpentMs = 0;
+
+function getRemainingDspBudgetMs(nowMs: number): number {
+  if (nowMs - dspWindowStartMs >= DSP_WINDOW_MS) {
+    dspWindowStartMs = nowMs;
+    dspWindowSpentMs = 0;
+  }
+  return Math.max(0, DSP_BUDGET_MS - dspWindowSpentMs);
+}
 
 export function clearInterpolationCache(): void {
   resampledCache.clear();
@@ -182,7 +197,8 @@ function readSampleBounded(
 /**
  * Resample a SoundFont sample AudioBuffer to `ctx.sampleRate` using the active
  * DSP interpolation mode so `AudioBufferSourceNode` outputs exact interpolated PCM
- * at native 1:1 hardware playback rate.
+ * at `playbackRate: 1.0`, or seamlessly falls back to native hardware resampling
+ * if a massive note burst saturates the sliding CPU budget.
  */
 export function interpolateSampleBuffer(
   ctx: BaseAudioContext,
@@ -190,7 +206,8 @@ export function interpolateSampleBuffer(
   pitchPlaybackRate: number,
   mode: SoundFontInterpolationMode = currentInterpolationMode,
   loopStartSec?: number,
-  loopEndSec?: number
+  loopEndSec?: number,
+  maxRenderSec?: number
 ): ResampledResult {
   const targetSr = ctx.sampleRate || 44100;
   const safePitchRate = Math.max(0.0625, Math.min(16.0, pitchPlaybackRate || 1.0));
@@ -207,7 +224,8 @@ export function interpolateSampleBuffer(
   const loopKey = hasValidLoop
     ? `${Math.round((loopStartSec || 0) * 1000)}_${Math.round((loopEndSec || 0) * 1000)}`
     : 'nl';
-  const cacheKey = `${bufId}:${mode}:${targetSr}:${rateKey}:${loopKey}`;
+  const capKey = maxRenderSec !== undefined && !hasValidLoop ? Math.round(maxRenderSec * 100) : 'f';
+  const cacheKey = `${bufId}:${mode}:${targetSr}:${rateKey}:${loopKey}:${capKey}`;
 
   const cached = resampledCache.get(cacheKey);
   if (cached) {
@@ -227,10 +245,28 @@ export function interpolateSampleBuffer(
 
   // Stop rendering once loop end is reached (Web Audio loops output cleanly back to outLoopStart)
   const effectiveInEnd = hasValidLoop ? inLoopEnd : sourceBuffer.length;
-  const maxOutFrames = targetSr * (hasValidLoop ? 16 : 10);
+  const maxSecLimit = maxRenderSec !== undefined && !hasValidLoop
+    ? Math.max(0.15, Math.min(10, maxRenderSec))
+    : (hasValidLoop ? 12 : 8);
+  const maxOutFrames = Math.floor(targetSr * maxSecLimit);
   const desiredOutFrames = Math.max(64, Math.min(maxOutFrames, Math.ceil(effectiveInEnd / effStep)));
-
   const numChannels = Math.min(2, Math.max(1, sourceBuffer.numberOfChannels));
+
+  // Protect main/audio threads during ultra-dense note bursts (e.g., Rush E up to 10,000 notes/sec)
+  const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const remainingBudget = getRemainingDspBudgetMs(nowMs);
+  const tapsCost = mode === 'sinc' ? 16 : mode === 'poly4' ? 5 : mode === 'cubic' ? 4 : mode === 'linear' ? 2 : 1;
+  const estimatedOps = desiredOutFrames * numChannels * tapsCost;
+
+  if (remainingBudget <= 0.15 || (remainingBudget < 2.0 && estimatedOps > 650000)) {
+    return {
+      buffer: sourceBuffer,
+      playbackRate: safePitchRate,
+      loopStart: hasValidLoop ? loopStartSec : undefined,
+      loopEnd: hasValidLoop ? loopEndSec : undefined
+    };
+  }
+
   const outBuf = ctx.createBuffer(numChannels, desiredOutFrames, targetSr);
 
   const sincCutoff = effStep > 1.0 ? Math.max(0.125, 1.0 / effStep) : 1.0;
@@ -328,6 +364,9 @@ export function interpolateSampleBuffer(
     }
   }
 
+  const endMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  dspWindowSpentMs += Math.max(0, endMs - nowMs);
+
   let outLoopStart: number | undefined = undefined;
   let outLoopEnd: number | undefined = undefined;
   if (hasValidLoop) {
@@ -341,6 +380,7 @@ export function interpolateSampleBuffer(
 
   const res: ResampledResult = {
     buffer: outBuf,
+    playbackRate: 1.0,
     loopStart: outLoopStart,
     loopEnd: outLoopEnd
   };

@@ -266,6 +266,8 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
     instrument: number;
   }
   const noteEvents: MidiNoteEvent[] = [];
+  const MAX_TRACKER_PREVIEW_EVENTS = 64000;
+  let totalRawNotesParsed = 0;
   const channelInstruments: { [channel: number]: number } = {};
 
   for (let trackIdx = 0; trackIdx < trackCount; trackIdx++) {
@@ -308,14 +310,17 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
           const velocity = u8[tOffset++];
           
           if (velocity > 0) {
-            noteEvents.push({
-              tick: absoluteTick,
-              channel: midiCh,
-              track: trackIdx + 1,
-              note: noteNumber,
-              velocity,
-              instrument: channelInstruments[midiCh] ?? (midiCh === 9 ? 128 : 0)
-            });
+            totalRawNotesParsed++;
+            if (noteEvents.length < MAX_TRACKER_PREVIEW_EVENTS) {
+              noteEvents.push({
+                tick: absoluteTick,
+                channel: midiCh,
+                track: trackIdx + 1,
+                note: noteNumber,
+                velocity,
+                instrument: channelInstruments[midiCh] ?? (midiCh === 9 ? 128 : 0)
+              });
+            }
           }
         } else if (eventType === 0x80) { // Note OFF
           tOffset += 2;
@@ -347,13 +352,21 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
             if (t.trim() && songTitle === "MIDI Track") songTitle = t.trim();
           }
           tOffset += metaLen;
+        } else if (statusByte === 0xF0 || statusByte === 0xF7) { // SysEx
+          let syxLen = 0;
+          while (tOffset < tEnd) {
+            const byte = u8[tOffset++];
+            syxLen = (syxLen << 7) | (byte & 0x7F);
+            if (!(byte & 0x80)) break;
+          }
+          tOffset += syxLen;
         }
       }
     }
     offset += 8 + chunkLen;
   }
   
-  logs.push(`[MIDI] Parsed ${noteEvents.length} raw note events across tracks.`);
+  logs.push(`[MIDI] Parsed ${totalRawNotesParsed} raw note events across tracks.`);
 
   // Calculate chronological 16th note steps and patterns count
   const ticksPer16th = Math.max(1, ticksPerQuarterNote / 4);

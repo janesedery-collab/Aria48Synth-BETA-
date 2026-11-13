@@ -955,83 +955,227 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
       });
     }
 
-    // 12. GM Standard Drums: Kick, Snare, Rim/Clap, Hi-Hat, Tom, Cymbal (with proper phase integration!)
-    const kickBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.4), sampleRate);
+    // 12. GM Standard Drums: Filtered studio PCM drums (Zero raw static shakers!)
+    // Seeded deterministic PRNG + 2-pole Biquad HPF/LPF/BPF helper for crisp, clean percussion transients
+    let drumSeed = 0x5f3759df;
+    const nextRand = () => {
+      drumSeed = (drumSeed * 1664525 + 1013904223) >>> 0;
+      return (drumSeed / 0x80000000) - 1.0;
+    };
+
+    const filterBiquad = (
+      input: Float32Array,
+      type: 'hpf' | 'lpf' | 'bpf',
+      freq: number,
+      q = 0.707
+    ): Float32Array => {
+      const out = new Float32Array(input.length);
+      const w0 = (2 * Math.PI * Math.min(sampleRate * 0.45, Math.max(20, freq))) / sampleRate;
+      const cosW0 = Math.cos(w0);
+      const alpha = Math.sin(w0) / (2 * Math.max(0.1, q));
+
+      let b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
+      if (type === 'hpf') {
+        b0 = (1 + cosW0) / 2;
+        b1 = -(1 + cosW0);
+        b2 = (1 + cosW0) / 2;
+        a0 = 1 + alpha;
+        a1 = -2 * cosW0;
+        a2 = 1 - alpha;
+      } else if (type === 'lpf') {
+        b0 = (1 - cosW0) / 2;
+        b1 = 1 - cosW0;
+        b2 = (1 - cosW0) / 2;
+        a0 = 1 + alpha;
+        a1 = -2 * cosW0;
+        a2 = 1 - alpha;
+      } else {
+        b0 = alpha;
+        b1 = 0;
+        b2 = -alpha;
+        a0 = 1 + alpha;
+        a1 = -2 * cosW0;
+        a2 = 1 - alpha;
+      }
+
+      const nb0 = b0 / a0, nb1 = b1 / a0, nb2 = b2 / a0;
+      const na1 = a1 / a0, na2 = a2 / a0;
+      let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+      for (let i = 0; i < input.length; i++) {
+        const x0 = input[i];
+        const y0 = nb0 * x0 + nb1 * x1 + nb2 * x2 - na1 * y1 - na2 * y2;
+        out[i] = y0;
+        x2 = x1; x1 = x0;
+        y2 = y1; y1 = y0;
+      }
+      return out;
+    };
+
+    const metallicSquareSum = (t: number): number => {
+      const freqs = [205.3, 304.4, 369.6, 522.7, 540.0, 800.0];
+      let sum = 0;
+      for (let k = 0; k < freqs.length; k++) {
+        const s = Math.sin(2 * Math.PI * freqs[k] * t);
+        // Band-limited soft square partials prevent harsh digital fuzz
+        sum += Math.tanh(s * 2.4);
+      }
+      return sum / freqs.length;
+    };
+
+    // Kick (35/36): Deep sub punch + crisp 3ms beater transient + warm saturation
+    const kickBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.42), sampleRate);
     const kickData = kickBuf.getChannelData(0);
     let kickPhase = 0;
     for (let i = 0; i < kickData.length; i++) {
       const t = i / sampleRate;
-      const pitch = 135 * Math.exp(-t * 38) + 42;
+      const pitch = 158 * Math.exp(-t * 42) + 45;
       kickPhase += (2 * Math.PI * pitch) / sampleRate;
-      kickData[i] = Math.sin(kickPhase) * Math.exp(-t * 11) * 0.95;
+      const subBody = Math.sin(kickPhase) * Math.exp(-t * 10.5);
+      const click = Math.sin(2 * Math.PI * 1900 * t) * Math.exp(-t * 420) * 0.35;
+      kickData[i] = Math.tanh((subBody + click) * 1.18) * 0.94;
     }
 
-    const snareBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.32), sampleRate);
+    // Snare (38/40): Tuned dual-mode drum shell + crisp HPF/LPF filtered snare wires (zero mud/static)
+    const snareLen = Math.floor(sampleRate * 0.28);
+    const snareNoiseRaw = new Float32Array(snareLen);
+    for (let i = 0; i < snareLen; i++) snareNoiseRaw[i] = nextRand();
+    const snareWires = filterBiquad(filterBiquad(snareNoiseRaw, 'hpf', 1800, 0.8), 'lpf', 7600, 0.7);
+    const snareBuf = ctx.createBuffer(1, snareLen, sampleRate);
     const snareData = snareBuf.getChannelData(0);
     let snarePhase = 0;
-    for (let i = 0; i < snareData.length; i++) {
+    for (let i = 0; i < snareLen; i++) {
       const t = i / sampleRate;
-      const pitch = 185 * Math.exp(-t * 18) + 120;
-      snarePhase += (2 * Math.PI * pitch) / sampleRate;
-      const tone = Math.sin(snarePhase) * 0.45 * Math.exp(-t * 20);
-      const noise = (Math.random() * 2 - 1) * 0.55 * Math.exp(-t * 14);
-      snareData[i] = (tone + noise) * 0.9;
+      const shellFreq = 215 * Math.exp(-t * 28) + 178;
+      snarePhase += (2 * Math.PI * shellFreq) / sampleRate;
+      const body = (Math.sin(snarePhase) * 0.65 + Math.sin(snarePhase * 1.78) * 0.28) * Math.exp(-t * 22);
+      const wires = snareWires[i] * Math.exp(-t * 15) * 0.62;
+      const snap = Math.sin(2 * Math.PI * 1400 * t) * Math.exp(-t * 180) * 0.18;
+      snareData[i] = Math.tanh((body + wires + snap) * 1.05) * 0.9;
     }
 
-    const rimBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.1), sampleRate);
+    // Rimshot / Claves / Woodblock (37, 75, 76, 77): Woody resonant ping
+    const rimBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.09), sampleRate);
     const rimData = rimBuf.getChannelData(0);
     for (let i = 0; i < rimData.length; i++) {
       const t = i / sampleRate;
-      rimData[i] = (Math.sin(2 * Math.PI * 820 * t) * 0.6 + (Math.random() * 2 - 1) * 0.3) * Math.exp(-t * 65);
+      const woody = Math.sin(2 * Math.PI * 860 * t) * 0.55 + Math.sin(2 * Math.PI * 1680 * t) * 0.35;
+      rimData[i] = woody * Math.exp(-t * 72) * 0.85;
     }
 
-    const clapBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.28), sampleRate);
+    // Hand Clap (39): 3 micro-slaps strictly band-passed around 950-2400 Hz
+    const clapLen = Math.floor(sampleRate * 0.26);
+    const clapRaw = new Float32Array(clapLen);
+    for (let i = 0; i < clapLen; i++) clapRaw[i] = nextRand();
+    const clapFiltered = filterBiquad(clapRaw, 'bpf', 1450, 1.35);
+    const clapBuf = ctx.createBuffer(1, clapLen, sampleRate);
     const clapData = clapBuf.getChannelData(0);
-    for (let i = 0; i < clapData.length; i++) {
+    for (let i = 0; i < clapLen; i++) {
       const t = i / sampleRate;
-      const burst = (t < 0.03 ? (Math.sin(t * 260) > 0 ? 1 : 0.3) : 1.0);
-      clapData[i] = (Math.random() * 2 - 1) * burst * Math.exp(-t * 16) * 0.85;
+      const e1 = Math.exp(-Math.max(0, t) * 140);
+      const e2 = t >= 0.011 ? Math.exp(-(t - 0.011) * 140) : 0;
+      const e3 = t >= 0.022 ? Math.exp(-(t - 0.022) * 18) : 0;
+      const env = Math.max(e1, e2, e3);
+      clapData[i] = Math.tanh(clapFiltered[i] * env * 2.1) * 0.85;
     }
 
-    const closedHatBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.08), sampleRate);
+    // Closed Hi-Hat (42, 44): TR-808 6-oscillator metallic ring + strict >6.8kHz HPF (zero static)
+    const closedHatLen = Math.floor(sampleRate * 0.075);
+    const closedHatRaw = new Float32Array(closedHatLen);
+    for (let i = 0; i < closedHatLen; i++) {
+      const t = i / sampleRate;
+      closedHatRaw[i] = metallicSquareSum(t) * 0.82 + nextRand() * 0.18;
+    }
+    const closedHatFiltered = filterBiquad(closedHatRaw, 'hpf', 6800, 0.95);
+    const closedHatBuf = ctx.createBuffer(1, closedHatLen, sampleRate);
     const closedHatData = closedHatBuf.getChannelData(0);
-    for (let i = 0; i < closedHatData.length; i++) {
+    for (let i = 0; i < closedHatLen; i++) {
       const t = i / sampleRate;
-      const noise = (Math.random() * 2 - 1) * 0.8;
-      closedHatData[i] = noise * Math.exp(-t * 70);
+      closedHatData[i] = Math.tanh(closedHatFiltered[i] * 1.45) * Math.exp(-t * 78) * 0.72;
     }
 
-    const openHatBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.45), sampleRate);
+    // Open Hi-Hat (46): Shimmering metallic decay + >6.5kHz HPF
+    const openHatLen = Math.floor(sampleRate * 0.34);
+    const openHatRaw = new Float32Array(openHatLen);
+    for (let i = 0; i < openHatLen; i++) {
+      const t = i / sampleRate;
+      openHatRaw[i] = metallicSquareSum(t) * 0.84 + nextRand() * 0.16;
+    }
+    const openHatFiltered = filterBiquad(openHatRaw, 'hpf', 6500, 0.9);
+    const openHatBuf = ctx.createBuffer(1, openHatLen, sampleRate);
     const openHatData = openHatBuf.getChannelData(0);
-    for (let i = 0; i < openHatData.length; i++) {
+    for (let i = 0; i < openHatLen; i++) {
       const t = i / sampleRate;
-      const noise = (Math.random() * 2 - 1) * 0.75;
-      openHatData[i] = noise * Math.exp(-t * 8);
+      openHatData[i] = Math.tanh(openHatFiltered[i] * 1.35) * Math.exp(-t * 10.5) * 0.68;
     }
 
-    const tomBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.4), sampleRate);
-    const tomData = tomBuf.getChannelData(0);
-    let tomPhase = 0;
-    for (let i = 0; i < tomData.length; i++) {
-      const t = i / sampleRate;
-      const pitch = 140 * Math.exp(-t * 16) + 65;
-      tomPhase += (2 * Math.PI * pitch) / sampleRate;
-      tomData[i] = Math.sin(tomPhase) * Math.exp(-t * 9) * 0.9;
-    }
+    // Tuned Toms (41, 43, 45, 47, 48, 50): Pure resonant membrane sweep per tom pitch
+    const createTomBuf = (startFreq: number, endFreq: number) => {
+      const buf = ctx.createBuffer(1, Math.floor(sampleRate * 0.36), sampleRate);
+      const data = buf.getChannelData(0);
+      let phase = 0;
+      for (let i = 0; i < data.length; i++) {
+        const t = i / sampleRate;
+        const pitch = (startFreq - endFreq) * Math.exp(-t * 16) + endFreq;
+        phase += (2 * Math.PI * pitch) / sampleRate;
+        data[i] = Math.tanh((Math.sin(phase) + Math.sin(phase * 1.52) * 0.15) * Math.exp(-t * 9.5)) * 0.9;
+      }
+      return buf;
+    };
+    const lowFloorTomBuf = createTomBuf(128, 76);
+    const highFloorTomBuf = createTomBuf(150, 92);
+    const lowTomBuf = createTomBuf(178, 110);
+    const lowMidTomBuf = createTomBuf(212, 132);
+    const hiMidTomBuf = createTomBuf(248, 158);
+    const highTomBuf = createTomBuf(295, 192);
 
-    const crashBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.75), sampleRate);
+    // Crash / Ride Cymbals (49, 51, 52, 55, 57, 59): Bronze shimmer + >5.5kHz HPF
+    const crashLen = Math.floor(sampleRate * 0.72);
+    const crashRaw = new Float32Array(crashLen);
+    for (let i = 0; i < crashLen; i++) {
+      const t = i / sampleRate;
+      crashRaw[i] = metallicSquareSum(t * 1.13) * 0.8 + nextRand() * 0.2;
+    }
+    const crashFiltered = filterBiquad(crashRaw, 'hpf', 5500, 0.85);
+    const crashBuf = ctx.createBuffer(1, crashLen, sampleRate);
     const crashData = crashBuf.getChannelData(0);
-    for (let i = 0; i < crashData.length; i++) {
+    for (let i = 0; i < crashLen; i++) {
       const t = i / sampleRate;
-      const noise = (Math.random() * 2 - 1) * 0.65;
-      crashData[i] = noise * Math.exp(-t * 4.5);
+      crashData[i] = Math.tanh(crashFiltered[i] * 1.25) * Math.exp(-t * 4.8) * 0.62;
     }
 
-    const cowbellBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.25), sampleRate);
+    // Ride Bell (53): Clear metallic bell chime + light bronze ring
+    const bellBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.45), sampleRate);
+    const bellData = bellBuf.getChannelData(0);
+    for (let i = 0; i < bellData.length; i++) {
+      const t = i / sampleRate;
+      const harmonicBell =
+        Math.sin(2 * Math.PI * 1240 * t) * 0.45 +
+        Math.sin(2 * Math.PI * 1980 * t) * 0.3 +
+        metallicSquareSum(t) * 0.25;
+      bellData[i] = harmonicBell * Math.exp(-t * 9.0) * 0.72;
+    }
+
+    // Cowbell (56): Iconic 808 540Hz + 800Hz square/sine cowbell
+    const cowbellBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.24), sampleRate);
     const cowbellData = cowbellBuf.getChannelData(0);
     for (let i = 0; i < cowbellData.length; i++) {
       const t = i / sampleRate;
-      cowbellData[i] = (Math.sin(2 * Math.PI * 540 * t) * 0.5 + Math.sin(2 * Math.PI * 800 * t) * 0.5) * Math.exp(-t * 18) * 0.75;
+      const cw = Math.tanh(Math.sin(2 * Math.PI * 540 * t) * 1.8) * 0.5 +
+                 Math.tanh(Math.sin(2 * Math.PI * 800 * t) * 1.8) * 0.5;
+      cowbellData[i] = cw * Math.exp(-t * 18) * 0.72;
+    }
+
+    // Shaker / Tambourine (54, 69, 70): Crisp high-passed metallic jingle (>7.4kHz)
+    const shakerLen = Math.floor(sampleRate * 0.11);
+    const shakerRaw = new Float32Array(shakerLen);
+    for (let i = 0; i < shakerLen; i++) shakerRaw[i] = nextRand();
+    const shakerFiltered = filterBiquad(shakerRaw, 'hpf', 7400, 1.1);
+    const shakerBuf = ctx.createBuffer(1, shakerLen, sampleRate);
+    const shakerData = shakerBuf.getChannelData(0);
+    for (let i = 0; i < shakerLen; i++) {
+      const t = i / sampleRate;
+      const env = Math.sin(Math.min(1, t / 0.015) * (Math.PI / 2)) * Math.exp(-t * 36);
+      shakerData[i] = Math.tanh(shakerFiltered[i] * 1.4) * env * 0.58;
     }
 
     const drumKeyMap: { [key: number]: SoundFontSampleVoice } = {
@@ -1039,28 +1183,28 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
       36: { buffer: kickBuf, rootKey: 36, sampleRate, baseGain: 1.0 },
       37: { buffer: rimBuf, rootKey: 37, sampleRate, baseGain: 0.85 },
       38: { buffer: snareBuf, rootKey: 38, sampleRate, baseGain: 0.95 },
-      39: { buffer: clapBuf, rootKey: 39, sampleRate, baseGain: 0.9 },
+      39: { buffer: clapBuf, rootKey: 39, sampleRate, baseGain: 0.88 },
       40: { buffer: snareBuf, rootKey: 40, sampleRate, baseGain: 0.95 },
-      42: { buffer: closedHatBuf, rootKey: 42, sampleRate, baseGain: 0.85 },
-      44: { buffer: closedHatBuf, rootKey: 44, sampleRate, baseGain: 0.8 },
-      46: { buffer: openHatBuf, rootKey: 46, sampleRate, baseGain: 0.85 },
-      41: { buffer: tomBuf, rootKey: 41, sampleRate, baseGain: 0.9 },
-      43: { buffer: tomBuf, rootKey: 43, sampleRate, baseGain: 0.9 },
-      45: { buffer: tomBuf, rootKey: 45, sampleRate, baseGain: 0.9 },
-      47: { buffer: tomBuf, rootKey: 47, sampleRate, baseGain: 0.9 },
-      48: { buffer: tomBuf, rootKey: 48, sampleRate, baseGain: 0.9 },
-      50: { buffer: tomBuf, rootKey: 50, sampleRate, baseGain: 0.9 },
-      49: { buffer: crashBuf, rootKey: 49, sampleRate, baseGain: 0.8 },
-      51: { buffer: crashBuf, rootKey: 51, sampleRate, baseGain: 0.75 },
-      52: { buffer: crashBuf, rootKey: 52, sampleRate, baseGain: 0.75 },
-      53: { buffer: crashBuf, rootKey: 53, sampleRate, baseGain: 0.7 },
-      54: { buffer: closedHatBuf, rootKey: 54, sampleRate, baseGain: 0.75 },
-      55: { buffer: crashBuf, rootKey: 55, sampleRate, baseGain: 0.75 },
-      56: { buffer: cowbellBuf, rootKey: 56, sampleRate, baseGain: 0.75 },
-      57: { buffer: crashBuf, rootKey: 57, sampleRate, baseGain: 0.75 },
-      59: { buffer: crashBuf, rootKey: 59, sampleRate, baseGain: 0.7 },
-      69: { buffer: closedHatBuf, rootKey: 69, sampleRate, baseGain: 0.75 },
-      70: { buffer: closedHatBuf, rootKey: 70, sampleRate, baseGain: 0.75 },
+      42: { buffer: closedHatBuf, rootKey: 42, sampleRate, baseGain: 0.78 },
+      44: { buffer: closedHatBuf, rootKey: 44, sampleRate, baseGain: 0.74 },
+      46: { buffer: openHatBuf, rootKey: 46, sampleRate, baseGain: 0.76 },
+      41: { buffer: lowFloorTomBuf, rootKey: 41, sampleRate, baseGain: 0.9 },
+      43: { buffer: highFloorTomBuf, rootKey: 43, sampleRate, baseGain: 0.9 },
+      45: { buffer: lowTomBuf, rootKey: 45, sampleRate, baseGain: 0.9 },
+      47: { buffer: lowMidTomBuf, rootKey: 47, sampleRate, baseGain: 0.9 },
+      48: { buffer: hiMidTomBuf, rootKey: 48, sampleRate, baseGain: 0.9 },
+      50: { buffer: highTomBuf, rootKey: 50, sampleRate, baseGain: 0.9 },
+      49: { buffer: crashBuf, rootKey: 49, sampleRate, baseGain: 0.72 },
+      51: { buffer: crashBuf, rootKey: 51, sampleRate, baseGain: 0.68 },
+      52: { buffer: crashBuf, rootKey: 52, sampleRate, baseGain: 0.68 },
+      53: { buffer: bellBuf, rootKey: 53, sampleRate, baseGain: 0.78 },
+      54: { buffer: shakerBuf, rootKey: 54, sampleRate, baseGain: 0.68 },
+      55: { buffer: crashBuf, rootKey: 55, sampleRate, baseGain: 0.68 },
+      56: { buffer: cowbellBuf, rootKey: 56, sampleRate, baseGain: 0.74 },
+      57: { buffer: crashBuf, rootKey: 57, sampleRate, baseGain: 0.7 },
+      59: { buffer: crashBuf, rootKey: 59, sampleRate, baseGain: 0.65 },
+      69: { buffer: shakerBuf, rootKey: 69, sampleRate, baseGain: 0.65 },
+      70: { buffer: shakerBuf, rootKey: 70, sampleRate, baseGain: 0.65 },
       75: { buffer: rimBuf, rootKey: 75, sampleRate, baseGain: 0.8 },
       76: { buffer: rimBuf, rootKey: 76, sampleRate, baseGain: 0.8 },
       77: { buffer: rimBuf, rootKey: 77, sampleRate, baseGain: 0.8 }
@@ -1347,7 +1491,7 @@ export function playSoundFontNote(
 
     const source = ctx.createBufferSource();
     source.buffer = interp.buffer;
-    source.playbackRate.setValueAtTime(1.0, ctx.currentTime);
+    source.playbackRate.setValueAtTime(interp.playbackRate || 1.0, ctx.currentTime);
 
     if (interp.loopStart !== undefined && interp.loopEnd !== undefined && interp.loopEnd > interp.loopStart) {
       source.loop = true;

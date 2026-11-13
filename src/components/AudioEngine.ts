@@ -171,7 +171,9 @@ export function onSoundEnginesChange(callback: (config: SoundEnginesConfig) => v
 let audioCtx: AudioContext | null = null;
 let tinySynthInstance: any = null;
 let tinySynthMasterGain: GainNode | null = null;
+let tinySynthLimiter: DynamicsCompressorNode | null = null;
 let syntheticMasterGain: GainNode | null = null;
+let syntheticLimiter: DynamicsCompressorNode | null = null;
 let directAudioSource: AudioBufferSourceNode | null = null;
 let isMidiPlayingInternal = false;
 
@@ -179,11 +181,20 @@ interface ActiveOscVoice {
   stop: () => void;
   channelId: number;
 }
+const MAX_SYNTHETIC_VOICES = 64;
 const activeSyntheticVoices: ActiveOscVoice[] = [];
 let isTinySynthHooked = false;
 let suppressHookForward = false;
 let midiPlaybackWatchdogTimer: any = null;
 let midiEndTailTimer: any = null;
+
+// TinySynth burst rate-limiter state (prevents WebAudioTinySynth 64-voice sort/prune lockup under 10,000 notes/sec)
+const TS_BURST_WINDOW_MS = 50;
+const TS_MAX_NOTES_PER_WINDOW = 24;
+const TS_COALESCE_SEC = 0.006;
+let tsBurstWindowStartMs = 0;
+let tsBurstNoteCount = 0;
+const tsLastNoteAt = new Float64Array(16 * 128);
 
 /**
  * Mute / Unmute a specific MIDI channel (0-15) across SpessaSynth, TinySynth, and Synthetic Oscillators.
@@ -217,9 +228,8 @@ export function toggleMidiChannelMute(channelIndex: number): boolean {
 /**
  * Phase-Locked Sound Engine Synchronizer:
  * Hooks TinySynth's internal SMF event dispatcher (`send(msg, t)`).
- * Because TinySynth accurately parses all tracks, deltas, and mid-song tempo meta-events (0xff51),
- * mirroring each event synchronously to SpessaSynth with the EXACT same sub-millisecond audio timestamp `t`
- * guarantees 100% phase-locked, zero-latency synchronization between both engines across all songs!
+ * Forwards ALL up-to-10,000 notes/sec events synchronously to SpessaSynth while shielding
+ * TinySynth's heavier O(N log N) voice allocator from dense Black MIDI floods.
  */
 export function hookTinySynthEvents(synth: any) {
   if (!synth || isTinySynthHooked) return;
@@ -229,16 +239,40 @@ export function hookTinySynthEvents(synth: any) {
     const status = msg && msg.length > 0 ? msg[0] : 0;
     const cmd = status & 0xf0;
     const ch = status & 0x0f;
+    const isNoteOn = cmd === 0x90 && msg[2] > 0;
+    const isNoteOff = cmd === 0x80 || (cmd === 0x90 && msg[2] === 0);
 
     // Suppress Note-On on muted MIDI channels across both TinySynth and SpessaSynth
-    if (cmd === 0x90 && msg[2] > 0 && SpessaSynth.isChannelMuted(ch)) {
+    if (isNoteOn && SpessaSynth.isChannelMuted(ch)) {
       return;
     }
 
-    // 1. Process TinySynth voice synthesis
-    originalSend(msg, t);
+    // 1. Process TinySynth voice synthesis only when enabled, with burst protection under Rush E density
+    if (activeEnginesConfig.tinySynth || (!isNoteOn && !isNoteOff)) {
+      let allowTinySynth = true;
+      if (isNoteOn) {
+        const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (nowPerf - tsBurstWindowStartMs >= TS_BURST_WINDOW_MS) {
+          tsBurstWindowStartMs = nowPerf;
+          tsBurstNoteCount = 0;
+        }
+        const key = (ch << 7) | (msg[1] & 0x7f);
+        const evTime = typeof t === 'number' && Number.isFinite(t) ? t : (audioCtx?.currentTime || 0);
+        if (evTime - tsLastNoteAt[key] < TS_COALESCE_SEC && evTime >= tsLastNoteAt[key]) {
+          allowTinySynth = false;
+        } else if (tsBurstNoteCount >= TS_MAX_NOTES_PER_WINDOW) {
+          allowTinySynth = false;
+        } else {
+          tsLastNoteAt[key] = evTime;
+          tsBurstNoteCount++;
+        }
+      }
+      if (allowTinySynth) {
+        originalSend(msg, t);
+      }
+    }
 
-    // 2. Synchronously forward to SpessaSynth on the exact same audio timeline
+    // 2. Synchronously forward full note throughput to SpessaSynth on the exact same audio timeline
     if (!suppressHookForward && activeEnginesConfig.spessaSynth && msg && msg.length > 0) {
       if (cmd === 0x90) { // Note On / Note Off (vel === 0)
         const note = msg[1];
@@ -290,21 +324,59 @@ export function hookTinySynthEvents(synth: any) {
   isTinySynthHooked = true;
 }
 
+function shapeTinySynthNoiseBuffer(synth: any, sampleRate: number) {
+  try {
+    const n0: AudioBuffer | undefined = synth?.noiseBuf?.n0;
+    if (!n0 || (n0 as any).__ariaShaped) return;
+    const data = n0.getChannelData(0);
+    // 2-pole Biquad High-Pass Filter (>3.8 kHz) strips raw static-shaker mud from TinySynth drums
+    const sr = n0.sampleRate || sampleRate || 44100;
+    const w0 = (2 * Math.PI * Math.min(sr * 0.45, 3800)) / sr;
+    const cosW0 = Math.cos(w0);
+    const alpha = Math.sin(w0) / (2 * 0.85);
+    const a0 = 1 + alpha;
+    const nb0 = ((1 + cosW0) / 2) / a0;
+    const nb1 = (-(1 + cosW0)) / a0;
+    const nb2 = ((1 + cosW0) / 2) / a0;
+    const na1 = (-2 * cosW0) / a0;
+    const na2 = (1 - alpha) / a0;
+
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < data.length; i++) {
+      const x0 = data[i];
+      const y0 = nb0 * x0 + nb1 * x1 + nb2 * x2 - na1 * y1 - na2 * y2;
+      x2 = x1; x1 = x0;
+      y2 = y1; y1 = y0;
+      data[i] = Math.max(-0.95, Math.min(0.95, y0 * 0.40));
+    }
+    (n0 as any).__ariaShaped = true;
+  } catch (e) {}
+}
+
 export function initTinySynth(ctx: AudioContext) {
   try {
     if (!tinySynthMasterGain) {
       tinySynthMasterGain = ctx.createGain();
       tinySynthMasterGain.gain.setValueAtTime(activeEnginesConfig.tinySynth ? 0.55 : 0, ctx.currentTime);
-      tinySynthMasterGain.connect(ctx.destination);
+
+      tinySynthLimiter = ctx.createDynamicsCompressor();
+      tinySynthLimiter.threshold.setValueAtTime(-7, ctx.currentTime);
+      tinySynthLimiter.knee.setValueAtTime(6, ctx.currentTime);
+      tinySynthLimiter.ratio.setValueAtTime(16, ctx.currentTime);
+      tinySynthLimiter.attack.setValueAtTime(0.001, ctx.currentTime);
+      tinySynthLimiter.release.setValueAtTime(0.08, ctx.currentTime);
+
+      tinySynthMasterGain.connect(tinySynthLimiter);
+      tinySynthLimiter.connect(ctx.destination);
     }
     if (!tinySynthInstance && typeof WebAudioTinySynth !== 'undefined') {
       tinySynthInstance = new WebAudioTinySynth({ quality: 1, useReverb: 0 });
     }
     if (tinySynthInstance) {
-      // Connect to the shared AudioContext and dedicated master gain node
-      // to guarantee zero clock drift and exact phase alignment with SpessaSynth
       tinySynthInstance.setAudioContext(ctx, tinySynthMasterGain);
+      tinySynthInstance.setVoices?.(96);
       tinySynthInstance.setMasterVol(0.55);
+      shapeTinySynthNoiseBuffer(tinySynthInstance, ctx.sampleRate);
       hookTinySynthEvents(tinySynthInstance);
     }
   } catch (err) {
@@ -317,7 +389,16 @@ export function initSyntheticEngine(ctx: AudioContext) {
     if (!syntheticMasterGain) {
       syntheticMasterGain = ctx.createGain();
       syntheticMasterGain.gain.setValueAtTime(0.35, ctx.currentTime);
-      syntheticMasterGain.connect(ctx.destination);
+
+      syntheticLimiter = ctx.createDynamicsCompressor();
+      syntheticLimiter.threshold.setValueAtTime(-7, ctx.currentTime);
+      syntheticLimiter.knee.setValueAtTime(6, ctx.currentTime);
+      syntheticLimiter.ratio.setValueAtTime(16, ctx.currentTime);
+      syntheticLimiter.attack.setValueAtTime(0.001, ctx.currentTime);
+      syntheticLimiter.release.setValueAtTime(0.08, ctx.currentTime);
+
+      syntheticMasterGain.connect(syntheticLimiter);
+      syntheticLimiter.connect(ctx.destination);
     }
   } catch (e) {}
 }
@@ -889,6 +970,13 @@ function playSyntheticOscillator(
   if (!syntheticMasterGain) initSyntheticEngine(ctx);
   if (!syntheticMasterGain) return;
 
+  while (activeSyntheticVoices.length >= MAX_SYNTHETIC_VOICES) {
+    const oldest = activeSyntheticVoices.shift();
+    if (oldest) {
+      try { oldest.stop(); } catch (e) {}
+    }
+  }
+
   const osc = ctx.createOscillator();
   const subOsc = ctx.createOscillator();
   const voiceGain = ctx.createGain();
@@ -958,10 +1046,16 @@ function playSyntheticOscillator(
   };
   activeSyntheticVoices.push(voiceRecord);
 
-  setTimeout(() => {
+  osc.onended = () => {
+    try {
+      osc.disconnect();
+      subOsc.disconnect();
+      voiceGain.disconnect();
+      panner.disconnect();
+    } catch (e) {}
     const idx = activeSyntheticVoices.indexOf(voiceRecord);
     if (idx !== -1) activeSyntheticVoices.splice(idx, 1);
-  }, (duration + 0.1) * 1000);
+  };
 }
 
 // Single-note trigger for interactive auditing when user clicks or edits notes in tracker
