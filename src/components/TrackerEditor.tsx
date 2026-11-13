@@ -315,6 +315,7 @@ export default function TrackerEditor({
   };
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const activeRowRef = useRef<HTMLDivElement>(null);
   const sfDirectInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -367,7 +368,25 @@ export default function TrackerEditor({
     }
   };
 
-  // Auto-scroll disabled so user scroll position is never overridden during playback
+  // Auto-scroll ONLY the tracker grid container (never leaking to page/other scrollbars)
+  useEffect(() => {
+    if (!isPlaying) return;
+    const parent = containerRef.current;
+    const child = activeRowRef.current;
+    if (!parent || !child) return;
+
+    const parentRect = parent.getBoundingClientRect();
+    const childRect = child.getBoundingClientRect();
+    const currentTopInParent = childRect.top - parentRect.top;
+    const visibleTop = 72;
+    const visibleBottom = parent.clientHeight - 48;
+
+    if (currentTopInParent < visibleTop || currentTopInParent > visibleBottom) {
+      const delta = currentTopInParent - (parent.clientHeight / 2 - childRect.height / 2);
+      const maxScroll = Math.max(0, parent.scrollHeight - parent.clientHeight);
+      parent.scrollTop = Math.max(0, Math.min(maxScroll, parent.scrollTop + delta));
+    }
+  }, [activeRow, isPlaying]);
 
   const selectNoteList = [
     "C-2", "D-2", "E-2", "F-2", "G-2", "A-2", "B-2",
@@ -1012,6 +1031,7 @@ export default function TrackerEditor({
           {Array.from({ length: 64 }, (_, rowIndex) => (
             <div 
               key={rowIndex} 
+              ref={rowIndex === activeRow ? activeRowRef : null}
               className={`flex border-b border-zinc-900/50 transition-colors ${
                 rowIndex === activeRow 
                   ? 'bg-cyan-950/40 text-cyan-200 border-y border-cyan-700/40' 
