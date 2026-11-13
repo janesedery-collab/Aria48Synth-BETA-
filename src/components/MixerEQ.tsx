@@ -74,6 +74,7 @@ function WebScopeCRT({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [meter, setMeter] = useState({ peak: 0, rms: 0 });
+  const lastMeterRef = useRef({ peak: 0, rms: 0, updatedAt: 0 });
 
   const size = oscConfig?.size || 'medium';
   const amplifier = oscConfig?.amplifier ?? 1.0;
@@ -103,7 +104,18 @@ function WebScopeCRT({
             amplifier: amplifier
           }
         );
-        setMeter({ peak: isMuted ? 0 : stats.peakLevel, rms: isMuted ? 0 : stats.rmsLevel });
+        const nextPeak = isMuted ? 0 : stats.peakLevel;
+        const nextRms = isMuted ? 0 : stats.rmsLevel;
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const prev = lastMeterRef.current;
+        const changedSignificantly =
+          (nextPeak === 0 && prev.peak !== 0) ||
+          Math.abs(nextPeak - prev.peak) >= 0.015 ||
+          Math.abs(nextRms - prev.rms) >= 0.015;
+        if (changedSignificantly && (nextPeak === 0 || now - prev.updatedAt >= 48)) {
+          lastMeterRef.current = { peak: nextPeak, rms: nextRms, updatedAt: now };
+          setMeter({ peak: nextPeak, rms: nextRms });
+        }
       }
       animId = requestAnimationFrame(renderLoop);
     };

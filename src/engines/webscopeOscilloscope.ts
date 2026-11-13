@@ -79,6 +79,8 @@ export const WEBSCOPE_PRESETS: Record<WebScopePreset, {
 class WebScopeEngine {
   public readonly engineId = WEBSCOPE_ENGINE_ID;
   private timeDomainBuffer = new Float32Array(1024);
+  private workletScratchBuffer = new Float32Array(1024);
+  private spessaScratchBuffer = new Float32Array(1024);
 
   /**
    * Find zero-crossing trigger index to lock waveform and prevent horizontal jitter
@@ -153,9 +155,11 @@ class WebScopeEngine {
     let peakLevel = 0;
     let sumSquares = 0;
 
-    const readAnalyser = (node: AnalyserNode | null): { peak: number; sumSq: number; buf: Float32Array } | null => {
+    const readAnalyser = (
+      node: AnalyserNode | null,
+      buf: Float32Array<ArrayBuffer>
+    ): { peak: number; sumSq: number; buf: Float32Array<ArrayBuffer> } | null => {
       if (!node) return null;
-      const buf = new Float32Array(this.timeDomainBuffer.length);
       node.getFloatTimeDomainData(buf);
       let pk = 0;
       let ss = 0;
@@ -169,7 +173,7 @@ class WebScopeEngine {
 
     if (isPlaying) {
       if (Chiptune3.isChiptunePlaying()) {
-        const chipRes = readAnalyser(Chiptune3.getChannelAnalyser(channelIndex));
+        const chipRes = readAnalyser(Chiptune3.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
         if (chipRes) {
           this.timeDomainBuffer.set(chipRes.buf);
           peakLevel = chipRes.peak;
@@ -177,8 +181,8 @@ class WebScopeEngine {
           hasSignal = peakLevel > 0.005;
         }
       } else {
-        const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex));
-        const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex));
+        const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
+        const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
         const best = (workletRes && workletRes.peak >= (spessaRes?.peak ?? 0)) ? workletRes : spessaRes;
         if (best) {
           this.timeDomainBuffer.set(best.buf);

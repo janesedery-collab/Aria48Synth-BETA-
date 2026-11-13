@@ -164,6 +164,7 @@ class WorkletSynthController {
   private initPromise: Promise<WorkletSynthesizer | null> | null = null;
   private registeredContexts = new WeakSet<BaseAudioContext>();
   private workletReady = false;
+  private requestedChannelCount = 16;
   private defaultBankLoaded = false;
   private customBanksLoaded = new Set<string>();
   private activeBankId: string = 'aria-default-bank';
@@ -305,6 +306,7 @@ class WorkletSynthController {
           convolverMode: false
         });
         this.synth = synth;
+        this.requestedChannelCount = synth.midiChannels.length || 16;
 
         // Attach two-way synchronization listeners immediately
         this.attachSynthEventHandlers(synth);
@@ -321,7 +323,7 @@ class WorkletSynthController {
 
         // Load minimal valid SF2 bank so presetList is always populated before custom SF2 uploads
         try {
-          const defaultBankBuffer = BasicSoundBank.getSampleSoundBankFile();
+          const defaultBankBuffer = BasicSoundBank.getSampleSoundBankFile().slice(0);
           await synth.soundBankManager.addSoundBank(defaultBankBuffer, 'aria-default-bank', 0);
           this.defaultBankLoaded = true;
         } catch (bankErr) {
@@ -535,7 +537,12 @@ class WorkletSynthController {
 
   public ensureChannelCount(count: number) {
     if (!this.synth) return;
-    while (this.synth.midiChannels.length < count && this.synth.midiChannels.length < 48) {
+    const target = Math.max(16, Math.min(48, Math.floor(count)));
+    const current = Math.max(this.synth.midiChannels.length, this.requestedChannelCount);
+    if (target <= current) return;
+    const toAdd = target - current;
+    this.requestedChannelCount = target;
+    for (let i = 0; i < toAdd; i++) {
       this.synth.addNewChannel();
     }
   }
