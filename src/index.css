@@ -6,6 +6,11 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+html, body {
+  touch-action: manipulation;
+  overflow-anchor: none;
+}
+
 /* Apply Android default font (Roboto) globally to all text and interface widgets */
 *, html, body, button, input, select, textarea {
   font-family: "Roboto", system-ui, -apple-system, sans-serif;

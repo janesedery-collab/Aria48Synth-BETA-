@@ -315,7 +315,6 @@ export default function TrackerEditor({
   };
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const activeRowRef = useRef<HTMLDivElement>(null);
   const sfDirectInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -368,20 +367,7 @@ export default function TrackerEditor({
     }
   };
 
-  // Keep active row centered in the scroll view
-  useEffect(() => {
-    if (isPlaying && activeRowRef.current && containerRef.current) {
-      const parent = containerRef.current;
-      const child = activeRowRef.current;
-      const parentRect = parent.getBoundingClientRect();
-      const childRect = child.getBoundingClientRect();
-      const relativeTop = childRect.top - parentRect.top;
-      
-      if (relativeTop < 80 || relativeTop > parentRect.height - 120) {
-        child.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }
-  }, [activeRow, isPlaying]);
+  // Auto-scroll disabled so user scroll position is never overridden during playback
 
   const selectNoteList = [
     "C-2", "D-2", "E-2", "F-2", "G-2", "A-2", "B-2",
@@ -1026,7 +1012,6 @@ export default function TrackerEditor({
           {Array.from({ length: 64 }, (_, rowIndex) => (
             <div 
               key={rowIndex} 
-              ref={rowIndex === activeRow ? activeRowRef : null}
               className={`flex border-b border-zinc-900/50 transition-colors ${
                 rowIndex === activeRow 
                   ? 'bg-cyan-950/40 text-cyan-200 border-y border-cyan-700/40' 
