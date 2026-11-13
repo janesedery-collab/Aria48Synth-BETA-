@@ -243,7 +243,13 @@ let tinySynthLimiter: DynamicsCompressorNode | null = null;
 let syntheticMasterGain: GainNode | null = null;
 let syntheticLimiter: DynamicsCompressorNode | null = null;
 let directAudioSource: AudioBufferSourceNode | null = null;
+let directAudioBufferRef: AudioBuffer | null = null;
+let directAudioStartCtxTime = 0;
+let directAudioOffsetSec = 0;
+let directAudioPlaybackRate = 1.0;
 let isMidiPlayingInternal = false;
+let midiBaseDurationSecCache = 0;
+let midiMaxTickCache = 1;
 
 interface ActiveOscVoice {
   stop: () => void;
@@ -539,6 +545,34 @@ export function setMidiTempoBpm(targetBpm: number, baseSongBpm?: number) {
   synth.tick2Time = (4 * 60) / activeTempo / synth.song.timebase;
 }
 
+function computeMidiBaseDurationSec(synth: any): number {
+  const ev = synth?.song?.ev;
+  const timebase = (synth as any).__ariaBaseTimebase || synth?.song?.timebase || 1920;
+  const maxTick = Math.max(1, synth?.maxTick || 1);
+  const fallbackBpm = Math.max(30, (synth as any).__ariaBaseBpm || synth?.song?.tempo || 120);
+  if (!Array.isArray(ev) || ev.length === 0) {
+    return Math.max(1, maxTick * ((4 * 60) / fallbackBpm / timebase));
+  }
+  let tempo = fallbackBpm;
+  let prevTick = 0;
+  let total = 0;
+  for (let i = 0; i < ev.length; i++) {
+    const e = ev[i];
+    const tick = typeof e.t === 'number' ? e.t : prevTick;
+    if (tick > prevTick) {
+      total += (tick - prevTick) * ((4 * 60) / Math.max(20, tempo) / timebase);
+      prevTick = tick;
+    }
+    if (e.m && e.m[0] === 0xff51 && e.m[1] > 0) {
+      tempo = e.m[1];
+    }
+  }
+  if (maxTick > prevTick) {
+    total += (maxTick - prevTick) * ((4 * 60) / Math.max(20, tempo) / timebase);
+  }
+  return Math.max(1, total);
+}
+
 /**
  * Phase-locked Synchronized MIDI Player
  * TinySynth's master sequencer dynamically parses delta ticks, multi-tracks, and tempo changes (0xff51).
@@ -549,7 +583,8 @@ export function playMidiBuffer(
   arrayBuffer: ArrayBuffer,
   onEnded?: () => void,
   targetBpm?: number,
-  baseSongBpm?: number
+  baseSongBpm?: number,
+  initialSeekRatio = 0
 ) {
   try {
     stopMidiPlayback();
@@ -578,10 +613,38 @@ export function playMidiBuffer(
         (synth as any).__ariaBaseBpm = baseSongBpm || firstTempoEv?.m?.[1] || synth.song.tempo || 120;
       }
 
+      const status = synth.getPlayStatus?.();
+      midiMaxTickCache = Math.max(1, status?.maxTick || synth.maxTick || 1);
+      midiBaseDurationSecCache = computeMidiBaseDurationSec(synth);
+
+      if (initialSeekRatio > 0) {
+        const startTick = Math.round(Math.max(0, Math.min(0.995, initialSeekRatio)) * midiMaxTickCache);
+        suppressHookForward = true;
+        try {
+          synth.locateMIDI?.(startTick);
+        } finally {
+          suppressHookForward = false;
+        }
+      }
+
       synth.playMIDI();
       if (targetBpm) {
         setMidiTempoBpm(targetBpm, baseSongBpm);
       }
+
+      // Sync accumulated channel programs on seeked start
+      if (initialSeekRatio > 0 && Array.isArray(synth.pg)) {
+        for (let ch = 0; ch < 16; ch++) {
+          const prog = synth.pg[ch];
+          if (typeof prog === 'number') {
+            SpessaSynth.setChannelProgram(ch, prog);
+            if (WorkletSynthBridge.isReadySync() && !WorkletSynthBridge.getChannelState(ch).presetLocked) {
+              WorkletSynthBridge.programChange(ch, prog);
+            }
+          }
+        }
+      }
+
       isMidiPlayingInternal = true;
 
       // Watchdog interval detects when master sequencer reaches end of song
@@ -591,8 +654,8 @@ export function playMidiBuffer(
         midiEndTailTimer = null;
       }
       midiPlaybackWatchdogTimer = setInterval(() => {
-        const status = synth.getPlayStatus?.();
-        if (status && !status.play && isMidiPlayingInternal) {
+        const curStatus = synth.getPlayStatus?.();
+        if (curStatus && !curStatus.play && isMidiPlayingInternal) {
           isMidiPlayingInternal = false;
           clearInterval(midiPlaybackWatchdogTimer);
           midiPlaybackWatchdogTimer = null;
@@ -607,6 +670,44 @@ export function playMidiBuffer(
     }
   } catch (err) {
     console.log("MIDI playback error:", err);
+  }
+}
+
+export function seekMidiPlayback(ratio0to1: number, targetBpm?: number, baseSongBpm?: number) {
+  const synth = tinySynthInstance;
+  if (!synth || !synth.song) return;
+  const clamped = Math.max(0, Math.min(0.995, ratio0to1));
+  const st = synth.getPlayStatus?.();
+  const maxTick = Math.max(1, st?.maxTick || synth.maxTick || midiMaxTickCache || 1);
+  const targetTick = Math.round(clamped * maxTick);
+
+  SpessaSynth.allNotesOff();
+  WorkletSynthBridge.stopAll(false);
+  for (let ch = 0; ch < 16; ch++) {
+    try { synth.allSoundOff?.(ch); } catch {}
+  }
+
+  suppressHookForward = true;
+  try {
+    synth.locateMIDI?.(targetTick);
+  } finally {
+    suppressHookForward = false;
+  }
+
+  if (Array.isArray(synth.pg)) {
+    for (let ch = 0; ch < 16; ch++) {
+      const prog = synth.pg[ch];
+      if (typeof prog === 'number') {
+        SpessaSynth.setChannelProgram(ch, prog);
+        if (WorkletSynthBridge.isReadySync() && !WorkletSynthBridge.getChannelState(ch).presetLocked) {
+          WorkletSynthBridge.programChange(ch, prog);
+        }
+      }
+    }
+  }
+
+  if (targetBpm) {
+    setMidiTempoBpm(targetBpm, baseSongBpm);
   }
 }
 
@@ -640,6 +741,37 @@ export function getMidiPlayStatus(): { play: boolean; curTick: number; maxTick: 
     }
   }
   return { play: isMidiPlayingInternal, curTick: 0, maxTick: 1 };
+}
+
+export function getMidiPlaybackProgress(targetBpm?: number, baseSongBpm?: number): {
+  play: boolean;
+  curTick: number;
+  maxTick: number;
+  ratio: number;
+  elapsedSeconds: number;
+  totalSeconds: number;
+} {
+  const st = getMidiPlayStatus();
+  const maxTick = Math.max(1, st.maxTick || midiMaxTickCache || 1);
+  const curTick = Math.max(0, Math.min(maxTick, st.curTick || 0));
+  const ratio = Math.max(0, Math.min(1, curTick / maxTick));
+
+  const synth = tinySynthInstance;
+  const baseBpm = Math.max(30, (synth as any)?.__ariaBaseBpm || baseSongBpm || 120);
+  const curTargetBpm = Math.max(30, Math.min(320, targetBpm || baseBpm));
+  const rate = Math.max(0.25, Math.min(4.0, curTargetBpm / baseBpm));
+
+  const baseTotal = midiBaseDurationSecCache > 0 ? midiBaseDurationSecCache : 60;
+  const totalSeconds = Math.max(0.5, baseTotal / rate);
+  const elapsedSeconds = ratio * totalSeconds;
+  return {
+    play: st.play,
+    curTick,
+    maxTick,
+    ratio,
+    elapsedSeconds,
+    totalSeconds
+  };
 }
 
 export function isMidiPlaying(): boolean {
@@ -1273,6 +1405,7 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
 
     stopDirectAudio();
 
+    const safeOffset = Math.max(0, Math.min(Math.max(0, buffer.duration - 0.05), startOffset));
     const source = ctx.createBufferSource();
     source.buffer = buffer;
 
@@ -1295,10 +1428,18 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
       } catch (e) {}
     }
 
-    if (onEnded) {
-      source.onended = onEnded;
-    }
-    source.start(0, startOffset);
+    directAudioBufferRef = buffer;
+    directAudioStartCtxTime = ctx.currentTime;
+    directAudioOffsetSec = safeOffset;
+    directAudioPlaybackRate = source.playbackRate?.value || 1.0;
+
+    source.onended = () => {
+      if (directAudioSource === source) {
+        directAudioSource = null;
+        onEnded?.();
+      }
+    };
+    source.start(0, safeOffset);
     directAudioSource = source;
   } catch (e) {
     console.log("Direct audio playback failed:", e);
@@ -1308,12 +1449,38 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
 export function stopDirectAudio() {
   if (directAudioSource) {
     try {
+      directAudioSource.onended = null;
       directAudioSource.stop();
       directAudioSource.disconnect();
     } catch (e) {}
     directAudioSource = null;
   }
   Chiptune3.stopChiptune();
+}
+
+export function getDirectAudioProgress(): {
+  playing: boolean;
+  currentTime: number;
+  duration: number;
+  ratio: number;
+} {
+  if (!directAudioSource || !directAudioBufferRef || !audioCtx) {
+    return {
+      playing: false,
+      currentTime: 0,
+      duration: directAudioBufferRef?.duration || 0,
+      ratio: 0
+    };
+  }
+  const duration = Math.max(0.001, directAudioBufferRef.duration);
+  const elapsed = Math.max(0, audioCtx.currentTime - directAudioStartCtxTime) * directAudioPlaybackRate;
+  const cur = Math.max(0, Math.min(duration, directAudioOffsetSec + elapsed));
+  return {
+    playing: true,
+    currentTime: cur,
+    duration,
+    ratio: Math.max(0, Math.min(1, cur / duration))
+  };
 }
 
 /**
@@ -1325,8 +1492,16 @@ export function setAudioPlaybackRate(rate: number) {
       const boundedRate = Math.max(0.25, Math.min(4.0, rate));
       const ctx = getAudioContext();
       if (ctx) {
+        const elapsedAtOldRate = Math.max(0, ctx.currentTime - directAudioStartCtxTime) * directAudioPlaybackRate;
+        directAudioOffsetSec = Math.min(
+          directAudioBufferRef?.duration || 9999,
+          directAudioOffsetSec + elapsedAtOldRate
+        );
+        directAudioStartCtxTime = ctx.currentTime;
+        directAudioPlaybackRate = boundedRate;
         directAudioSource.playbackRate.setValueAtTime(boundedRate, ctx.currentTime);
       } else {
+        directAudioPlaybackRate = boundedRate;
         directAudioSource.playbackRate.value = boundedRate;
       }
     }

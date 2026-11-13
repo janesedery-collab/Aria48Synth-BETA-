@@ -119,7 +119,7 @@ export default function ExportStudioModal({
     });
 
     if (!started) {
-      alert("Could not start video recording. Please ensure audio context is active.");
+      setDownloadSuccess('Could not start video recorder — activate audio playback first.');
     }
   };
 
@@ -207,64 +207,28 @@ export default function ExportStudioModal({
           </button>
         </div>
 
-        {/* 2. AUTOMATIC VIDEO EXPORTER (OSCILLOSCOPE / TRACKER / BOTH) */}
-        <div className="bg-zinc-900/60 border border-amber-900/40 rounded-xl p-3.5 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-amber-400">
-              <Film size={15} />
-              <span>2. AUTOMATIC VIDEO EXPORT & PROCESSOR</span>
+        {/* 2. MINI INTERNAL VIDEO RECORDER (NON-OVERLAPPING DUAL SPLIT / LIVE MATRIX) */}
+        <div className="bg-zinc-900/60 border border-amber-900/40 rounded-xl p-2.5 flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-400">
+              <Film size={13} />
+              <span>2. MINI VIDEO RECORDER</span>
+              <span className="text-[8.5px] px-1.5 py-0.5 rounded bg-amber-950/60 border border-amber-800/40 text-amber-300 uppercase">
+                Live Tracker Sync
+              </span>
             </div>
             {videoStatus.isRecording ? (
               <span className="flex items-center gap-1.5 text-red-400 text-[10px] font-bold animate-pulse">
                 <span className="h-2 w-2 rounded-full bg-red-500"></span>
-                <span>REC [{formatSecs(videoStatus.durationSeconds)}{videoStatus.targetDurationSeconds > 0 ? ` / ${videoStatus.targetDurationSeconds}s` : ''}]</span>
+                <span>REC {formatSecs(videoStatus.durationSeconds)}{videoStatus.targetDurationSeconds > 0 ? `/${videoStatus.targetDurationSeconds}s` : ''}</span>
               </span>
             ) : videoStatus.isProcessing ? (
-              <span className="flex items-center gap-1.5 text-amber-300 text-[10px] font-bold animate-pulse">
-                <RefreshCw size={12} className="animate-spin text-amber-400" />
-                <span>PROCESSING VIDEO...</span>
+              <span className="flex items-center gap-1 text-amber-300 text-[10px] font-bold animate-pulse">
+                <RefreshCw size={11} className="animate-spin text-amber-400" />
+                <span>ENCODING...</span>
               </span>
             ) : (
-              <span className="text-[9px] text-zinc-500 uppercase">Auto Stop & Process</span>
-            )}
-          </div>
-
-          <p className="text-[10px] text-zinc-400 font-sans leading-relaxed">
-            Record high-definition video of the 16-channel vector CRT oscilloscope, the tracker pattern sequencer, or both views synchronized directly with Web Audio streams (SpessaSynth & Chiptune-3). It automatically records for the selected duration, encodes, and triggers download with zero manual stop-and-restart.
-          </p>
-
-          {/* VIEW MODE SELECTION */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            {[
-              { id: 'oscilloscope', title: 'Only Oscilloscope', desc: '16-Channel CRT Vector Wall', icon: '🎛️' },
-              { id: 'tracker', title: 'Only Tracker', desc: 'Matrix & Sample Inspector', icon: '🎹' },
-              { id: 'both', title: 'Both (Dual Screen)', desc: 'Split-Screen Tracker + Scopes', icon: '🔲' }
-            ].map(vm => (
-              <button
-                key={vm.id}
-                onClick={() => !videoStatus.isRecording && !videoStatus.isProcessing && setSelectedVideoMode(vm.id as VideoRecordMode)}
-                disabled={videoStatus.isRecording || videoStatus.isProcessing}
-                className={`p-2.5 rounded-lg border text-left transition cursor-pointer flex flex-col gap-1 ${
-                  selectedVideoMode === vm.id
-                    ? 'bg-amber-950/60 border-amber-500/60 text-white shadow-sm'
-                    : 'bg-zinc-950 border-zinc-850 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                } ${videoStatus.isRecording || videoStatus.isProcessing ? 'opacity-40 cursor-not-allowed' : ''}`}
-              >
-                <div className="text-base">{vm.icon}</div>
-                <div className="font-bold text-[10.5px] text-zinc-200">{vm.title}</div>
-                <div className="text-[8.5px] text-zinc-500 font-sans">{vm.desc}</div>
-              </button>
-            ))}
-          </div>
-
-          {/* DURATION PRESETS & AUTO-SETTINGS */}
-          <div className="bg-zinc-950 border border-zinc-850 rounded-lg p-2.5 flex flex-col gap-2">
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="text-zinc-400 font-bold flex items-center gap-1">
-                <Clock size={12} className="text-amber-400" />
-                Target Clip Duration:
-              </span>
-              <label className="flex items-center gap-1.5 text-zinc-400 cursor-pointer">
+              <label className="flex items-center gap-1 text-[9.5px] text-zinc-400 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={autoStartAudio}
@@ -272,78 +236,58 @@ export default function ExportStudioModal({
                   disabled={videoStatus.isRecording || videoStatus.isProcessing}
                   className="rounded border-zinc-700 text-amber-500 focus:ring-0 cursor-pointer"
                 />
-                <span>Auto-play audio when starting</span>
+                <span>Auto-play</span>
               </label>
-            </div>
+            )}
+          </div>
 
-            <div className="grid grid-cols-5 gap-1.5">
+          {/* COMPACT MINI VIEW MODE & LAYOUT ROW */}
+          <div className="grid grid-cols-3 gap-1.5">
+            {[
+              { id: 'oscilloscope', title: '16-CH Scopes', desc: 'CRT Matrix Only' },
+              { id: 'tracker', title: 'Live Tracker', desc: 'Real Pattern Notes' },
+              { id: 'both', title: 'Mini Split Both', desc: 'Tracker | Scopes' }
+            ].map(vm => (
+              <button
+                key={vm.id}
+                onClick={() => !videoStatus.isRecording && !videoStatus.isProcessing && setSelectedVideoMode(vm.id as VideoRecordMode)}
+                disabled={videoStatus.isRecording || videoStatus.isProcessing}
+                className={`px-2 py-1.5 rounded-lg border text-left transition cursor-pointer flex flex-col ${
+                  selectedVideoMode === vm.id
+                    ? 'bg-amber-950/60 border-amber-500/70 text-white'
+                    : 'bg-zinc-950 border-zinc-850 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
+                } ${videoStatus.isRecording || videoStatus.isProcessing ? 'opacity-40 cursor-not-allowed' : ''}`}
+              >
+                <div className="font-bold text-[10px] text-zinc-200 truncate">{vm.title}</div>
+                <div className="text-[8px] text-zinc-500 font-sans truncate">{vm.desc}</div>
+              </button>
+            ))}
+          </div>
+
+          {/* MINI DURATION PILLS + RECORD TRIGGER */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex items-center gap-1 flex-1 min-w-[210px]">
               {DURATION_PRESETS.map(dp => (
                 <button
                   key={dp.sec}
                   onClick={() => !videoStatus.isRecording && !videoStatus.isProcessing && setSelectedDuration(dp.sec)}
                   disabled={videoStatus.isRecording || videoStatus.isProcessing}
-                  className={`py-1.5 px-1 rounded text-center border transition cursor-pointer ${
+                  className={`flex-1 py-1 px-1 rounded text-center border transition cursor-pointer ${
                     selectedDuration === dp.sec
                       ? 'bg-amber-500/20 border-amber-500 text-amber-300 font-bold'
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200'
                   } ${videoStatus.isRecording || videoStatus.isProcessing ? 'opacity-40 cursor-not-allowed' : ''}`}
+                  title={dp.desc}
                 >
-                  <div className="text-[10px] leading-tight font-bold">{dp.label}</div>
-                  <div className="text-[8px] text-zinc-500 leading-tight truncate">{dp.desc}</div>
+                  <div className="text-[9.5px] font-bold">{dp.sec > 0 ? `${dp.sec}s` : 'Manual'}</div>
                 </button>
               ))}
             </div>
-          </div>
 
-          {/* LIVE RECORDING PROGRESS BAR */}
-          {videoStatus.isRecording && (
-            <div className="bg-zinc-950 border border-red-900/50 rounded-lg p-2.5 flex flex-col gap-1.5 animate-fadeIn">
-              <div className="flex items-center justify-between text-[10.5px]">
-                <span className="text-red-400 font-bold flex items-center gap-1.5">
-                  <span className="h-2 w-2 rounded-full bg-red-500 animate-ping"></span>
-                  RECORDING IN PROGRESS
-                </span>
-                <span className="text-zinc-300 font-mono">
-                  {formatSecs(videoStatus.durationSeconds)}
-                  {videoStatus.targetDurationSeconds > 0 && ` / ${videoStatus.targetDurationSeconds}.0s (${videoStatus.progressPercent}%)`}
-                </span>
-              </div>
-
-              {videoStatus.targetDurationSeconds > 0 && (
-                <div className="w-full bg-zinc-850 rounded-full h-2 overflow-hidden">
-                  <div 
-                    className="bg-amber-500 h-full rounded-full transition-all duration-200"
-                    style={{ width: `${videoStatus.progressPercent}%` }}
-                  />
-                </div>
-              )}
-
-              <div className="flex items-center justify-between text-[9px] text-zinc-500">
-                <span>
-                  {videoStatus.targetDurationSeconds > 0 
-                    ? `Auto-processing in ${(Math.max(0, videoStatus.targetDurationSeconds - videoStatus.durationSeconds)).toFixed(1)}s...`
-                    : 'Recording continuously. Click below when ready to process.'
-                  }
-                </span>
-                <span className="text-amber-400">Real-time Audio Stream Active</span>
-              </div>
-            </div>
-          )}
-
-          {/* PROCESSING STATE INDICATOR */}
-          {videoStatus.isProcessing && (
-            <div className="bg-amber-950/30 border border-amber-500/50 rounded-lg p-3 flex items-center justify-center gap-3 text-amber-300 text-xs animate-pulse">
-              <RefreshCw size={16} className="animate-spin text-amber-400" />
-              <span>Encoding WebM video stream & auto-downloading... Please wait a second.</span>
-            </div>
-          )}
-
-          {/* ACTION BUTTONS */}
-          <div className="flex gap-2">
             <button
               onClick={handleStartAutoVideoExport}
               disabled={videoStatus.isProcessing}
-              className={`flex-1 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer flex items-center justify-center gap-2 shadow-sm ${
+              className={`px-3 py-1.5 rounded-lg font-bold text-[10px] uppercase tracking-wider transition cursor-pointer flex items-center justify-center gap-1.5 shrink-0 ${
                 videoStatus.isProcessing
                   ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                   : videoStatus.isRecording
@@ -353,24 +297,31 @@ export default function ExportStudioModal({
             >
               {videoStatus.isRecording ? (
                 <>
-                  <Square size={13} fill="currentColor" />
-                  <span>Finish & Process Video Now ({formatSecs(videoStatus.durationSeconds)})</span>
+                  <Square size={11} fill="currentColor" />
+                  <span>Stop ({formatSecs(videoStatus.durationSeconds)})</span>
                 </>
               ) : videoStatus.isProcessing ? (
                 <>
-                  <RefreshCw size={13} className="animate-spin" />
-                  <span>Processing Video...</span>
+                  <RefreshCw size={11} className="animate-spin" />
+                  <span>Encoding...</span>
                 </>
               ) : (
                 <>
-                  <Video size={13} />
-                  <span>
-                    Start Auto Video Export ({selectedDuration > 0 ? `${selectedDuration}s Auto-Stop` : 'Manual'})
-                  </span>
+                  <Video size={11} />
+                  <span>Record ({selectedDuration > 0 ? `${selectedDuration}s` : 'Manual'})</span>
                 </>
               )}
             </button>
           </div>
+
+          {videoStatus.isRecording && videoStatus.targetDurationSeconds > 0 && (
+            <div className="w-full bg-zinc-950 rounded-full h-1.5 overflow-hidden border border-zinc-800">
+              <div
+                className="bg-amber-500 h-full rounded-full transition-all duration-200"
+                style={{ width: `${videoStatus.progressPercent}%` }}
+              />
+            </div>
+          )}
         </div>
 
         {/* 3. SOUNDFONT EXPORT (.SF2 / .SF3 / .DLS) */}

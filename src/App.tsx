@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Play, Square, Settings, Cpu, AlertTriangle, 
   Download, Upload, Music, Radio, Monitor, Cable, Activity,
@@ -19,9 +19,12 @@ import {
   playNote, 
   stopChannelSound,
   playDirectAudio, 
-  stopDirectAudio, 
+  stopDirectAudio,
+  getDirectAudioProgress,
   playMidiBuffer, 
   stopMidiPlayback,
+  seekMidiPlayback,
+  getMidiPlaybackProgress,
   stopAllChannelsSound,
   getAudioContext,
   setAudioPlaybackRate,
@@ -30,6 +33,17 @@ import {
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
+import { VideoRecorder } from './utils/videoRecorder';
+
+function parseDurationStringSec(dur?: string | null): number | null {
+  if (!dur) return null;
+  const parts = dur.trim().split(':');
+  if (parts.length !== 2) return null;
+  const mins = parseInt(parts[0], 10);
+  const secs = parseFloat(parts[1]);
+  if (isNaN(mins) || isNaN(secs)) return null;
+  return Math.max(1, mins * 60 + secs);
+}
 
 // --- MAIN APPLICATION ---
 export default function App() {
@@ -217,25 +231,52 @@ export default function App() {
   const [driveMode, setDriveMode] = useState(false);
   const [showDriveWarning, setShowDriveWarning] = useState(true);
 
-  // Synchronous Tracker Sequence & Audio Playback Loop
-  // Replaces the chaotic synthetic oscillator beeps with authentic playback:
-  // - WebAudioTinySynth for General MIDI
-  // - Amiga ProTracker PCM AudioBuffer for MOD chiptunes
-  // - Direct decoded AudioBuffer for WAV / MP3
-  // Audio Playback Lifecycle (only triggers on play/pause or buffer swap)
+  const pendingSeekRatioRef = useRef<number>(0);
+  const [midiLiveTotalSec, setMidiLiveTotalSec] = useState<number | null>(null);
+  const [liveElapsedSec, setLiveElapsedSec] = useState<number | null>(null);
+
+  // Sync real tracker state into internal VideoRecorder (zero fake notes)
+  useEffect(() => {
+    VideoRecorder.setLiveTrackerState({
+      songPatterns,
+      currentPatternIndex,
+      activeRow,
+      channels,
+      bpm,
+      trackTitle,
+      isPlaying
+    });
+  }, [songPatterns, currentPatternIndex, activeRow, channels, bpm, trackTitle, isPlaying]);
+
+  // Synchronous Audio Playback Lifecycle (only triggers on play/pause or buffer swap)
   useEffect(() => {
     if (isPlaying) {
       if (loadedMidiBuffer) {
         playMidiBuffer(
           loadedMidiBuffer,
           () => {
+            pendingSeekRatioRef.current = 0;
+            setLiveElapsedSec(0);
+            setCurrentPatternIndex(0);
+            setActiveRow(0);
             setIsPlaying(false);
           },
           bpm,
-          baseSongBpm
+          baseSongBpm,
+          pendingSeekRatioRef.current
         );
+        const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
+        setMidiLiveTotalSec(prog.totalSeconds);
       } else if (loadedAudioBuffer) {
-        playDirectAudio(loadedAudioBuffer, 0, () => {
+        const startOffset = Math.max(
+          0,
+          Math.min(loadedAudioBuffer.duration - 0.05, pendingSeekRatioRef.current * loadedAudioBuffer.duration)
+        );
+        playDirectAudio(loadedAudioBuffer, startOffset, () => {
+          pendingSeekRatioRef.current = 0;
+          setLiveElapsedSec(0);
+          setCurrentPatternIndex(0);
+          setActiveRow(0);
           setIsPlaying(false);
         });
         const rate = bpm / (baseSongBpm || 125);
@@ -245,7 +286,6 @@ export default function App() {
       stopDirectAudio();
       stopMidiPlayback();
       stopAllChannelsSound();
-      setActiveRow(0);
     }
   }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
 
@@ -255,19 +295,68 @@ export default function App() {
       const rate = bpm / (baseSongBpm || 125);
       setAudioPlaybackRate(rate);
     }
-    setMidiTempoBpm(bpm, baseSongBpm);
+    if (loadedMidiBuffer) {
+      setMidiTempoBpm(bpm, baseSongBpm);
+      const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
+      setMidiLiveTotalSec(prog.totalSeconds);
+    }
   }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
 
-  // Synchronous Visual Tracker Row Advance synchronized to BPM
+  // Clock-Locked Tracker Row & Pattern Synchronization (MIDI / AudioBuffer / Pattern Sequencer)
   useEffect(() => {
     if (!isPlaying) return;
 
+    if (loadedMidiBuffer || loadedAudioBuffer) {
+      const syncTimer = setInterval(() => {
+        const pats = songPatterns;
+        const totalRows = Math.max(1, pats.length * 64);
+
+        let ratio = 0;
+        let elapsed = 0;
+        if (loadedMidiBuffer) {
+          const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
+          ratio = prog.ratio;
+          elapsed = prog.elapsedSeconds;
+          setMidiLiveTotalSec(prog.totalSeconds);
+        } else if (loadedAudioBuffer) {
+          const prog = getDirectAudioProgress();
+          ratio = prog.ratio;
+          const rate = Math.max(0.25, Math.min(4.0, bpm / (baseSongBpm || 125)));
+          elapsed = prog.currentTime / rate;
+        }
+
+        pendingSeekRatioRef.current = ratio;
+        setLiveElapsedSec(elapsed);
+
+        const globalRow = Math.max(0, Math.min(totalRows - 1, Math.floor(ratio * totalRows)));
+        const patIdx = Math.floor(globalRow / 64);
+        const rowIdx = globalRow % 64;
+
+        setCurrentPatternIndex((prevPat) => {
+          if (prevPat !== patIdx && pats[patIdx]) {
+            setPatterns(pats[patIdx]);
+          }
+          return patIdx;
+        });
+        setActiveRow(rowIdx);
+      }, 50);
+
+      return () => clearInterval(syncTimer);
+    }
+
+    // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI)
     const msPerRow = Math.max(15, (60 / Math.max(30, bpm) / 4) * 1000);
     const timer = setInterval(() => {
       setActiveRow((prevRow) => {
         if (prevRow >= 63) {
           if (playMode === 'song') {
-            setCurrentPatternIndex((prevIdx) => (prevIdx + 1) % Math.max(1, songPatterns.length));
+            setCurrentPatternIndex((prevIdx) => {
+              const nextIdx = (prevIdx + 1) % Math.max(1, songPatterns.length);
+              if (songPatterns[nextIdx]) {
+                setPatterns(songPatterns[nextIdx]);
+              }
+              return nextIdx;
+            });
           }
           return 0;
         }
@@ -278,7 +367,7 @@ export default function App() {
     return () => {
       clearInterval(timer);
     };
-  }, [isPlaying, bpm, playMode, songPatterns.length]);
+  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer]);
 
   // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer is used
   useEffect(() => {
@@ -352,6 +441,10 @@ export default function App() {
     rawMidiBuffer?: ArrayBuffer
   ) => {
     const finalAllPatterns = (allPatterns && allPatterns.length > 0) ? allPatterns : [importedPatterns];
+    pendingSeekRatioRef.current = 0;
+    setMidiLiveTotalSec(null);
+    setLiveElapsedSec(0);
+    setActiveRow(0);
     setSongPatterns(finalAllPatterns);
     setPatterns(importedPatterns || finalAllPatterns[0]);
     setCurrentPatternIndex(0);
@@ -469,9 +562,42 @@ export default function App() {
         trackDuration={trackDuration}
         trackTitle={trackTitle}
         loadedAudioBuffer={loadedAudioBuffer}
-        onSeekAudio={(targetSeconds) => {
-          if (loadedAudioBuffer && isPlaying) {
-            playDirectAudio(loadedAudioBuffer, targetSeconds, () => setIsPlaying(false));
+        actualTotalSeconds={(() => {
+          const rate = Math.max(0.25, Math.min(4.0, bpm / (baseSongBpm || 125)));
+          if (loadedAudioBuffer) {
+            return loadedAudioBuffer.duration / rate;
+          }
+          if (loadedMidiBuffer) {
+            if (midiLiveTotalSec && midiLiveTotalSec > 0) return midiLiveTotalSec;
+            const parsedDur = parseDurationStringSec(trackDuration);
+            if (parsedDur) return parsedDur / rate;
+          }
+          return null;
+        })()}
+        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer ? liveElapsedSec : null}
+        onSeekPosition={(targetSeconds, ratio) => {
+          pendingSeekRatioRef.current = ratio;
+          setLiveElapsedSec(targetSeconds);
+          if (loadedMidiBuffer) {
+            if (isPlaying) {
+              seekMidiPlayback(ratio, bpm, baseSongBpm);
+            }
+          } else if (loadedAudioBuffer) {
+            if (isPlaying) {
+              const audioOffset = Math.max(
+                0,
+                Math.min(loadedAudioBuffer.duration - 0.05, ratio * loadedAudioBuffer.duration)
+              );
+              playDirectAudio(loadedAudioBuffer, audioOffset, () => {
+                pendingSeekRatioRef.current = 0;
+                setLiveElapsedSec(0);
+                setCurrentPatternIndex(0);
+                setActiveRow(0);
+                setIsPlaying(false);
+              });
+              const rate = bpm / (baseSongBpm || 125);
+              setAudioPlaybackRate(rate);
+            }
           }
         }}
       />

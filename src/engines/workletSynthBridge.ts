@@ -274,6 +274,18 @@ class WorkletSynthController {
     }
   }
 
+  public connectRecordingDestination(dest: AudioNode) {
+    try {
+      this.limiter?.connect(dest);
+    } catch {}
+  }
+
+  public disconnectRecordingDestination(dest: AudioNode) {
+    try {
+      this.limiter?.disconnect(dest);
+    } catch {}
+  }
+
   public async init(externalCtx?: AudioContext): Promise<WorkletSynthesizer | null> {
     if (typeof window === 'undefined') return null;
 

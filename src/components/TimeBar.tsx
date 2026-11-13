@@ -17,7 +17,10 @@ interface TimeBarProps {
   trackDuration?: string | null;
   trackTitle?: string | null;
   loadedAudioBuffer?: AudioBuffer | null;
+  actualTotalSeconds?: number | null;
+  actualElapsedSeconds?: number | null;
   onSeekAudio?: (seconds: number) => void;
+  onSeekPosition?: (seconds: number, ratio: number) => void;
 }
 
 export default function TimeBar({
@@ -33,7 +36,10 @@ export default function TimeBar({
   trackDuration,
   trackTitle,
   loadedAudioBuffer,
-  onSeekAudio
+  actualTotalSeconds,
+  actualElapsedSeconds,
+  onSeekAudio,
+  onSeekPosition
 }: TimeBarProps) {
   const scrubberRef = useRef<HTMLDivElement | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -42,18 +48,27 @@ export default function TimeBar({
   const totalPatterns = Math.max(1, songPatterns.length);
   const rowsPerPattern = 64;
   const totalRows = totalPatterns * rowsPerPattern;
-  const currentRowGlobal = currentPatternIndex * rowsPerPattern + Math.min(63, activeRow);
+  const currentRowGlobal = Math.max(0, Math.min(totalRows - 1, currentPatternIndex * rowsPerPattern + Math.min(63, activeRow)));
   const progressRatio = totalRows > 1 ? currentRowGlobal / (totalRows - 1) : 0;
 
-  // Calculate timestamps in seconds
+  // Calculate timestamps in seconds (favoring actual audio/MIDI duration scaled by live BPM)
   const secondsPerRow = 60 / Math.max(30, bpm) / 4;
-  const totalSeconds = loadedAudioBuffer ? loadedAudioBuffer.duration : totalRows * secondsPerRow;
-  const elapsedSeconds = currentRowGlobal * secondsPerRow;
+  const totalSeconds =
+    actualTotalSeconds && actualTotalSeconds > 0
+      ? actualTotalSeconds
+      : loadedAudioBuffer
+        ? loadedAudioBuffer.duration
+        : totalRows * secondsPerRow;
+  const elapsedSeconds =
+    actualElapsedSeconds !== undefined && actualElapsedSeconds !== null
+      ? Math.max(0, Math.min(totalSeconds, actualElapsedSeconds))
+      : progressRatio * totalSeconds;
 
   const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    const ms = Math.floor((secs % 1) * 10);
+    const safe = Math.max(0, Number.isFinite(secs) ? secs : 0);
+    const m = Math.floor(safe / 60);
+    const s = Math.floor(safe % 60);
+    const ms = Math.floor((safe % 1) * 10);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
   };
 
@@ -61,6 +76,7 @@ export default function TimeBar({
     const clampedGlobal = Math.max(0, Math.min(totalRows - 1, Math.round(globalRow)));
     const targetPattern = Math.floor(clampedGlobal / rowsPerPattern);
     const targetRow = clampedGlobal % rowsPerPattern;
+    const ratio = totalRows > 1 ? clampedGlobal / (totalRows - 1) : 0;
 
     setCurrentPatternIndex(targetPattern);
     setActiveRow(targetRow);
@@ -69,9 +85,10 @@ export default function TimeBar({
       setPatterns(songPatterns[targetPattern]);
     }
 
-    const targetSeconds = clampedGlobal * secondsPerRow;
+    const targetSeconds = ratio * totalSeconds;
+    onSeekPosition?.(targetSeconds, ratio);
     onSeekAudio?.(targetSeconds);
-  }, [totalRows, rowsPerPattern, setCurrentPatternIndex, setActiveRow, setPatterns, songPatterns, secondsPerRow, onSeekAudio]);
+  }, [totalRows, rowsPerPattern, setCurrentPatternIndex, setActiveRow, setPatterns, songPatterns, totalSeconds, onSeekAudio, onSeekPosition]);
 
   const handleScrubberMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     setIsScrubbing(true);
@@ -115,7 +132,7 @@ export default function TimeBar({
     const targetGlobalRow = Math.round(ratio * (totalRows - 1));
     const pat = Math.floor(targetGlobalRow / rowsPerPattern);
     const row = targetGlobalRow % rowsPerPattern;
-    const secs = targetGlobalRow * secondsPerRow;
+    const secs = ratio * totalSeconds;
 
     setHoverInfo({
       x: e.clientX - rect.left,
@@ -232,7 +249,7 @@ export default function TimeBar({
             <Clock size={12} className="text-indigo-400" />
             <span className="text-zinc-200">{formatTime(elapsedSeconds)}</span>
             <span className="text-zinc-600">/</span>
-            <span className="text-zinc-400">{trackDuration || formatTime(totalSeconds)}</span>
+            <span className="text-zinc-400">{actualTotalSeconds ? formatTime(totalSeconds) : (trackDuration || formatTime(totalSeconds))}</span>
           </div>
 
           <div className="w-[1px] h-3 bg-zinc-800" />

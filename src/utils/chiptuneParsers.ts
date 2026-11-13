@@ -371,7 +371,7 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
   // Calculate chronological 16th note steps and patterns count
   const ticksPer16th = Math.max(1, ticksPerQuarterNote / 4);
   const totalSteps = Math.ceil(maxAbsoluteTick / ticksPer16th);
-  const totalPatterns = Math.max(1, Math.min(32, Math.ceil(totalSteps / 64)));
+  const totalPatterns = Math.max(1, Math.min(256, Math.ceil(totalSteps / 64)));
 
   logs.push(`[MIDI] Total Steps: ${totalSteps} -> Generating ${totalPatterns} consecutive 64-row patterns`);
 
