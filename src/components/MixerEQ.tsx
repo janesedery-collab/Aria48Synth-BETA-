@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Channel, OscilloscopeConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID, MidiChannelState } from '../engines/spressasynthLib';
+import { WorkletSynthBridge, WorkletChannelMixerState } from '../engines/workletSynthBridge';
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS, WebScopePreset } from '../engines/webscopeOscilloscope';
 import MidiControllerModal from './MidiControllerModal';
@@ -173,10 +174,10 @@ function WebScopeCRT({
             CH {role.id.toString().padStart(2, '0')}
           </span>
           <span
-            className={`font-bold truncate max-w-[80px] ${isMuted ? 'text-zinc-500 line-through' : 'text-zinc-300'}`}
+            className={`font-bold truncate max-w-[112px] ${isMuted ? 'text-zinc-500 line-through' : 'text-zinc-200'}`}
             title={midiProgramName || role.full}
           >
-            {role.name}
+            {midiProgramName || role.name}
           </span>
         </div>
 
@@ -273,6 +274,9 @@ export default function MixerEQ({
   const [midiChannelStates, setMidiChannelStates] = useState<MidiChannelState[]>(() => [
     ...SpessaSynth.getChannelStates()
   ]);
+  const [workletChannelStates, setWorkletChannelStates] = useState<WorkletChannelMixerState[]>(() =>
+    WorkletSynthBridge.getChannelStates(16)
+  );
 
   const sfUploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -288,10 +292,14 @@ export default function MixerEQ({
     const unsubCh = SpessaSynth.onChannelStateChange((states) => {
       setMidiChannelStates(states);
     });
+    const unsubWorklet = WorkletSynthBridge.subscribe(() => {
+      setWorkletChannelStates(WorkletSynthBridge.getChannelStates(16));
+    });
     return () => {
       unsubSf();
       unsubDefault();
       unsubCh();
+      unsubWorklet();
     };
   }, []);
 
@@ -810,8 +818,16 @@ export default function MixerEQ({
         } gap-2 max-h-[640px] overflow-y-auto custom-scrollbar p-1`}>
           {SIXTEEN_CHANNEL_ROLES.map((role, idx) => {
             const midiState = midiChannelStates[idx];
+            const workletState = workletChannelStates[idx];
             const trackerCh = channels.find(c => c.id === role.id);
-            const isMuted = Boolean(midiState?.isMuted || trackerCh?.mute);
+            const isMuted = Boolean(workletState?.isMuted || midiState?.isMuted || trackerCh?.mute);
+            const syncedName =
+              workletState?.patchName ||
+              midiState?.programName ||
+              (trackerCh?.soundFontPreset
+                ? trackerCh.soundFontPreset.replace(/^gm_/, '').replace(/_/g, ' ').toUpperCase()
+                : undefined) ||
+              role.name;
             return (
               <WebScopeCRT
                 key={role.id}
@@ -821,7 +837,7 @@ export default function MixerEQ({
                 oscConfig={oscConfig}
                 pitch={channelPitches[role.id]}
                 isMuted={isMuted}
-                midiProgramName={midiState?.programName}
+                midiProgramName={syncedName}
                 onToggleMute={handleToggleOscilloscopeChannelMute}
               />
             );

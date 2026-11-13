@@ -5,6 +5,7 @@ import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib'
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { onInterpolationModeChange } from '../engines/soundFontInterpolation';
 import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
+import { BasicMIDI } from 'spessasynth_core';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
 import {
@@ -573,6 +574,46 @@ function computeMidiBaseDurationSec(synth: any): number {
   return Math.max(1, total);
 }
 
+export function syncInitialMidiInstruments(arrayBuffer: ArrayBuffer) {
+  try {
+    const midi = BasicMIDI.fromArrayBuffer(arrayBuffer.slice(0));
+    const bankMSB = new Int16Array(16).fill(0);
+    const bankLSB = new Int16Array(16).fill(0);
+    const firstProg = new Int16Array(16).fill(-1);
+    const tracks = midi?.tracks || [];
+    for (const trk of tracks) {
+      const events = trk?.events || [];
+      for (const ev of events) {
+        const status = ev?.statusByte || 0;
+        const cmd = status & 0xf0;
+        const ch = status & 0x0f;
+        const data = ev?.data;
+        if (!data || ch < 0 || ch > 15) continue;
+        if (cmd === 0xb0) {
+          const cc = data[0];
+          const val = data[1];
+          if (cc === 0 && firstProg[ch] === -1) bankMSB[ch] = val;
+          else if (cc === 32 && firstProg[ch] === -1) bankLSB[ch] = val;
+        } else if (cmd === 0xc0 && firstProg[ch] === -1) {
+          firstProg[ch] = data[0] & 0x7f;
+        }
+      }
+    }
+    for (let ch = 0; ch < 16; ch++) {
+      const prog = firstProg[ch] >= 0 ? firstProg[ch] : 0;
+      const msb = ch === 9 ? 128 : Math.max(0, bankMSB[ch]);
+      const lsb = Math.max(0, bankLSB[ch]);
+      SpessaSynth.setChannelBank(ch, msb);
+      SpessaSynth.setChannelProgram(ch, prog);
+      if (!WorkletSynthBridge.getChannelState(ch).presetLocked) {
+        WorkletSynthBridge.selectPreset(ch, msb, lsb, prog, ch === 9);
+      }
+    }
+  } catch (err) {
+    console.warn('MIDI initial instrument sync note:', err);
+  }
+}
+
 /**
  * Phase-locked Synchronized MIDI Player
  * TinySynth's master sequencer dynamically parses delta ticks, multi-tracks, and tempo changes (0xff51).
@@ -602,6 +643,7 @@ export function playMidiBuffer(
       SpessaSynth.sendGMReset(true);
       WorkletSynthBridge.stopAll(true);
       void WorkletSynthBridge.init(ctx);
+      syncInitialMidiInstruments(arrayBuffer);
 
       // Load SMF binary and snapshot original MIDI timebase/tempo for live BPM scaling
       synth.loadMIDI(arrayBuffer);
@@ -638,7 +680,7 @@ export function playMidiBuffer(
           const prog = synth.pg[ch];
           if (typeof prog === 'number') {
             SpessaSynth.setChannelProgram(ch, prog);
-            if (WorkletSynthBridge.isReadySync() && !WorkletSynthBridge.getChannelState(ch).presetLocked) {
+            if (!WorkletSynthBridge.getChannelState(ch).presetLocked) {
               WorkletSynthBridge.programChange(ch, prog);
             }
           }

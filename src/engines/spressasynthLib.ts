@@ -1275,8 +1275,10 @@ class SpessaSynthEngine {
 
   public setChannelBank(channel: number, bank: number) {
     const ch = Math.max(0, Math.min(15, channel));
-    if (this.channelStates[ch]) {
-      this.channelStates[ch].bank = Math.max(0, Math.min(128, bank));
+    const nextBank = Math.max(0, Math.min(128, bank));
+    if (this.channelStates[ch] && this.channelStates[ch].bank !== nextBank) {
+      this.channelStates[ch].bank = nextBank;
+      this.notifyChannelStateListeners();
     }
   }
 
@@ -1284,10 +1286,14 @@ class SpessaSynthEngine {
     const ch = Math.max(0, Math.min(15, channel));
     const prog = Math.max(0, Math.min(127, program));
     if (this.channelStates[ch]) {
-      this.channelStates[ch].program = prog;
-      this.channelStates[ch].programName = ch === 9 
-        ? "GM Standard Drum Kit" 
+      const nextName = ch === 9
+        ? "GM Standard Drum Kit"
         : (DEFAULT_GM_PROGRAMS[prog] || `Program ${prog}`);
+      if (this.channelStates[ch].program !== prog || this.channelStates[ch].programName !== nextName) {
+        this.channelStates[ch].program = prog;
+        this.channelStates[ch].programName = nextName;
+        this.notifyChannelStateListeners();
+      }
     }
   }
 

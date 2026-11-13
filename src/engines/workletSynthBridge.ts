@@ -167,6 +167,7 @@ class WorkletSynthController {
   private requestedChannelCount = 16;
   private defaultBankLoaded = false;
   private customBanksLoaded = new Set<string>();
+  private soundBankBuffers = new Map<string, ArrayBuffer>();
   private activeBankId: string = 'aria-default-bank';
 
   private masterGain: GainNode | null = null;
@@ -578,8 +579,10 @@ class WorkletSynthController {
     const synth = await this.init();
     if (!synth) return false;
     try {
-      await synth.soundBankManager.addSoundBank(arrayBuffer.slice(0), id, 0);
+      const bankCopy = arrayBuffer.slice(0);
+      await synth.soundBankManager.addSoundBank(bankCopy.slice(0), id, 0);
       this.customBanksLoaded.add(id);
+      this.soundBankBuffers.set(id, bankCopy);
       if (makePrimary) {
         this.activeBankId = id;
         const rest = synth.soundBankManager.priorityOrder.filter(b => b !== id && b !== 'aria-default-bank');
@@ -623,6 +626,7 @@ class WorkletSynthController {
     try {
       await this.synth.soundBankManager.deleteSoundBank(id);
       this.customBanksLoaded.delete(id);
+      this.soundBankBuffers.delete(id);
       if (this.activeBankId === id) {
         this.activeBankId = this.synth.soundBankManager.priorityOrder[0] || 'aria-default-bank';
       }
@@ -631,6 +635,19 @@ class WorkletSynthController {
       }
       this.notifyListeners();
     } catch (e) {}
+  }
+
+  public getActiveSoundBankBuffer(): ArrayBuffer {
+    const active = this.soundBankBuffers.get(this.activeBankId);
+    if (active && active.byteLength > 0) {
+      return active.slice(0);
+    }
+    for (const buf of this.soundBankBuffers.values()) {
+      if (buf && buf.byteLength > 0) {
+        return buf.slice(0);
+      }
+    }
+    return BasicSoundBank.getSampleSoundBankFile().slice(0);
   }
 
   public setInterpolationMode(mode: SoundFontInterpolationMode) {
@@ -663,35 +680,37 @@ class WorkletSynthController {
   public selectPreset(channel: number, bankMSB: number, bankLSB: number, program: number, isDrum?: boolean) {
     const ch = this.resolveTargetChannel(channel);
     const st = this.channelStates[ch];
-    if (!this.synth || !st) return;
+    if (!st) return;
 
-    const wasPresetLocked = st.presetLocked;
-    const wasBankMSBLocked = Boolean(st.lockedCCs[WORKLET_CC.BANK_MSB]);
-    const wasBankLSBLocked = Boolean(st.lockedCCs[WORKLET_CC.BANK_LSB]);
+    if (this.synth) {
+      const wasPresetLocked = st.presetLocked;
+      const wasBankMSBLocked = Boolean(st.lockedCCs[WORKLET_CC.BANK_MSB]);
+      const wasBankLSBLocked = Boolean(st.lockedCCs[WORKLET_CC.BANK_LSB]);
 
-    // Ensure explicit user preset selection applies immediately even if preset lock is enabled
-    if (wasPresetLocked) this.synth.midiChannels[ch]?.setSystemParameter('presetLock', false);
-    if (wasBankMSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_MSB as MIDIController, false);
-    if (wasBankLSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_LSB as MIDIController, false);
+      // Ensure explicit user preset selection applies immediately even if preset lock is enabled
+      if (wasPresetLocked) this.synth.midiChannels[ch]?.setSystemParameter('presetLock', false);
+      if (wasBankMSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_MSB as MIDIController, false);
+      if (wasBankLSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_LSB as MIDIController, false);
 
-    if (isDrum !== undefined && isDrum !== st.isDrum) {
-      this.synth.midiChannels[ch]?.setDrums(isDrum);
-      st.isDrum = isDrum;
+      if (isDrum !== undefined && isDrum !== st.isDrum) {
+        this.synth.midiChannels[ch]?.setDrums(isDrum);
+      }
+
+      this.synth.controllerChange(ch, WORKLET_CC.BANK_MSB as MIDIController, bankMSB);
+      this.synth.controllerChange(ch, WORKLET_CC.BANK_LSB as MIDIController, bankLSB);
+      this.synth.programChange(ch, program);
+
+      if (wasPresetLocked) this.synth.midiChannels[ch]?.setSystemParameter('presetLock', true);
+      if (wasBankMSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_MSB as MIDIController, true);
+      if (wasBankLSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_LSB as MIDIController, true);
     }
 
-    this.synth.controllerChange(ch, WORKLET_CC.BANK_MSB as MIDIController, bankMSB);
-    this.synth.controllerChange(ch, WORKLET_CC.BANK_LSB as MIDIController, bankLSB);
-    this.synth.programChange(ch, program);
-
-    if (wasPresetLocked) this.synth.midiChannels[ch]?.setSystemParameter('presetLock', true);
-    if (wasBankMSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_MSB as MIDIController, true);
-    if (wasBankLSBLocked) this.synth.midiChannels[ch]?.lockController(WORKLET_CC.BANK_LSB as MIDIController, true);
-
+    if (isDrum !== undefined) st.isDrum = isDrum;
     st.bankMSB = bankMSB;
     st.bankLSB = bankLSB;
     st.program = program;
-    const match = this.findMatchingPreset(bankMSB, bankLSB, program, isDrum ?? st.isDrum);
-    st.patchName = match?.name || DEFAULT_GM_PROGRAMS[program] || `Program ${program}`;
+    const match = this.findMatchingPreset(bankMSB, bankLSB, program, st.isDrum);
+    st.patchName = match?.name || (st.isDrum ? 'GM Standard Drum Kit' : (DEFAULT_GM_PROGRAMS[program] || `Program ${program}`));
     this.notifyListeners();
     this.emitLog(
       `CH ${ch + 1}: Patch -> Bank ${bankMSB}:${bankLSB} Prog ${program} (${st.patchName})`
@@ -700,8 +719,16 @@ class WorkletSynthController {
 
   public programChange(channel: number, program: number) {
     const ch = this.resolveTargetChannel(channel);
+    const prog = Math.max(0, Math.min(127, Math.floor(program)));
+    const st = this.channelStates[ch];
+    if (st && !st.presetLocked) {
+      st.program = prog;
+      const match = this.findMatchingPreset(st.bankMSB, st.bankLSB, prog, st.isDrum);
+      st.patchName = match?.name || (st.isDrum ? 'Standard Drum Kit' : (DEFAULT_GM_PROGRAMS[prog] || `Program ${prog}`));
+      this.notifyListeners();
+    }
     if (!this.synth) return;
-    this.synth.programChange(ch, Math.max(0, Math.min(127, Math.floor(program))));
+    this.synth.programChange(ch, prog);
   }
 
   public controllerChange(channel: number, ccNumber: number, value: number, fromUserUI = true) {

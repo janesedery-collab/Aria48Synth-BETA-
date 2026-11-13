@@ -29,6 +29,7 @@ import {
   getAudioContext,
   setAudioPlaybackRate,
   setMidiTempoBpm,
+  syncInitialMidiInstruments,
   restoreSavedSoundFontsFromCookies
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
@@ -235,7 +236,7 @@ export default function App() {
   const [midiLiveTotalSec, setMidiLiveTotalSec] = useState<number | null>(null);
   const [liveElapsedSec, setLiveElapsedSec] = useState<number | null>(null);
 
-  // Sync real tracker state into internal VideoRecorder (zero fake notes)
+  // Sync real tracker state + offline snapshot buffers into internal VideoRecorder
   useEffect(() => {
     VideoRecorder.setLiveTrackerState({
       songPatterns,
@@ -243,10 +244,13 @@ export default function App() {
       activeRow,
       channels,
       bpm,
+      baseSongBpm,
       trackTitle,
-      isPlaying
+      isPlaying,
+      loadedAudioBuffer,
+      loadedMidiBuffer
     });
-  }, [songPatterns, currentPatternIndex, activeRow, channels, bpm, trackTitle, isPlaying]);
+  }, [songPatterns, currentPatternIndex, activeRow, channels, bpm, baseSongBpm, trackTitle, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
 
   // Synchronous Audio Playback Lifecycle (only triggers on play/pause or buffer swap)
   useEffect(() => {
@@ -450,6 +454,9 @@ export default function App() {
     setCurrentPatternIndex(0);
     setLoadedAudioBuffer(audioBuffer || null);
     setLoadedMidiBuffer(rawMidiBuffer || null);
+    if (rawMidiBuffer) {
+      syncInitialMidiInstruments(rawMidiBuffer);
+    }
 
     if (importedBpm) {
       setBpm(importedBpm);
