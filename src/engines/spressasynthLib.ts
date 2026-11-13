@@ -475,9 +475,9 @@ class SpessaSynthEngine {
         source.loopEnd = interpResult.loopEnd;
       }
 
-      const sampleVol = Math.max(0.0005, (velocity / 127) * (resolvedSample.attenuationGain ?? 1.0) * 0.42);
+      const sampleVol = Math.max(0.0005, (velocity / 127) * (resolvedSample.attenuationGain ?? 1.0) * 0.30);
       noteGain.gain.setValueAtTime(0.0001, now);
-      noteGain.gain.linearRampToValueAtTime(sampleVol, now + 0.008);
+      noteGain.gain.linearRampToValueAtTime(sampleVol, now + 0.006);
 
       source.connect(noteGain);
       noteGain.connect(chGain);

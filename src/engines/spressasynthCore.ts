@@ -1494,6 +1494,7 @@ class SpessaSynthCoreEngine {
     if (matchedZone) {
       const sh = sf.sampleHeaders[matchedZone.sampleIndex];
       if (sh?.audioBuffer) {
+        const bufSr = sh.audioBuffer.sampleRate || sh.sampleRate || 44100;
         const hasLoop =
           matchedZone.loopMode > 0 &&
           sh.endLoop > sh.startLoop &&
@@ -1502,10 +1503,10 @@ class SpessaSynthCoreEngine {
           buffer: sh.audioBuffer,
           rootKey: matchedZone.rootKey || sh.originalPitch || 60,
           pitchCorrection: sh.pitchCorrection || 0,
-          loopStart: hasLoop ? Math.max(0, sh.startLoop - sh.start) / sh.sampleRate : undefined,
-          loopEnd: hasLoop ? Math.max(0, sh.endLoop - sh.start) / sh.sampleRate : undefined,
+          loopStart: hasLoop ? Math.max(0, sh.startLoop - sh.start) / bufSr : undefined,
+          loopEnd: hasLoop ? Math.max(0, sh.endLoop - sh.start) / bufSr : undefined,
           attenuationGain: matchedZone.attenuationGain ?? 1.0,
-          sampleRate: sh.sampleRate || sh.audioBuffer.sampleRate,
+          sampleRate: bufSr,
           sampleName: sh.name,
           soundFontName: sf.name
         };
@@ -1518,15 +1519,16 @@ class SpessaSynthCoreEngine {
       if (decoded.length > 0) {
         const sh = decoded[program % decoded.length];
         if (sh.audioBuffer) {
+          const bufSr = sh.audioBuffer.sampleRate || sh.sampleRate || 44100;
           const hasLoop = sh.endLoop > sh.startLoop && (sh.endLoop - sh.start) <= sh.audioBuffer.length;
           return {
             buffer: sh.audioBuffer,
             rootKey: sh.originalPitch || 60,
             pitchCorrection: sh.pitchCorrection || 0,
-            loopStart: hasLoop ? Math.max(0, sh.startLoop - sh.start) / sh.sampleRate : undefined,
-            loopEnd: hasLoop ? Math.max(0, sh.endLoop - sh.start) / sh.sampleRate : undefined,
+            loopStart: hasLoop ? Math.max(0, sh.startLoop - sh.start) / bufSr : undefined,
+            loopEnd: hasLoop ? Math.max(0, sh.endLoop - sh.start) / bufSr : undefined,
             attenuationGain: 1.0,
-            sampleRate: sh.sampleRate || sh.audioBuffer.sampleRate,
+            sampleRate: bufSr,
             sampleName: sh.name,
             soundFontName: sf.name
           };

@@ -115,13 +115,20 @@ export function clearInterpolationCache(): void {
   resampledCache.clear();
 }
 
-// Precompute 16-tap Blackman-windowed Sinc LUT for cutoff=1.0 across 256 fractional phases
+// Cache 256-phase x 16-tap Blackman-windowed Sinc LUTs keyed by quantized cutoff (1..64 -> cutoff = key/64)
 const SINC_PHASES = 256;
 const SINC_TAPS = 16;
 const SINC_OFFSET_MIN = -7;
-const SINC_LUT = new Float32Array(SINC_PHASES * SINC_TAPS);
-(() => {
+const sincLutByCutoff = new Map<number, Float32Array>();
+
+function getSincLut(cutoffQuantized: number): Float32Array {
+  const existing = sincLutByCutoff.get(cutoffQuantized);
+  if (existing) return existing;
+
+  const cutoff = Math.max(0.12, Math.min(1.0, cutoffQuantized / 64));
+  const lut = new Float32Array(SINC_PHASES * SINC_TAPS);
   const halfWidth = SINC_TAPS / 2;
+
   for (let p = 0; p < SINC_PHASES; p++) {
     const frac = p / SINC_PHASES;
     let sum = 0;
@@ -129,37 +136,45 @@ const SINC_LUT = new Float32Array(SINC_PHASES * SINC_TAPS);
     for (let t = 0; t < SINC_TAPS; t++) {
       const m = SINC_OFFSET_MIN + t;
       const x = m - frac;
-      const sinc = Math.abs(x) < 1e-7 ? 1.0 : Math.sin(Math.PI * x) / (Math.PI * x);
+      const sx = x * cutoff;
+      const sinc = Math.abs(sx) < 1e-7 ? 1.0 : Math.sin(Math.PI * sx) / (Math.PI * sx);
       const u = (x + halfWidth) / SINC_TAPS;
       const win =
         u >= 0 && u <= 1
           ? 0.42 - 0.5 * Math.cos(2 * Math.PI * u) + 0.08 * Math.cos(4 * Math.PI * u)
           : 0;
-      const w = sinc * win;
-      SINC_LUT[rowBase + t] = w;
+      const w = sinc * win * cutoff;
+      lut[rowBase + t] = w;
       sum += w;
     }
-    if (sum > 0) {
+    if (sum > 1e-8) {
       const inv = 1 / sum;
       for (let t = 0; t < SINC_TAPS; t++) {
-        SINC_LUT[rowBase + t] *= inv;
+        lut[rowBase + t] *= inv;
       }
     }
   }
-})();
+
+  sincLutByCutoff.set(cutoffQuantized, lut);
+  return lut;
+}
+
+// Pre-warm unity-cutoff LUT
+getSincLut(64);
 
 function readSampleBounded(
   data: Float32Array,
   idx: number,
   hasLoop: boolean,
   loopStartIdx: number,
+  loopEndIdx: number,
   loopLenIdx: number
 ): number {
-  if (idx >= 0 && idx < data.length) return data[idx];
-  if (hasLoop && idx >= loopStartIdx && loopLenIdx > 0) {
+  if (hasLoop && idx >= loopEndIdx && loopLenIdx > 0) {
     const wrapped = loopStartIdx + (((idx - loopStartIdx) % loopLenIdx) + loopLenIdx) % loopLenIdx;
     return data[wrapped] ?? 0;
   }
+  if (idx >= 0 && idx < data.length) return data[idx];
   if (idx < 0) return data[0] ?? 0;
   return 0;
 }
@@ -212,15 +227,15 @@ export function interpolateSampleBuffer(
 
   // Stop rendering once loop end is reached (Web Audio loops output cleanly back to outLoopStart)
   const effectiveInEnd = hasValidLoop ? inLoopEnd : sourceBuffer.length;
-  // Cap maximum rendered output length at 10s to keep first-note latency responsive
-  const maxOutFrames = targetSr * 10;
+  const maxOutFrames = targetSr * (hasValidLoop ? 16 : 10);
   const desiredOutFrames = Math.max(64, Math.min(maxOutFrames, Math.ceil(effectiveInEnd / effStep)));
 
   const numChannels = Math.min(2, Math.max(1, sourceBuffer.numberOfChannels));
   const outBuf = ctx.createBuffer(numChannels, desiredOutFrames, targetSr);
 
-  const sincCutoff = effStep > 1.0 ? Math.max(0.12, 1.0 / effStep) : 1.0;
-  const sincHalf = SINC_TAPS / 2;
+  const sincCutoff = effStep > 1.0 ? Math.max(0.125, 1.0 / effStep) : 1.0;
+  const sincCutoffQuantized = sincCutoff >= 0.99 ? 64 : Math.max(8, Math.min(63, Math.round(sincCutoff * 64)));
+  const sincLut = mode === 'sinc' ? getSincLut(sincCutoffQuantized) : null;
 
   for (let ch = 0; ch < numChannels; ch++) {
     const inData = sourceBuffer.getChannelData(ch);
@@ -231,15 +246,15 @@ export function interpolateSampleBuffer(
       for (let i = 0; i < desiredOutFrames; i++) {
         const pos = i * effStep;
         const intPos = pos | 0;
-        outData[i] = intPos < inData.length ? inData[intPos] : 0;
+        outData[i] = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
       }
     } else if (mode === 'linear') {
       for (let i = 0; i < desiredOutFrames; i++) {
         const pos = i * effStep;
         const intPos = pos | 0;
         const frac = pos - intPos;
-        const y0 = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopLen);
-        const y1 = readSampleBounded(inData, intPos + 1, hasValidLoop, inLoopStart, inLoopLen);
+        const y0 = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y1 = readSampleBounded(inData, intPos + 1, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
         outData[i] = y0 + frac * (y1 - y0);
       }
     } else if (mode === 'cubic') {
@@ -248,10 +263,10 @@ export function interpolateSampleBuffer(
         const pos = i * effStep;
         const intPos = pos | 0;
         const d = pos - intPos;
-        const ym1 = readSampleBounded(inData, intPos - 1, hasValidLoop, inLoopStart, inLoopLen);
-        const y0 = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopLen);
-        const y1 = readSampleBounded(inData, intPos + 1, hasValidLoop, inLoopStart, inLoopLen);
-        const y2 = readSampleBounded(inData, intPos + 2, hasValidLoop, inLoopStart, inLoopLen);
+        const ym1 = readSampleBounded(inData, intPos - 1, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y0 = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y1 = readSampleBounded(inData, intPos + 1, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y2 = readSampleBounded(inData, intPos + 2, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
 
         const c0 = y0;
         const c1 = 0.5 * (y1 - ym1);
@@ -267,11 +282,11 @@ export function interpolateSampleBuffer(
         const intPos = pos | 0;
         const d = pos - intPos;
 
-        const ym2 = readSampleBounded(inData, intPos - 2, hasValidLoop, inLoopStart, inLoopLen);
-        const ym1 = readSampleBounded(inData, intPos - 1, hasValidLoop, inLoopStart, inLoopLen);
-        const y0 = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopLen);
-        const y1 = readSampleBounded(inData, intPos + 1, hasValidLoop, inLoopStart, inLoopLen);
-        const y2 = readSampleBounded(inData, intPos + 2, hasValidLoop, inLoopStart, inLoopLen);
+        const ym2 = readSampleBounded(inData, intPos - 2, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const ym1 = readSampleBounded(inData, intPos - 1, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y0 = readSampleBounded(inData, intPos, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y1 = readSampleBounded(inData, intPos + 1, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
+        const y2 = readSampleBounded(inData, intPos + 2, hasValidLoop, inLoopStart, inLoopEnd, inLoopLen);
 
         const dm1 = d - 1;
         const dp1 = d + 1;
@@ -287,55 +302,28 @@ export function interpolateSampleBuffer(
         const val = ym2 * wm2 + ym1 * wm1 + y0 * w0 + y1 * wp1 + y2 * wp2;
         outData[i] = val > 1.2 ? 1.2 : val < -1.2 ? -1.2 : val;
       }
-    } else {
-      // Windowed Sinc (16-tap Blackman-windowed Sinc with anti-aliasing cutoff scaling)
-      if (sincCutoff >= 0.999) {
-        for (let i = 0; i < desiredOutFrames; i++) {
-          const pos = i * effStep;
-          const intPos = pos | 0;
-          const frac = pos - intPos;
-          const phaseIdx = Math.min(SINC_PHASES - 1, (frac * SINC_PHASES) | 0);
-          const lutBase = phaseIdx * SINC_TAPS;
+    } else if (sincLut) {
+      // Windowed Sinc (16-tap Blackman-windowed Sinc LUT with anti-aliasing cutoff scaling)
+      for (let i = 0; i < desiredOutFrames; i++) {
+        const pos = i * effStep;
+        const intPos = pos | 0;
+        const frac = pos - intPos;
+        const phaseIdx = Math.min(SINC_PHASES - 1, (frac * SINC_PHASES) | 0);
+        const lutBase = phaseIdx * SINC_TAPS;
 
-          let acc = 0;
-          for (let t = 0; t < SINC_TAPS; t++) {
-            const s = readSampleBounded(inData, intPos + SINC_OFFSET_MIN + t, hasValidLoop, inLoopStart, inLoopLen);
-            acc += s * SINC_LUT[lutBase + t];
-          }
-          outData[i] = acc > 1.2 ? 1.2 : acc < -1.2 ? -1.2 : acc;
+        let acc = 0;
+        for (let t = 0; t < SINC_TAPS; t++) {
+          const s = readSampleBounded(
+            inData,
+            intPos + SINC_OFFSET_MIN + t,
+            hasValidLoop,
+            inLoopStart,
+            inLoopEnd,
+            inLoopLen
+          );
+          acc += s * sincLut[lutBase + t];
         }
-      } else {
-        // Dynamic anti-aliasing cutoff kernel when transposing upward (effStep > 1)
-        const tapWeights = new Float32Array(SINC_TAPS);
-        for (let i = 0; i < desiredOutFrames; i++) {
-          const pos = i * effStep;
-          const intPos = pos | 0;
-          const frac = pos - intPos;
-
-          let weightSum = 0;
-          for (let t = 0; t < SINC_TAPS; t++) {
-            const m = SINC_OFFSET_MIN + t;
-            const x = m - frac;
-            const sx = x * sincCutoff;
-            const sinc = Math.abs(sx) < 1e-6 ? 1.0 : Math.sin(Math.PI * sx) / (Math.PI * sx);
-            const u = (x + sincHalf) / SINC_TAPS;
-            const win =
-              u >= 0 && u <= 1
-                ? 0.42 - 0.5 * Math.cos(2 * Math.PI * u) + 0.08 * Math.cos(4 * Math.PI * u)
-                : 0;
-            const w = sinc * win * sincCutoff;
-            tapWeights[t] = w;
-            weightSum += w;
-          }
-
-          let acc = 0;
-          for (let t = 0; t < SINC_TAPS; t++) {
-            const s = readSampleBounded(inData, intPos + SINC_OFFSET_MIN + t, hasValidLoop, inLoopStart, inLoopLen);
-            acc += s * tapWeights[t];
-          }
-          const val = weightSum > 1e-6 ? acc / weightSum : acc;
-          outData[i] = val > 1.2 ? 1.2 : val < -1.2 ? -1.2 : val;
-        }
+        outData[i] = acc > 1.2 ? 1.2 : acc < -1.2 ? -1.2 : acc;
       }
     }
   }

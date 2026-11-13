@@ -166,7 +166,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
   try {
     const sampleRate = ctx.sampleRate || 44100;
 
-    // Helper: generate synthetic harmonic tone
+    // Helper: generate concert-pitch harmonic tone with proper phase-integrated vibrato
     function createHarmonicBuffer(
       seconds: number, 
       harmonics: { mult: number; gain: number }[], 
@@ -174,20 +174,28 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
       attackSec = 0.01,
       vibratoFreq = 0,
       vibratoDepth = 0,
-      noiseAmt = 0
+      noiseAmt = 0,
+      rootKey = 60
     ): AudioBuffer {
       const buffer = ctx.createBuffer(1, Math.floor(sampleRate * seconds), sampleRate);
       const data = buffer.getChannelData(0);
-      const f0 = 261.63; // Middle C
+      const f0 = 440 * Math.pow(2, (rootKey - 69) / 12);
+      const phases = new Float64Array(harmonics.length);
+      const twoPiOverSr = (2 * Math.PI) / sampleRate;
+
       for (let i = 0; i < data.length; i++) {
         const t = i / sampleRate;
         const attack = attackSec > 0 ? Math.min(1.0, t / attackSec) : 1.0;
         const decay = Math.exp(-t * decayRate);
-        const vib = vibratoFreq > 0 ? Math.sin(2 * Math.PI * vibratoFreq * t) * vibratoDepth : 0;
-        
+        // Smooth vibrato ramp-in after 0.15s and proper phase integration so depth stays subtle
+        const vibFade = vibratoFreq > 0 ? Math.min(1.0, Math.max(0, (t - 0.12) / 0.25)) : 0;
+        const vibRatio = vibratoFreq > 0 ? 1.0 + (Math.sin(2 * Math.PI * vibratoFreq * t) * (vibratoDepth / 261.63)) * vibFade : 1.0;
+
         let sum = 0;
-        for (const h of harmonics) {
-          sum += h.gain * Math.sin(2 * Math.PI * (f0 * h.mult + vib) * t);
+        for (let hIdx = 0; hIdx < harmonics.length; hIdx++) {
+          const h = harmonics[hIdx];
+          phases[hIdx] += f0 * h.mult * vibRatio * twoPiOverSr;
+          sum += h.gain * Math.sin(phases[hIdx]);
         }
         if (noiseAmt > 0) {
           sum += (Math.random() * 2 - 1) * noiseAmt;
@@ -197,37 +205,40 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
       return buffer;
     }
 
-    // Helper: generate FM bell/piano tone
+    // Helper: generate FM bell/piano tone at exact rootKey concert pitch
     function createFmBuffer(
       seconds: number,
       carrierMult: number,
       modMult: number,
       modIndex: number,
       decayRate: number,
-      modDecayRate: number
+      modDecayRate: number,
+      rootKey = 60
     ): AudioBuffer {
       const buffer = ctx.createBuffer(1, Math.floor(sampleRate * seconds), sampleRate);
       const data = buffer.getChannelData(0);
-      const f0 = 261.63;
+      const f0 = 440 * Math.pow(2, (rootKey - 69) / 12);
       for (let i = 0; i < data.length; i++) {
         const t = i / sampleRate;
+        const attack = Math.min(1.0, t / 0.005);
         const decay = Math.exp(-t * decayRate);
         const mod = Math.sin(2 * Math.PI * f0 * modMult * t) * modIndex * Math.exp(-t * modDecayRate);
-        data[i] = Math.sin(2 * Math.PI * f0 * carrierMult * t + mod) * decay * 0.75;
+        data[i] = Math.sin(2 * Math.PI * f0 * carrierMult * t + mod) * attack * decay * 0.75;
       }
       return buffer;
     }
 
-    // Helper: generate Pulse/Square wave tone
-    function createPulseBuffer(seconds: number, duty = 0.5, decayRate = 2.0): AudioBuffer {
+    // Helper: generate Pulse/Square wave tone at exact rootKey concert pitch
+    function createPulseBuffer(seconds: number, duty = 0.5, decayRate = 2.0, rootKey = 60): AudioBuffer {
       const buffer = ctx.createBuffer(1, Math.floor(sampleRate * seconds), sampleRate);
       const data = buffer.getChannelData(0);
-      const f0 = 261.63;
+      const f0 = 440 * Math.pow(2, (rootKey - 69) / 12);
       for (let i = 0; i < data.length; i++) {
         const t = i / sampleRate;
+        const attack = Math.min(1.0, t / 0.004);
         const phase = (f0 * t) % 1;
         const val = phase < duty ? 0.6 : -0.6;
-        data[i] = val * Math.exp(-t * decayRate);
+        data[i] = val * attack * Math.exp(-t * decayRate);
       }
       return buffer;
     }
@@ -238,7 +249,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
       category: string;
       prog: number;
       bank?: number;
-      gen: () => AudioBuffer;
+      gen: (rk: number) => AudioBuffer;
       gain?: number;
       rootKey?: number;
     }> = [
@@ -248,56 +259,56 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         name: "000: Acoustic Grand Piano",
         category: "Pianos & Keyboards",
         prog: 0,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.5}, {mult:2, gain:0.3}, {mult:3, gain:0.15}, {mult:4, gain:0.05}], 2.8)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.5}, {mult:2, gain:0.3}, {mult:3, gain:0.15}, {mult:4, gain:0.05}], 2.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_bright_piano",
         name: "001: Bright Acoustic Piano",
         category: "Pianos & Keyboards",
         prog: 1,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.4}, {mult:2, gain:0.35}, {mult:3, gain:0.25}, {mult:4, gain:0.15}], 2.5)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.4}, {mult:2, gain:0.35}, {mult:3, gain:0.25}, {mult:4, gain:0.15}], 2.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_electric_grand",
         name: "002: Electric Grand Piano",
         category: "Pianos & Keyboards",
         prog: 2,
-        gen: () => createFmBuffer(1.8, 1, 2, 1.4, 2.4, 4.0)
+        gen: (rk) => createFmBuffer(1.8, 1, 2, 1.4, 2.4, 4.0, rk)
       },
       {
         id: "gm_honky_tonk",
         name: "003: Honky-tonk Piano",
         category: "Pianos & Keyboards",
         prog: 3,
-        gen: () => createHarmonicBuffer(1.6, [{mult:1, gain:0.45}, {mult:1.008, gain:0.4}, {mult:2, gain:0.25}], 3.0)
+        gen: (rk) => createHarmonicBuffer(1.6, [{mult:1, gain:0.45}, {mult:1.008, gain:0.4}, {mult:2, gain:0.25}], 3.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_epiano",
         name: "004: Electric Piano 1 (Rhodes)",
         category: "Pianos & Keyboards",
         prog: 4,
-        gen: () => createFmBuffer(1.8, 1, 2, 1.2, 2.2, 4.0)
+        gen: (rk) => createFmBuffer(1.8, 1, 2, 1.2, 2.2, 4.0, rk)
       },
       {
         id: "gm_epiano2",
         name: "005: Electric Piano 2 (Chorused DX7)",
         category: "Pianos & Keyboards",
         prog: 5,
-        gen: () => createFmBuffer(2.0, 1, 3, 1.8, 2.0, 3.5)
+        gen: (rk) => createFmBuffer(2.0, 1, 3, 1.8, 2.0, 3.5, rk)
       },
       {
         id: "gm_harpsichord",
         name: "006: Harpsichord (Baroque)",
         category: "Pianos & Keyboards",
         prog: 6,
-        gen: () => createHarmonicBuffer(1.5, [{mult:1, gain:0.3}, {mult:2, gain:0.3}, {mult:3, gain:0.25}, {mult:4, gain:0.2}], 3.8)
+        gen: (rk) => createHarmonicBuffer(1.5, [{mult:1, gain:0.3}, {mult:2, gain:0.3}, {mult:3, gain:0.25}, {mult:4, gain:0.2}], 3.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_clavinet",
         name: "007: Clavinet (Funk)",
         category: "Pianos & Keyboards",
         prog: 7,
-        gen: () => createPulseBuffer(1.4, 0.25, 4.0)
+        gen: (rk) => createPulseBuffer(1.4, 0.25, 4.0, rk)
       },
 
       // 2. Chromatic & Mallets
@@ -307,7 +318,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Chromatic Percussion",
         prog: 8,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(1.5, [{mult:1, gain:0.6}, {mult:4, gain:0.3}], 3.5)
+        gen: (rk) => createHarmonicBuffer(1.5, [{mult:1, gain:0.6}, {mult:4, gain:0.3}], 3.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_glockenspiel",
@@ -315,7 +326,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Chromatic Percussion",
         prog: 9,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(1.6, [{mult:1, gain:0.5}, {mult:3, gain:0.3}, {mult:6, gain:0.15}], 2.8)
+        gen: (rk) => createHarmonicBuffer(1.6, [{mult:1, gain:0.5}, {mult:3, gain:0.3}, {mult:6, gain:0.15}], 2.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_music_box",
@@ -323,35 +334,35 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Chromatic Percussion",
         prog: 10,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(1.4, [{mult:1, gain:0.6}, {mult:5, gain:0.25}], 3.2)
+        gen: (rk) => createHarmonicBuffer(1.4, [{mult:1, gain:0.6}, {mult:5, gain:0.25}], 3.2, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_vibraphone",
         name: "011: Vibraphone",
         category: "Chromatic Percussion",
         prog: 11,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.6}, {mult:2, gain:0.2}], 2.0, 0.01, 5.5, 3.0)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.6}, {mult:2, gain:0.2}], 2.0, 0.01, 5.5, 2.0, 0, rk)
       },
       {
         id: "gm_marimba",
         name: "012: Marimba",
         category: "Chromatic Percussion",
         prog: 12,
-        gen: () => createHarmonicBuffer(1.0, [{mult:1, gain:0.7}, {mult:3, gain:0.2}], 5.5)
+        gen: (rk) => createHarmonicBuffer(1.0, [{mult:1, gain:0.7}, {mult:3, gain:0.2}], 5.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_xylophone",
         name: "013: Xylophone",
         category: "Chromatic Percussion",
         prog: 13,
-        gen: () => createHarmonicBuffer(0.8, [{mult:1, gain:0.6}, {mult:4, gain:0.3}], 7.0)
+        gen: (rk) => createHarmonicBuffer(0.8, [{mult:1, gain:0.6}, {mult:4, gain:0.3}], 7.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_tubular_bells",
         name: "014: Tubular Bells / Chimes",
         category: "Chromatic Percussion",
         prog: 14,
-        gen: () => createHarmonicBuffer(2.5, [{mult:1, gain:0.4}, {mult:2.76, gain:0.3}, {mult:5.4, gain:0.2}], 1.8)
+        gen: (rk) => createHarmonicBuffer(2.5, [{mult:1, gain:0.45}, {mult:2.76, gain:0.28}, {mult:5.4, gain:0.18}], 1.8, 0.01, 0, 0, 0, rk)
       },
 
       // 3. Organs & Accordions
@@ -360,49 +371,49 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         name: "016: Drawbar Organ (Hammond B3)",
         category: "Organs & Accordions",
         prog: 16,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}, {mult:4, gain:0.1}], 0.4, 0.02)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}, {mult:4, gain:0.1}], 0.4, 0.02, 0, 0, 0, rk)
       },
       {
         id: "gm_percussive_organ",
         name: "017: Percussive Jazz Organ",
         category: "Organs & Accordions",
         prog: 17,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.45}, {mult:2, gain:0.35}, {mult:4, gain:0.3}], 1.5, 0.005)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.45}, {mult:2, gain:0.35}, {mult:4, gain:0.3}], 1.5, 0.005, 0, 0, 0, rk)
       },
       {
         id: "gm_rock_organ",
         name: "018: Rock Overdrive Organ",
         category: "Organs & Accordions",
         prog: 18,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.25}, {mult:5, gain:0.2}], 0.5)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.25}, {mult:5, gain:0.2}], 0.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_church_organ",
         name: "019: Church Pipe Organ",
         category: "Organs & Accordions",
         prog: 19,
-        gen: () => createHarmonicBuffer(2.5, [{mult:0.5, gain:0.3}, {mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:4, gain:0.2}], 0.3)
+        gen: (rk) => createHarmonicBuffer(2.5, [{mult:0.5, gain:0.3}, {mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:4, gain:0.2}], 0.3, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_reed_organ",
         name: "020: Reed Organ",
         category: "Organs & Accordions",
         prog: 20,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.25}, {mult:3, gain:0.25}], 0.8)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.25}, {mult:3, gain:0.25}], 0.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_accordion",
         name: "021: French Accordion (Musette)",
         category: "Organs & Accordions",
         prog: 21,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:1.006, gain:0.4}, {mult:2, gain:0.2}], 0.5)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:1.006, gain:0.4}, {mult:2, gain:0.2}], 0.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_harmonica",
         name: "022: Blues Harmonica",
         category: "Organs & Accordions",
         prog: 22,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}], 0.6, 0.05, 5, 2)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}], 0.6, 0.05, 5, 1.5, 0, rk)
       },
 
       // 4. Guitars
@@ -411,49 +422,49 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         name: "024: Acoustic Nylon Guitar",
         category: "Guitars",
         prog: 24,
-        gen: () => createHarmonicBuffer(1.6, [{mult:1, gain:0.6}, {mult:2, gain:0.3}, {mult:3, gain:0.1}], 3.5)
+        gen: (rk) => createHarmonicBuffer(1.6, [{mult:1, gain:0.6}, {mult:2, gain:0.3}, {mult:3, gain:0.1}], 3.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_steel_guitar",
         name: "025: Acoustic Steel Guitar",
         category: "Guitars",
         prog: 25,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.5}, {mult:2, gain:0.35}, {mult:3, gain:0.2}, {mult:4, gain:0.1}], 3.0)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.5}, {mult:2, gain:0.35}, {mult:3, gain:0.2}, {mult:4, gain:0.1}], 3.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_jazz_guitar",
         name: "026: Hollowbody Jazz Guitar",
         category: "Guitars",
         prog: 26,
-        gen: () => createHarmonicBuffer(1.6, [{mult:1, gain:0.65}, {mult:2, gain:0.25}, {mult:3, gain:0.08}], 3.2)
+        gen: (rk) => createHarmonicBuffer(1.6, [{mult:1, gain:0.65}, {mult:2, gain:0.25}, {mult:3, gain:0.08}], 3.2, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_clean_guitar",
         name: "027: Clean Electric Guitar",
         category: "Guitars",
         prog: 27,
-        gen: () => createHarmonicBuffer(1.7, [{mult:1, gain:0.55}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 2.8)
+        gen: (rk) => createHarmonicBuffer(1.7, [{mult:1, gain:0.55}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 2.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_muted_guitar",
         name: "028: Muted Electric Guitar",
         category: "Guitars",
         prog: 28,
-        gen: () => createHarmonicBuffer(0.6, [{mult:1, gain:0.7}, {mult:2, gain:0.25}], 8.0)
+        gen: (rk) => createHarmonicBuffer(0.6, [{mult:1, gain:0.7}, {mult:2, gain:0.25}], 8.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_overdriven_guitar",
         name: "029: Overdriven Blues Guitar",
         category: "Guitars",
         prog: 29,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.4}, {mult:2, gain:0.35}, {mult:3, gain:0.3}, {mult:4, gain:0.2}], 2.2)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.4}, {mult:2, gain:0.35}, {mult:3, gain:0.3}, {mult:4, gain:0.2}], 2.2, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_distortion_guitar",
         name: "030: Distortion Rock Guitar",
         category: "Guitars",
         prog: 30,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.25}, {mult:4, gain:0.2}, {mult:5, gain:0.15}], 1.8)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.25}, {mult:4, gain:0.2}, {mult:5, gain:0.15}], 1.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_guitar_harmonics",
@@ -461,7 +472,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Guitars",
         prog: 31,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.7}, {mult:2, gain:0.2}], 2.0)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.7}, {mult:2, gain:0.2}], 2.0, 0.01, 0, 0, 0, rk)
       },
 
       // 5. Basses
@@ -471,7 +482,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 32,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.75}, {mult:2, gain:0.2}, {mult:3, gain:0.05}], 3.0)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.75}, {mult:2, gain:0.2}, {mult:3, gain:0.05}], 3.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_bass",
@@ -479,7 +490,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 33,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.7}, {mult:2, gain:0.25}, {mult:3, gain:0.05}], 2.8)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.7}, {mult:2, gain:0.25}, {mult:3, gain:0.05}], 2.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_pick_bass",
@@ -487,7 +498,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 34,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(1.6, [{mult:1, gain:0.6}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 3.2)
+        gen: (rk) => createHarmonicBuffer(1.6, [{mult:1, gain:0.6}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 3.2, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_fretless_bass",
@@ -495,7 +506,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 35,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.7}, {mult:2, gain:0.25}], 2.5, 0.02, 4.5, 1.5)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.7}, {mult:2, gain:0.25}], 2.5, 0.02, 4.5, 1.0, 0, rk)
       },
       {
         id: "gm_slap_bass1",
@@ -503,7 +514,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 36,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(1.4, [{mult:1, gain:0.6}, {mult:2, gain:0.35}, {mult:4, gain:0.25}], 4.2)
+        gen: (rk) => createHarmonicBuffer(1.4, [{mult:1, gain:0.6}, {mult:2, gain:0.35}, {mult:4, gain:0.25}], 4.2, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_slap_bass2",
@@ -511,7 +522,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 37,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(1.2, [{mult:1, gain:0.55}, {mult:3, gain:0.35}, {mult:5, gain:0.2}], 4.8)
+        gen: (rk) => createHarmonicBuffer(1.2, [{mult:1, gain:0.55}, {mult:3, gain:0.35}, {mult:5, gain:0.2}], 4.8, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_synth_bass1",
@@ -519,7 +530,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 38,
         rootKey: 36,
-        gen: () => createPulseBuffer(1.5, 0.35, 3.5)
+        gen: (rk) => createPulseBuffer(1.5, 0.35, 3.5, rk)
       },
       {
         id: "gm_synth_bass2",
@@ -527,7 +538,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Basses",
         prog: 39,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(1.8, [{mult:0.5, gain:0.6}, {mult:1, gain:0.4}], 2.5)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.65}, {mult:2, gain:0.3}], 2.5, 0.01, 0, 0, 0, rk)
       },
 
       // 6. Strings & Orchestral
@@ -537,7 +548,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Strings & Orchestral",
         prog: 40,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}], 0.8, 0.08, 5.5, 3.0)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.45}, {mult:2, gain:0.28}, {mult:3, gain:0.18}], 0.8, 0.06, 5.2, 1.5, 0, rk)
       },
       {
         id: "gm_viola",
@@ -545,7 +556,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Strings & Orchestral",
         prog: 41,
         rootKey: 55,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.8, 0.08, 5.0, 2.5)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.48}, {mult:2, gain:0.28}, {mult:3, gain:0.14}], 0.8, 0.06, 5.0, 1.4, 0, rk)
       },
       {
         id: "gm_cello",
@@ -553,7 +564,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Strings & Orchestral",
         prog: 42,
         rootKey: 48,
-        gen: () => createHarmonicBuffer(2.4, [{mult:1, gain:0.5}, {mult:2, gain:0.3}, {mult:3, gain:0.1}], 0.7, 0.09, 4.8, 2.0)
+        gen: (rk) => createHarmonicBuffer(2.4, [{mult:1, gain:0.52}, {mult:2, gain:0.28}, {mult:3, gain:0.12}], 0.7, 0.07, 4.8, 1.2, 0, rk)
       },
       {
         id: "gm_contrabass",
@@ -561,21 +572,21 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Strings & Orchestral",
         prog: 43,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.6}, {mult:2, gain:0.25}], 0.9, 0.1)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.6}, {mult:2, gain:0.25}], 0.9, 0.08, 0, 0, 0, rk)
       },
       {
         id: "gm_pizzicato",
         name: "045: Pizzicato Strings",
         category: "Strings & Orchestral",
         prog: 45,
-        gen: () => createHarmonicBuffer(0.8, [{mult:1, gain:0.6}, {mult:2, gain:0.3}], 6.5)
+        gen: (rk) => createHarmonicBuffer(0.8, [{mult:1, gain:0.6}, {mult:2, gain:0.3}], 6.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_harp",
         name: "046: Orchestral Concert Harp",
         category: "Strings & Orchestral",
         prog: 46,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.6}, {mult:2, gain:0.25}, {mult:3, gain:0.1}], 2.2)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.6}, {mult:2, gain:0.25}, {mult:3, gain:0.1}], 2.2, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_timpani",
@@ -583,42 +594,42 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Strings & Orchestral",
         prog: 47,
         rootKey: 48,
-        gen: () => createHarmonicBuffer(1.4, [{mult:1, gain:0.7}, {mult:1.48, gain:0.3}], 3.5)
+        gen: (rk) => createHarmonicBuffer(1.4, [{mult:1, gain:0.75}, {mult:1.48, gain:0.25}], 3.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_strings",
         name: "048: String Ensemble (Symphonic)",
         category: "Strings & Orchestral",
         prog: 48,
-        gen: () => createHarmonicBuffer(2.8, [{mult:1, gain:0.35}, {mult:1.004, gain:0.35}, {mult:2, gain:0.2}, {mult:2.006, gain:0.1}], 0.6, 0.15)
+        gen: (rk) => createHarmonicBuffer(2.8, [{mult:1, gain:0.4}, {mult:1.003, gain:0.35}, {mult:2, gain:0.2}, {mult:2.004, gain:0.08}], 0.6, 0.12, 0, 0, 0, rk)
       },
       {
         id: "gm_synth_strings",
         name: "050: Synth Strings (Solina/Juno)",
         category: "Strings & Orchestral",
         prog: 50,
-        gen: () => createHarmonicBuffer(2.6, [{mult:1, gain:0.35}, {mult:1.008, gain:0.35}, {mult:2, gain:0.2}], 0.6, 0.12)
+        gen: (rk) => createHarmonicBuffer(2.6, [{mult:1, gain:0.4}, {mult:1.005, gain:0.35}, {mult:2, gain:0.2}], 0.6, 0.1, 0, 0, 0, rk)
       },
       {
         id: "gm_choir",
         name: "052: Choir Aahs (Angelic)",
         category: "Strings & Orchestral",
         prog: 52,
-        gen: () => createHarmonicBuffer(2.6, [{mult:1, gain:0.5}, {mult:2, gain:0.2}, {mult:3, gain:0.2}], 0.5, 0.2)
+        gen: (rk) => createHarmonicBuffer(2.6, [{mult:1, gain:0.55}, {mult:2, gain:0.2}, {mult:3, gain:0.15}], 0.5, 0.15, 0, 0, 0, rk)
       },
       {
         id: "gm_voice_ooh",
         name: "053: Voice Oohs",
         category: "Strings & Orchestral",
         prog: 53,
-        gen: () => createHarmonicBuffer(2.4, [{mult:1, gain:0.6}, {mult:2, gain:0.25}], 0.6, 0.18)
+        gen: (rk) => createHarmonicBuffer(2.4, [{mult:1, gain:0.65}, {mult:2, gain:0.2}], 0.6, 0.12, 0, 0, 0, rk)
       },
       {
         id: "gm_orchestra_hit",
         name: "055: 80s Orchestra Hit",
         category: "Strings & Orchestral",
         prog: 55,
-        gen: () => createHarmonicBuffer(1.0, [{mult:1, gain:0.3}, {mult:1.5, gain:0.25}, {mult:2, gain:0.25}, {mult:2.5, gain:0.2}], 4.0)
+        gen: (rk) => createHarmonicBuffer(1.0, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.18}, {mult:4, gain:0.12}], 4.0, 0.01, 0, 0, 0, rk)
       },
 
       // 7. Brass & Woodwinds
@@ -628,7 +639,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 56,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.2}, {mult:4, gain:0.15}], 1.0, 0.04)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.2}, {mult:4, gain:0.15}], 1.0, 0.04, 0, 0, 0, rk)
       },
       {
         id: "gm_trombone",
@@ -636,7 +647,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 57,
         rootKey: 48,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 1.0, 0.05)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 1.0, 0.05, 0, 0, 0, rk)
       },
       {
         id: "gm_tuba",
@@ -644,7 +655,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 58,
         rootKey: 36,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.55}, {mult:2, gain:0.25}], 1.1, 0.06)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.55}, {mult:2, gain:0.25}], 1.1, 0.06, 0, 0, 0, rk)
       },
       {
         id: "gm_muted_trumpet",
@@ -652,7 +663,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 59,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.25}, {mult:3, gain:0.4}, {mult:5, gain:0.25}], 1.2, 0.03)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.35}, {mult:3, gain:0.35}, {mult:5, gain:0.2}], 1.2, 0.03, 0, 0, 0, rk)
       },
       {
         id: "gm_french_horn",
@@ -660,21 +671,21 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 60,
         rootKey: 52,
-        gen: () => createHarmonicBuffer(2.4, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.8, 0.08)
+        gen: (rk) => createHarmonicBuffer(2.4, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.8, 0.08, 0, 0, 0, rk)
       },
       {
         id: "gm_brass",
         name: "061: Brass Section (Fanfare)",
         category: "Brass & Woodwinds",
         prog: 61,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.3}, {mult:2, gain:0.25}, {mult:3, gain:0.2}, {mult:4, gain:0.15}, {mult:5, gain:0.1}], 0.9, 0.05)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.3}, {mult:2, gain:0.25}, {mult:3, gain:0.2}, {mult:4, gain:0.15}, {mult:5, gain:0.1}], 0.9, 0.05, 0, 0, 0, rk)
       },
       {
         id: "gm_synth_brass",
         name: "062: Synth Brass 1 (Jump/OB-X)",
         category: "Brass & Woodwinds",
         prog: 62,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.35}, {mult:1.005, gain:0.35}, {mult:2, gain:0.2}], 0.9, 0.06)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.35}, {mult:1.004, gain:0.35}, {mult:2, gain:0.2}], 0.9, 0.06, 0, 0, 0, rk)
       },
       {
         id: "gm_soprano_sax",
@@ -682,7 +693,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 64,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}], 1.0, 0.05, 5.0, 2.5)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.3}, {mult:3, gain:0.2}], 1.0, 0.05, 5.0, 1.5, 0, rk)
       },
       {
         id: "gm_alto_sax",
@@ -690,7 +701,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 65,
         rootKey: 57,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.42}, {mult:2, gain:0.3}, {mult:3, gain:0.18}], 0.9, 0.05, 5.0, 2.5)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.42}, {mult:2, gain:0.3}, {mult:3, gain:0.18}], 0.9, 0.05, 5.0, 1.4, 0, rk)
       },
       {
         id: "gm_tenor_sax",
@@ -698,7 +709,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 66,
         rootKey: 50,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.9, 0.05, 4.8, 2.0)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.9, 0.05, 4.8, 1.2, 0, rk)
       },
       {
         id: "gm_baritone_sax",
@@ -706,7 +717,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 67,
         rootKey: 42,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.5}, {mult:2, gain:0.28}, {mult:3, gain:0.12}], 1.0, 0.06)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.5}, {mult:2, gain:0.28}, {mult:3, gain:0.12}], 1.0, 0.06, 0, 0, 0, rk)
       },
       {
         id: "gm_oboe",
@@ -714,7 +725,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 68,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.3}, {mult:2, gain:0.35}, {mult:3, gain:0.2}], 0.8, 0.06, 5.2, 2.0)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.35}, {mult:2, gain:0.32}, {mult:3, gain:0.2}], 0.8, 0.06, 5.0, 1.2, 0, rk)
       },
       {
         id: "gm_clarinet",
@@ -722,7 +733,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 71,
         rootKey: 60,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.5}, {mult:3, gain:0.35}, {mult:5, gain:0.1}], 0.8, 0.05)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.5}, {mult:3, gain:0.35}, {mult:5, gain:0.1}], 0.8, 0.05, 0, 0, 0, rk)
       },
       {
         id: "gm_piccolo",
@@ -730,7 +741,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 72,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.7}, {mult:2, gain:0.2}], 1.2, 0.04, 6.0, 3.0)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.7}, {mult:2, gain:0.2}], 1.2, 0.04, 5.5, 1.5, 0, rk)
       },
       {
         id: "gm_flute",
@@ -738,7 +749,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 73,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.65}, {mult:2, gain:0.15}], 1.0, 0.08, 5.0, 2.5, 0.03)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.65}, {mult:2, gain:0.15}], 1.0, 0.06, 5.0, 1.2, 0.02, rk)
       },
       {
         id: "gm_pan_flute",
@@ -746,7 +757,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 75,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(2.2, [{mult:1, gain:0.6}, {mult:2, gain:0.2}], 1.1, 0.1, 4.5, 3.0, 0.06)
+        gen: (rk) => createHarmonicBuffer(2.2, [{mult:1, gain:0.6}, {mult:2, gain:0.2}], 1.1, 0.08, 4.5, 1.2, 0.04, rk)
       },
       {
         id: "gm_whistle",
@@ -754,7 +765,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 78,
         rootKey: 72,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.8}, {mult:2, gain:0.15}], 1.2, 0.04, 5.5, 3.0)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.8}, {mult:2, gain:0.15}], 1.2, 0.04, 5.0, 1.4, 0, rk)
       },
       {
         id: "gm_ocarina",
@@ -762,7 +773,7 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         category: "Brass & Woodwinds",
         prog: 79,
         rootKey: 64,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.7}, {mult:2, gain:0.15}], 1.0, 0.08, 4.5, 2.0, 0.02)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.7}, {mult:2, gain:0.15}], 1.0, 0.06, 4.5, 1.0, 0.015, rk)
       },
 
       // 8. Synth Leads & Chiptune
@@ -771,35 +782,35 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         name: "080: Synth Lead (8-Bit Pulse)",
         category: "Synth Leads & Chiptune",
         prog: 80,
-        gen: () => createPulseBuffer(1.8, 0.4, 2.0)
+        gen: (rk) => createPulseBuffer(1.8, 0.4, 2.0, rk)
       },
       {
         id: "gm_saw_lead",
         name: "081: Sawtooth Lead (Eurodance)",
         category: "Synth Leads & Chiptune",
         prog: 81,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.25}, {mult:3, gain:0.18}, {mult:4, gain:0.12}], 1.5)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.4}, {mult:2, gain:0.25}, {mult:3, gain:0.18}, {mult:4, gain:0.12}], 1.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_chiptune",
         name: "082: Chiptune Arp (Game Boy)",
         category: "Synth Leads & Chiptune",
         prog: 82,
-        gen: () => createPulseBuffer(1.5, 0.25, 2.2)
+        gen: (rk) => createPulseBuffer(1.5, 0.25, 2.2, rk)
       },
       {
         id: "gm_square_lead",
         name: "083: Chiptune 50% Duty (NES)",
         category: "Synth Leads & Chiptune",
         prog: 80,
-        gen: () => createPulseBuffer(1.6, 0.5, 2.0)
+        gen: (rk) => createPulseBuffer(1.6, 0.5, 2.0, rk)
       },
       {
         id: "gm_fm_lead",
         name: "084: FM 4-Op Lead (Genesis)",
         category: "Synth Leads & Chiptune",
         prog: 84,
-        gen: () => createFmBuffer(1.8, 1, 2, 2.2, 2.0, 3.0)
+        gen: (rk) => createFmBuffer(1.8, 1, 2, 2.2, 2.0, 3.0, rk)
       },
 
       // 9. Pads & Atmospheres
@@ -808,35 +819,35 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         name: "089: Warm Analog Pad (Jupiter-8)",
         category: "Pads & Atmospheres",
         prog: 89,
-        gen: () => createHarmonicBuffer(3.0, [{mult:1, gain:0.4}, {mult:1.003, gain:0.4}, {mult:2, gain:0.15}], 0.4, 0.3)
+        gen: (rk) => createHarmonicBuffer(3.0, [{mult:1, gain:0.42}, {mult:1.002, gain:0.38}, {mult:2, gain:0.15}], 0.4, 0.2, 0, 0, 0, rk)
       },
       {
         id: "gm_polysynth_pad",
         name: "090: Polysynth Pad",
         category: "Pads & Atmospheres",
         prog: 90,
-        gen: () => createHarmonicBuffer(2.8, [{mult:1, gain:0.35}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.5, 0.2)
+        gen: (rk) => createHarmonicBuffer(2.8, [{mult:1, gain:0.38}, {mult:2, gain:0.3}, {mult:3, gain:0.15}], 0.5, 0.15, 0, 0, 0, rk)
       },
       {
         id: "gm_halo_pad",
         name: "094: Halo Shimmer Pad",
         category: "Pads & Atmospheres",
         prog: 94,
-        gen: () => createFmBuffer(3.0, 1, 4, 1.5, 0.5, 1.2)
+        gen: (rk) => createFmBuffer(3.0, 1, 2, 1.1, 0.5, 1.2, rk)
       },
       {
         id: "gm_soundtrack",
         name: "097: Sci-Fi Soundtrack",
         category: "Pads & Atmospheres",
         prog: 97,
-        gen: () => createHarmonicBuffer(2.8, [{mult:1, gain:0.4}, {mult:1.5, gain:0.3}, {mult:2.01, gain:0.2}], 0.6, 0.25)
+        gen: (rk) => createHarmonicBuffer(2.8, [{mult:1, gain:0.5}, {mult:1.003, gain:0.3}, {mult:2, gain:0.2}], 0.6, 0.15, 0, 0, 0, rk)
       },
       {
         id: "gm_crystal",
         name: "098: Crystal Bell FX",
         category: "Pads & Atmospheres",
         prog: 98,
-        gen: () => createFmBuffer(2.4, 1, 3.5, 2.0, 1.8, 2.5)
+        gen: (rk) => createFmBuffer(2.4, 1, 3, 1.6, 1.8, 2.5, rk)
       },
 
       // 10. World & Ethnic
@@ -845,42 +856,42 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         name: "104: Indian Sitar",
         category: "World & Ethnic",
         prog: 104,
-        gen: () => createHarmonicBuffer(2.0, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.2}, {mult:4, gain:0.15}], 2.2, 0.01, 5.0, 4.0)
+        gen: (rk) => createHarmonicBuffer(2.0, [{mult:1, gain:0.45}, {mult:2, gain:0.3}, {mult:3, gain:0.2}, {mult:4, gain:0.15}], 2.2, 0.01, 4.5, 1.2, 0, rk)
       },
       {
         id: "gm_banjo",
         name: "105: 5-String Country Banjo",
         category: "World & Ethnic",
         prog: 105,
-        gen: () => createHarmonicBuffer(1.2, [{mult:1, gain:0.6}, {mult:2, gain:0.35}, {mult:3, gain:0.15}], 4.5)
+        gen: (rk) => createHarmonicBuffer(1.2, [{mult:1, gain:0.6}, {mult:2, gain:0.35}, {mult:3, gain:0.15}], 4.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_shamisen",
         name: "106: Traditional Shamisen",
         category: "World & Ethnic",
         prog: 106,
-        gen: () => createHarmonicBuffer(1.3, [{mult:1, gain:0.65}, {mult:2, gain:0.3}], 4.0)
+        gen: (rk) => createHarmonicBuffer(1.3, [{mult:1, gain:0.65}, {mult:2, gain:0.3}], 4.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_koto",
         name: "107: Japanese 13-String Koto",
         category: "World & Ethnic",
         prog: 107,
-        gen: () => createHarmonicBuffer(1.8, [{mult:1, gain:0.6}, {mult:2, gain:0.25}, {mult:3, gain:0.1}], 3.0)
+        gen: (rk) => createHarmonicBuffer(1.8, [{mult:1, gain:0.6}, {mult:2, gain:0.25}, {mult:3, gain:0.1}], 3.0, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_kalimba",
         name: "108: African Kalimba / Thumb Piano",
         category: "World & Ethnic",
         prog: 108,
-        gen: () => createHarmonicBuffer(1.5, [{mult:1, gain:0.7}, {mult:3, gain:0.2}], 3.5)
+        gen: (rk) => createHarmonicBuffer(1.5, [{mult:1, gain:0.7}, {mult:3, gain:0.2}], 3.5, 0.01, 0, 0, 0, rk)
       },
       {
         id: "gm_steel_drums",
         name: "114: Caribbean Steel Drums",
         category: "World & Ethnic",
         prog: 114,
-        gen: () => createFmBuffer(1.8, 1, 2.5, 1.8, 2.5, 4.0)
+        gen: (rk) => createFmBuffer(1.8, 1, 2.5, 1.8, 2.5, 4.0, rk)
       },
 
       // 11. Percussion
@@ -893,10 +904,12 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         gen: () => {
           const buf = ctx.createBuffer(1, Math.floor(sampleRate * 0.8), sampleRate);
           const data = buf.getChannelData(0);
+          let phase = 0;
           for (let i = 0; i < data.length; i++) {
             const t = i / sampleRate;
             const pitch = 90 * Math.exp(-t * 12) + 45;
-            data[i] = Math.sin(2 * Math.PI * pitch * t) * Math.exp(-t * 5) * 0.95;
+            phase += (2 * Math.PI * pitch) / sampleRate;
+            data[i] = Math.sin(phase) * Math.exp(-t * 5) * 0.95;
           }
           return buf;
         }
@@ -910,19 +923,22 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         gen: () => {
           const buf = ctx.createBuffer(1, Math.floor(sampleRate * 0.5), sampleRate);
           const data = buf.getChannelData(0);
+          let phase = 0;
           for (let i = 0; i < data.length; i++) {
             const t = i / sampleRate;
-            const pitch = 350 * Math.exp(-t * 22) + 60;
-            data[i] = Math.sin(2 * Math.PI * pitch * t) * Math.exp(-t * 8) * 0.9;
+            const pitch = 280 * Math.exp(-t * 22) + 60;
+            phase += (2 * Math.PI * pitch) / sampleRate;
+            data[i] = Math.sin(phase) * Math.exp(-t * 8) * 0.9;
           }
           return buf;
         }
       }
     ];
 
-    // Register all instruments
+    // Register all instruments (passing inst.rootKey so every buffer matches its exact pitch!)
     for (const inst of instrumentDefs) {
-      const buffer = inst.gen();
+      const rk = inst.rootKey || 60;
+      const buffer = inst.gen(rk);
       registeredPresets.set(inst.id, {
         id: inst.id,
         name: inst.name,
@@ -932,29 +948,49 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
         isCustom: false,
         samples: {
           buffer,
-          rootKey: inst.rootKey || 60,
+          rootKey: rk,
           sampleRate,
           baseGain: inst.gain || 0.85
         }
       });
     }
 
-    // 12. GM Standard Drums: Kick, Snare, Hi-Hat, Tom, Cymbal
+    // 12. GM Standard Drums: Kick, Snare, Rim/Clap, Hi-Hat, Tom, Cymbal (with proper phase integration!)
     const kickBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.4), sampleRate);
     const kickData = kickBuf.getChannelData(0);
+    let kickPhase = 0;
     for (let i = 0; i < kickData.length; i++) {
       const t = i / sampleRate;
-      const pitch = 150 * Math.exp(-t * 38) + 42;
-      kickData[i] = Math.sin(2 * Math.PI * pitch * t) * Math.exp(-t * 12) * 0.95;
+      const pitch = 135 * Math.exp(-t * 38) + 42;
+      kickPhase += (2 * Math.PI * pitch) / sampleRate;
+      kickData[i] = Math.sin(kickPhase) * Math.exp(-t * 11) * 0.95;
     }
 
-    const snareBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.35), sampleRate);
+    const snareBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.32), sampleRate);
     const snareData = snareBuf.getChannelData(0);
+    let snarePhase = 0;
     for (let i = 0; i < snareData.length; i++) {
       const t = i / sampleRate;
-      const tone = Math.sin(2 * Math.PI * 185 * Math.exp(-t * 15) * t) * 0.45;
-      const noise = (Math.random() * 2 - 1) * 0.55;
-      snareData[i] = (tone + noise) * Math.exp(-t * 14) * 0.9;
+      const pitch = 185 * Math.exp(-t * 18) + 120;
+      snarePhase += (2 * Math.PI * pitch) / sampleRate;
+      const tone = Math.sin(snarePhase) * 0.45 * Math.exp(-t * 20);
+      const noise = (Math.random() * 2 - 1) * 0.55 * Math.exp(-t * 14);
+      snareData[i] = (tone + noise) * 0.9;
+    }
+
+    const rimBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.1), sampleRate);
+    const rimData = rimBuf.getChannelData(0);
+    for (let i = 0; i < rimData.length; i++) {
+      const t = i / sampleRate;
+      rimData[i] = (Math.sin(2 * Math.PI * 820 * t) * 0.6 + (Math.random() * 2 - 1) * 0.3) * Math.exp(-t * 65);
+    }
+
+    const clapBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.28), sampleRate);
+    const clapData = clapBuf.getChannelData(0);
+    for (let i = 0; i < clapData.length; i++) {
+      const t = i / sampleRate;
+      const burst = (t < 0.03 ? (Math.sin(t * 260) > 0 ? 1 : 0.3) : 1.0);
+      clapData[i] = (Math.random() * 2 - 1) * burst * Math.exp(-t * 16) * 0.85;
     }
 
     const closedHatBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.08), sampleRate);
@@ -975,24 +1011,35 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
 
     const tomBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.4), sampleRate);
     const tomData = tomBuf.getChannelData(0);
+    let tomPhase = 0;
     for (let i = 0; i < tomData.length; i++) {
       const t = i / sampleRate;
-      const pitch = 160 * Math.exp(-t * 15) + 65;
-      tomData[i] = Math.sin(2 * Math.PI * pitch * t) * Math.exp(-t * 9) * 0.9;
+      const pitch = 140 * Math.exp(-t * 16) + 65;
+      tomPhase += (2 * Math.PI * pitch) / sampleRate;
+      tomData[i] = Math.sin(tomPhase) * Math.exp(-t * 9) * 0.9;
     }
 
-    const crashBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.8), sampleRate);
+    const crashBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.75), sampleRate);
     const crashData = crashBuf.getChannelData(0);
     for (let i = 0; i < crashData.length; i++) {
       const t = i / sampleRate;
-      const noise = (Math.random() * 2 - 1) * 0.7;
-      crashData[i] = noise * Math.exp(-t * 4);
+      const noise = (Math.random() * 2 - 1) * 0.65;
+      crashData[i] = noise * Math.exp(-t * 4.5);
+    }
+
+    const cowbellBuf = ctx.createBuffer(1, Math.floor(sampleRate * 0.25), sampleRate);
+    const cowbellData = cowbellBuf.getChannelData(0);
+    for (let i = 0; i < cowbellData.length; i++) {
+      const t = i / sampleRate;
+      cowbellData[i] = (Math.sin(2 * Math.PI * 540 * t) * 0.5 + Math.sin(2 * Math.PI * 800 * t) * 0.5) * Math.exp(-t * 18) * 0.75;
     }
 
     const drumKeyMap: { [key: number]: SoundFontSampleVoice } = {
       35: { buffer: kickBuf, rootKey: 35, sampleRate, baseGain: 1.0 },
       36: { buffer: kickBuf, rootKey: 36, sampleRate, baseGain: 1.0 },
+      37: { buffer: rimBuf, rootKey: 37, sampleRate, baseGain: 0.85 },
       38: { buffer: snareBuf, rootKey: 38, sampleRate, baseGain: 0.95 },
+      39: { buffer: clapBuf, rootKey: 39, sampleRate, baseGain: 0.9 },
       40: { buffer: snareBuf, rootKey: 40, sampleRate, baseGain: 0.95 },
       42: { buffer: closedHatBuf, rootKey: 42, sampleRate, baseGain: 0.85 },
       44: { buffer: closedHatBuf, rootKey: 44, sampleRate, baseGain: 0.8 },
@@ -1005,7 +1052,18 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
       50: { buffer: tomBuf, rootKey: 50, sampleRate, baseGain: 0.9 },
       49: { buffer: crashBuf, rootKey: 49, sampleRate, baseGain: 0.8 },
       51: { buffer: crashBuf, rootKey: 51, sampleRate, baseGain: 0.75 },
-      57: { buffer: crashBuf, rootKey: 57, sampleRate, baseGain: 0.75 }
+      52: { buffer: crashBuf, rootKey: 52, sampleRate, baseGain: 0.75 },
+      53: { buffer: crashBuf, rootKey: 53, sampleRate, baseGain: 0.7 },
+      54: { buffer: closedHatBuf, rootKey: 54, sampleRate, baseGain: 0.75 },
+      55: { buffer: crashBuf, rootKey: 55, sampleRate, baseGain: 0.75 },
+      56: { buffer: cowbellBuf, rootKey: 56, sampleRate, baseGain: 0.75 },
+      57: { buffer: crashBuf, rootKey: 57, sampleRate, baseGain: 0.75 },
+      59: { buffer: crashBuf, rootKey: 59, sampleRate, baseGain: 0.7 },
+      69: { buffer: closedHatBuf, rootKey: 69, sampleRate, baseGain: 0.75 },
+      70: { buffer: closedHatBuf, rootKey: 70, sampleRate, baseGain: 0.75 },
+      75: { buffer: rimBuf, rootKey: 75, sampleRate, baseGain: 0.8 },
+      76: { buffer: rimBuf, rootKey: 76, sampleRate, baseGain: 0.8 },
+      77: { buffer: rimBuf, rootKey: 77, sampleRate, baseGain: 0.8 }
     };
 
     registeredPresets.set("gm_drums", {
@@ -1198,6 +1256,11 @@ export function getBuiltInSoundFontVoice(
     } else {
       const map = chosenPreset.samples as { [midiKey: number]: SoundFontSampleVoice };
       sample = map[midiNote];
+      if (!sample && bank === 128) {
+        // Return null for unmapped exotic percussion notes so fallback drum synthesis handles them cleanly
+        // instead of substituting a heavy kick drum!
+        return null;
+      }
       if (!sample) {
         const vals = Object.values(map);
         if (vals.length > 0) sample = vals[0];
