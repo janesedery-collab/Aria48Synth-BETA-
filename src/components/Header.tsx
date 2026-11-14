@@ -12,6 +12,7 @@ import { addRecentSong, RecentSong, saveSelectedSoundFont } from '../utils/recen
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { loadSoundFontIntoCoreAndLib, SOUNDFONT_ACCEPT_ATTR } from './AudioEngine';
 import { onAuthUserChanged, User } from '../utils/cloudSongsService';
+import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 
 interface HeaderProps {
   isPlaying: boolean;
@@ -36,7 +37,8 @@ interface HeaderProps {
     allPatterns?: any[][],
     audioBuffer?: AudioBuffer,
     channelSoundFonts?: { [channelId: number]: string },
-    rawMidiBuffer?: ArrayBuffer
+    rawMidiBuffer?: ArrayBuffer,
+    fileName?: string
   ) => void;
   onLoadTrack?: (tracksJson: string, bpm: number) => void;
   trackTitle?: string | null;
@@ -84,10 +86,19 @@ export default function Header({
   const [isCloudModalOpen, setIsCloudModalOpen] = useState(false);
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [sfBannerMessage, setSfBannerMessage] = useState<string | null>(null);
+  const [hasExportableMidi, setHasExportableMidi] = useState<boolean>(() => Boolean(WorkletSynthBridge.getCurrentBasicMIDI()));
+  const [loadedSeqFormat, setLoadedSeqFormat] = useState<string>(() => WorkletSynthBridge.getSequenceMetadata()?.format || '');
 
   useEffect(() => {
     const unsub = onAuthUserChanged(setAuthUser);
-    return () => unsub();
+    const unsubBridge = WorkletSynthBridge.subscribe(() => {
+      setHasExportableMidi(Boolean(WorkletSynthBridge.getCurrentBasicMIDI()));
+      setLoadedSeqFormat(WorkletSynthBridge.getSequenceMetadata()?.format || '');
+    });
+    return () => {
+      unsub();
+      unsubBridge();
+    };
   }, []);
 
   // Responsive & Non-blocking BPM state
@@ -365,7 +376,7 @@ export default function Header({
                  if (fileInput) fileInput.click();
                }}
                className="p-1 px-2.5 bg-zinc-900 border border-zinc-800 hover:border-cyan-500/50 text-cyan-400 hover:text-white hover:bg-cyan-950/30 rounded font-bold text-[9.5px] uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5"
-               title="Import tracking sequence directly to player matrix (.mid, .mod, .xm, .sid, .nsf, .sf2)"
+               title="Import tracking or MIDI sequence (.mid, .midi, .mod, .xm, .s3m, .rmi, .kar, .xmf, .it, .sid, .nsf, .sf2)"
              >
                <Upload size={11} className="text-cyan-400" />
                <span>Import Song</span>
@@ -395,9 +406,10 @@ export default function Header({
                id="player-tracker-file-file-btn"
                type="file" 
                className="hidden"
-               accept={`.mid,.midi,.mod,.xm,.s3m,.it,.sid,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
+               accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
                onChange={(e) => {
-                 const file = e.target.files?.[0];
+                 const inputEl = e.target;
+                 const file = inputEl.files?.[0];
                  if (file) {
                    const reader = new FileReader();
                    reader.onload = (event) => {
@@ -416,7 +428,8 @@ export default function Header({
                            result.allPatterns,
                            result.audioBuffer,
                            result.channelSoundFonts,
-                           result.rawMidiBuffer
+                           result.rawMidiBuffer,
+                           result.fileName || file.name
                          );
                          setIsPlaying(true);
                          addRecentSong({
@@ -435,6 +448,7 @@ export default function Header({
                          console.log("Failed parsing tracker sequence: " + err.message);
                        }
                      }
+                     inputEl.value = '';
                    };
                    reader.readAsArrayBuffer(file);
                  }
@@ -578,6 +592,25 @@ export default function Header({
             <Sliders size={12} className="text-indigo-400" />
             <span>MIDI Controller</span>
           </button>
+
+          {/* DIRECT .MID EXPORT FOR LOADED / CONVERTED TRACKER OR MIDI SEQUENCE */}
+          {hasExportableMidi && (
+            <button
+              id="header-export-mid-btn"
+              onClick={() => {
+                const exported = WorkletSynthBridge.exportCurrentBasicMIDIAsMid();
+                if (exported) {
+                  setSfBannerMessage(`Downloaded ${exported.filename} (${(exported.bytes / 1024).toFixed(1)} KB) via spessasynth_core!`);
+                  setTimeout(() => setSfBannerMessage(null), 4000);
+                }
+              }}
+              className="p-1.5 px-2.5 rounded-lg border border-emerald-600/60 bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300 hover:text-white font-bold transition-all text-[10px] uppercase cursor-pointer flex items-center gap-1.5 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+              title={`Serialize loaded ${loadedSeqFormat || 'sequence'} via BasicMIDI.writeMIDI() and download as Standard .MID`}
+            >
+              <Download size={12} className="text-emerald-400" />
+              <span>Export as .MID</span>
+            </button>
+          )}
 
           {/* EXPORT STUDIO (CHIPTUNES, VIDEOS, SOUNDFONTS) */}
           <button 

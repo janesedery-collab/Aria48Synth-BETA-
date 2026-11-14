@@ -19,6 +19,7 @@ import {
   VIDEO_QUALITY_PRESETS
 } from '../utils/videoRecorder';
 import { WebScopePreset } from '../engines/webscopeOscilloscope';
+import { LoadedSequenceMetadata, WorkletSynthBridge } from '../engines/workletSynthBridge';
 
 interface ExportStudioModalProps {
   isOpen: boolean;
@@ -95,6 +96,8 @@ export default function ExportStudioModal({
   const [videoStatus, setVideoStatus] = useState<VideoRecorderStatus>(VideoRecorder.getStatus());
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [hasBasicMidi, setHasBasicMidi] = useState<boolean>(() => Boolean(WorkletSynthBridge.getCurrentBasicMIDI()));
+  const [sequenceMeta, setSequenceMeta] = useState<LoadedSequenceMetadata | null>(() => WorkletSynthBridge.getSequenceMetadata());
 
   useEffect(() => {
     const unsub = VideoRecorder.onStatusChange((status) => {
@@ -106,7 +109,14 @@ export default function ExportStudioModal({
         setExportError(status.errorMessage);
       }
     });
-    return () => unsub();
+    const unsubBridge = WorkletSynthBridge.subscribe(() => {
+      setHasBasicMidi(Boolean(WorkletSynthBridge.getCurrentBasicMIDI()));
+      setSequenceMeta(WorkletSynthBridge.getSequenceMetadata());
+    });
+    return () => {
+      unsub();
+      unsubBridge();
+    };
   }, []);
 
   if (!isOpen) return null;
@@ -283,6 +293,45 @@ export default function ExportStudioModal({
               className="text-red-400 hover:text-white text-[10px] underline cursor-pointer shrink-0"
             >
               Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* 0. CONVERTED TRACKER / BASICMIDI -> STANDARD .MID EXPORT */}
+        {hasBasicMidi && (
+          <div className="bg-emerald-950/25 border border-emerald-500/45 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 font-black text-[9px] uppercase">
+                  {sequenceMeta?.format || 'MIDI'}
+                </span>
+                <span className="text-xs font-bold text-white truncate">
+                  {sequenceMeta?.title || trackTitle || 'Loaded Sequence'}
+                </span>
+              </div>
+              <p className="text-[10px] text-zinc-400 font-sans mt-1">
+                {sequenceMeta?.isTrackerConverted
+                  ? `Converted from Amiga/PC Tracker via spessasynth_core (${sequenceMeta.activeChannels.length} active CH, ${sequenceMeta.samplePresets.length} sample presets).`
+                  : 'Serialize loaded sequence via currentBasicMIDI.writeMIDI() into a standard .MID file.'}
+              </p>
+            </div>
+
+            <button
+              id="export-studio-mid-btn"
+              type="button"
+              onClick={() => {
+                const res = WorkletSynthBridge.exportCurrentBasicMIDIAsMid();
+                if (res) {
+                  setExportError(null);
+                  setDownloadSuccess(`Exported Standard MIDI: ${res.filename} (${(res.bytes / 1024).toFixed(1)} KB)`);
+                } else {
+                  setExportError('No BasicMIDI sequence is currently loaded.');
+                }
+              }}
+              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shrink-0 cursor-pointer shadow-[0_0_15px_rgba(16,185,129,0.25)] transition"
+            >
+              <Download size={14} />
+              <span>Export as .MID</span>
             </button>
           </div>
         )}

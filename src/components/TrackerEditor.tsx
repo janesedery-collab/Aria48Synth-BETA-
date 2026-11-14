@@ -26,6 +26,7 @@ import { parseChiptuneFile } from '../utils/chiptuneParsers';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import ExportStudioModal from './ExportStudioModal';
 import SpessaMidiMixerPanel from './SpessaMidiMixerPanel';
+import { SequenceMetadataStrip } from './WebMidiDeckPanel';
 import { addRecentSong } from '../utils/recentSongsManager';
 
 interface TrackerEditorProps {
@@ -59,7 +60,8 @@ interface TrackerEditorProps {
     allPatterns?: any[][], 
     audioBuffer?: AudioBuffer, 
     channelSoundFonts?: { [channelId: number]: string },
-    rawMidiBuffer?: ArrayBuffer
+    rawMidiBuffer?: ArrayBuffer,
+    fileName?: string
   ) => void;
 }
 
@@ -196,110 +198,118 @@ export default function TrackerEditor({
     }
   };
 
+  const importSelectedFile = (selected: File) => {
+    const extension = selected.name.includes('.')
+      ? selected.name.substring(selected.name.lastIndexOf('.')).toLowerCase()
+      : '';
+
+    if (isSoundFontFileName(selected.name)) {
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        if (event.target?.result instanceof ArrayBuffer) {
+          try {
+            const { soundFont: spessaSf } = await loadSoundFontIntoCoreAndLib(event.target.result, selected.name);
+            saveSelectedSoundFont(spessaSf.id);
+            setSoundFontInstruments(getAvailableSoundFontInstruments());
+            setImportFeedback({
+              success: true,
+              msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.format || 'SoundBank'}, ${spessaSf.instrumentCount} presets) via spressasynth_core -> spressasynth_lib!`
+            });
+            setTimeout(() => {
+              setIsImportModalOpen(false);
+              setImportFeedback(null);
+            }, 2500);
+          } catch (err: any) {
+            setImportFeedback({
+              success: false,
+              msg: `SoundFont parsing error: ${err.message || "Invalid SoundFont file"}`
+            });
+          }
+        }
+      };
+      reader.readAsArrayBuffer(selected);
+      return;
+    }
+
+    if (extension === '.json') {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        if (event.target?.result && typeof event.target.result === 'string') {
+          handleImportJson(event.target.result);
+        }
+      };
+      reader.readAsText(selected);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result instanceof ArrayBuffer) {
+        try {
+          const result = parseChiptuneFile(selected.name, event.target.result);
+
+          if (result.allPatterns && setSongPatterns) {
+            setSongPatterns(result.allPatterns);
+          }
+          setPatterns(result.patterns);
+          if (setCurrentPatternIndex) setCurrentPatternIndex(0);
+
+          if (onImportTrack) {
+            onImportTrack(
+              result.duration,
+              result.title,
+              result.chipType,
+              result.bpm,
+              result.octaveRange,
+              result.channelsCount,
+              result.allPatterns,
+              result.audioBuffer,
+              result.channelSoundFonts,
+              result.rawMidiBuffer,
+              result.fileName || selected.name
+            );
+          }
+          addRecentSong({
+            title: result.title || selected.name,
+            chipType: result.chipType,
+            duration: result.duration,
+            bpm: result.bpm,
+            channelsCount: result.channelsCount,
+            octaveRange: result.octaveRange,
+            patterns: result.patterns,
+            allPatterns: result.allPatterns,
+            channelSoundFonts: result.channelSoundFonts
+          });
+          const durationInfo = result.duration ? ` (Length: ${result.duration})` : "";
+          const patsCount = result.allPatterns?.length || 1;
+          setImportFeedback({
+            success: true,
+            msg: `Imported "${result.title || selected.name}"${durationInfo} [${result.chipType}] with ${patsCount} sequential patterns & ${result.channelsCount || 8} channels!`
+          });
+          if (result.channelsCount && result.channelsCount > 8) {
+            setSelectedBank('all');
+          }
+          setTimeout(() => {
+            setIsImportModalOpen(false);
+            setImportFeedback(null);
+            setPastedJson('');
+          }, 2500);
+        } catch (err: any) {
+          setImportFeedback({
+            success: false,
+            msg: `Failed translating sequence: ${err.message || 'Incorrect format layout.'}`
+          });
+        }
+      }
+    };
+    reader.readAsArrayBuffer(selected);
+  };
+
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const selected = e.target.files[0];
-      const extension = selected.name.substring(selected.name.lastIndexOf('.')).toLowerCase();
-
-      if (isSoundFontFileName(selected.name)) {
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-          if (event.target?.result instanceof ArrayBuffer) {
-            try {
-              // Feed directly into spressasynth_core-master.zip -> spressasynth_lib-master.zip
-              const { soundFont: spessaSf } = await loadSoundFontIntoCoreAndLib(event.target.result, selected.name);
-              saveSelectedSoundFont(spessaSf.id);
-              setSoundFontInstruments(getAvailableSoundFontInstruments());
-              setImportFeedback({
-                success: true,
-                msg: `Loaded SoundFont "${spessaSf.name}" (${spessaSf.format || 'SoundBank'}, ${spessaSf.instrumentCount} presets) via spressasynth_core-master.zip -> spressasynth_lib!`
-              });
-              setTimeout(() => {
-                setIsImportModalOpen(false);
-                setImportFeedback(null);
-              }, 2500);
-            } catch (err: any) {
-              setImportFeedback({
-                success: false,
-                msg: `SoundFont parsing error: ${err.message || "Invalid SoundFont file"}`
-              });
-            }
-          }
-        };
-        reader.readAsArrayBuffer(selected);
-        return;
-      }
-
-      if (extension === '.json') {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          if (event.target?.result && typeof event.target.result === 'string') {
-            handleImportJson(event.target.result);
-          }
-        };
-        reader.readAsText(selected);
-      } else {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          if (event.target?.result instanceof ArrayBuffer) {
-            try {
-              const result = parseChiptuneFile(selected.name, event.target.result);
-              
-              if (result.allPatterns && setSongPatterns) {
-                setSongPatterns(result.allPatterns);
-              }
-              setPatterns(result.patterns);
-              if (setCurrentPatternIndex) setCurrentPatternIndex(0);
-
-              if (onImportTrack) {
-                onImportTrack(
-                  result.duration, 
-                  result.title, 
-                  result.chipType, 
-                  result.bpm, 
-                  result.octaveRange, 
-                  result.channelsCount,
-                  result.allPatterns,
-                  result.audioBuffer,
-                  result.channelSoundFonts,
-                  result.rawMidiBuffer
-                );
-              }
-              addRecentSong({
-                title: result.title || selected.name,
-                chipType: result.chipType,
-                duration: result.duration,
-                bpm: result.bpm,
-                channelsCount: result.channelsCount,
-                octaveRange: result.octaveRange,
-                patterns: result.patterns,
-                allPatterns: result.allPatterns,
-                channelSoundFonts: result.channelSoundFonts
-              });
-              const durationInfo = result.duration ? ` (Length: ${result.duration})` : "";
-              const patsCount = result.allPatterns?.length || 1;
-              setImportFeedback({ 
-                success: true, 
-                msg: `Imported "${result.title || selected.name}"${durationInfo} [${result.chipType}] with ${patsCount} sequential patterns & ${result.channelsCount || 8} channels!` 
-              });
-              if (result.channelsCount && result.channelsCount > 8) {
-                setSelectedBank('all');
-              }
-              setTimeout(() => {
-                setIsImportModalOpen(false);
-                setImportFeedback(null);
-                setPastedJson('');
-              }, 2500);
-            } catch (err: any) {
-              setImportFeedback({ 
-                success: false, 
-                msg: `Failed translating sequence: ${err.message || 'Incorrect format layout.'}` 
-              });
-            }
-          }
-        };
-        reader.readAsArrayBuffer(selected);
-      }
+    const inputEl = e.target;
+    if (inputEl.files && inputEl.files[0]) {
+      importSelectedFile(inputEl.files[0]);
+      inputEl.value = '';
     }
   };
 
@@ -339,13 +349,21 @@ export default function TrackerEditor({
             const updatedInstruments = getAvailableSoundFontInstruments();
             setSoundFontInstruments(updatedInstruments);
 
-            if (setChannels && channels && updatedInstruments.length > 0) {
+            const customInsts = updatedInstruments.filter(i => i.id.startsWith('core_sf_'));
+            if (setChannels && channels && customInsts.length > 0) {
               setChannels(prev => prev.map((ch, idx) => {
-                const inst = updatedInstruments[idx % updatedInstruments.length];
+                const isDrum = idx === 9 || ch.soundFontPreset === 'gm_drums' || ch.soundFontPreset === 'gm_electronic_drums';
+                const currentInst = updatedInstruments.find(i => i.id === ch.soundFontPreset);
+                const targetProg = currentInst?.program ?? (idx % 16);
+                const matched =
+                  (isDrum ? customInsts.find(i => i.bank === 128 && i.program === 0) || customInsts.find(i => i.bank === 128) : undefined) ||
+                  customInsts.find(i => i.bank !== 128 && i.program === targetProg) ||
+                  customInsts.find(i => i.bank !== 128) ||
+                  customInsts[idx % customInsts.length];
                 return {
                   ...ch,
                   chip: 'General MIDI (SoundFont)',
-                  soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                  soundFontPreset: matched ? matched.id : ch.soundFontPreset
                 };
               }));
             }
@@ -645,7 +663,7 @@ export default function TrackerEditor({
           <button 
             onClick={() => setIsImportModalOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-950/50 text-cyan-400 border border-cyan-800/40 hover:bg-cyan-900/60 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm"
-            title="Import MIDI, MOD, XM, S3M, IT, SID, NSF, SF2 into tracking matrix"
+            title="Import MIDI (.mid/.rmi/.kar/.xmf), MOD, XM, S3M, IT, SID, NSF, SF2 into tracking matrix"
           >
             <Upload size={12} />
             <span>Universal Import</span>
@@ -962,6 +980,9 @@ export default function TrackerEditor({
         </div>
       )}
 
+      {/* CONVERTED TRACKER / BASICMIDI SEQUENCE METADATA STRIP */}
+      <SequenceMetadataStrip />
+
       {/* CHANNEL BANK SELECTOR BAR */}
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 p-2 bg-zinc-900/70 border border-zinc-800 rounded-lg text-xs">
         <div className="flex items-center gap-1.5">
@@ -1221,6 +1242,15 @@ export default function TrackerEditor({
               </label>
 
               <div 
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const dropped = e.dataTransfer?.files?.[0];
+                  if (dropped) {
+                    importSelectedFile(dropped);
+                  }
+                }}
                 onClick={() => fileInputRef2.current?.click()}
                 className="border-2 border-dashed border-zinc-800 bg-zinc-950/40 rounded-lg p-6 flex flex-col items-center justify-center gap-2.5 cursor-pointer hover:border-cyan-500/40 hover:bg-zinc-900/10 transition-all text-center"
               >
@@ -1228,7 +1258,7 @@ export default function TrackerEditor({
                   type="file"
                   ref={fileInputRef2}
                   onChange={handleFileImport}
-                  accept={`.mid,.midi,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                  accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                   className="hidden"
                 />
                 <Disc3 size={28} className="text-cyan-400 animate-spin-slow" />
@@ -1236,7 +1266,7 @@ export default function TrackerEditor({
                   Choose Music or SoundFont File
                 </span>
                 <span className="text-[9px] text-zinc-500 font-sans max-w-sm leading-normal">
-                  Standard MIDI (.mid), ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat), WAV, MP3, and JSON.
+                  Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat), WAV, MP3, and JSON.
                 </span>
               </div>
 

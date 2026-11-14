@@ -156,8 +156,9 @@ export function setDefaultSoundFontId(id: string): void {
   saveActiveSoundFontCookie(id);
   if (SpessaSynth.getLoadedSoundFonts().some(s => s.id === id)) {
     SpessaSynth.setActiveSoundFont(id);
+  } else {
+    void WorkletSynthBridge.setActiveSoundBank(id);
   }
-  WorkletSynthBridge.setActiveSoundBank(id);
   if (!isRestoringSoundFonts && id !== prevActive) {
     const sfName = SpessaSynth.getLoadedSoundFonts().find(s => s.id === id)?.name || id;
     triggerSoundFontSwapLoading(sfName, id);
@@ -191,11 +192,13 @@ export async function deleteSavedSoundFont(id: string): Promise<void> {
     lastTriggeredSfSwapId = nextFallbackId;
   }
 
-  SpessaSynth.removeSoundFont(id);
   await WorkletSynthBridge.removeSoundBank(id);
+  const removedFromCore = SpessaSynth.removeSoundFont(id);
 
   const nextActive = SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm';
-  WorkletSynthBridge.setActiveSoundBank(nextActive);
+  if (!removedFromCore) {
+    await WorkletSynthBridge.setActiveSoundBank(nextActive);
+  }
   saveActiveSoundFontCookie(nextActive);
 
   if (wasDefault) {
@@ -220,10 +223,30 @@ export async function loadSoundFontIntoCoreAndLib(
     try { await ctx.resume(); } catch (e) {}
   }
   const bufferCopy = arrayBuffer.slice(0);
-  const { soundFont, coreResult } = await SpessaSynth.loadSoundFontAsync(arrayBuffer, fileName, ctx);
+  // Suppress intermediate Worklet switch until loadSoundBank stores bufferCopy cleanly
+  const prevRestoring = isRestoringSoundFonts;
+  isRestoringSoundFonts = true;
+  let soundFont: ReturnType<typeof SpessaSynth.loadSoundFontAsync> extends Promise<infer R> ? R extends { soundFont: infer S } ? S : any : any;
+  let coreResult: any;
+  try {
+    const res = await SpessaSynth.loadSoundFontAsync(arrayBuffer, fileName, ctx);
+    soundFont = res.soundFont;
+    coreResult = res.coreResult;
+  } finally {
+    isRestoringSoundFonts = prevRestoring;
+  }
+
   try {
     await WorkletSynthBridge.loadSoundBank(bufferCopy, soundFont.id, true);
   } catch (e) {}
+
+  if (!prevRestoring && soundFont?.id) {
+    saveActiveSoundFontCookie(soundFont.id);
+    if (soundFont.id !== lastTriggeredSfSwapId) {
+      triggerSoundFontSwapLoading(soundFont.name || soundFont.id, soundFont.id);
+    }
+  }
+
   if (!options?.skipCookieSave) {
     try {
       await saveSoundFontToCookiesAndCache(fileName, arrayBuffer, soundFont.id, {
@@ -278,7 +301,7 @@ export function restoreSavedSoundFontsFromCookies(): Promise<void> {
 
       if (targetId) {
         SpessaSynth.setActiveSoundFont(targetId);
-        WorkletSynthBridge.setActiveSoundBank(targetId);
+        await WorkletSynthBridge.setActiveSoundBank(targetId);
         lastTriggeredSfSwapId = targetId;
       } else {
         lastTriggeredSfSwapId = SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm';
@@ -294,7 +317,8 @@ if (typeof window !== 'undefined') {
   SpessaSynth.onSoundFontChange((fonts, activeId) => {
     if (!isRestoringSoundFonts && activeId) {
       saveActiveSoundFontCookie(activeId);
-      WorkletSynthBridge.setActiveSoundBank(activeId);
+      SpessaSynth.allSoundOff();
+      void WorkletSynthBridge.setActiveSoundBank(activeId);
       if (activeId !== lastTriggeredSfSwapId) {
         const sfName = fonts.find(f => f.id === activeId)?.name || activeId;
         triggerSoundFontSwapLoading(sfName, activeId);
@@ -446,6 +470,9 @@ function cancelAllScheduledNotesAndSilence(options?: { keepMidiPlayingFlag?: boo
 function shouldUseWorkletPrimary(): boolean {
   const activeSf = SpessaSynth.getActiveSoundFont();
   if (activeSf?.id === 'spessa-chiptune-sf2') return false;
+  if (activeSf?.isCustom && !WorkletSynthBridge.isActiveBankSupportedByWorklet()) {
+    return false;
+  }
   return WorkletSynthBridge.hasSoundBankReady();
 }
 
@@ -718,12 +745,21 @@ export function getSyntheticMasterGain(): GainNode | null {
   return syntheticMasterGain;
 }
 
+let useWorkletSequencerActive = false;
+let activeSequenceFileNameCache = 'sequence.mid';
+
 /**
- * Dynamically scale WebAudioTinySynth & SpessaSynth MIDI playback speed according to BPM controller.
- * Scales `song.timebase` and recomputes `tick2Time` so both immediate ticks and subsequent
- * 0xff51 tempo meta-events remain locked to the user's chosen BPM without restarting playback.
+ * Dynamically scale SpessaSynth Sequencer & WebAudioTinySynth MIDI playback speed according to BPM controller.
  */
 export function setMidiTempoBpm(targetBpm: number, baseSongBpm?: number) {
+  if (useWorkletSequencerActive) {
+    const meta = WorkletSynthBridge.getSequenceMetadata();
+    const baseBpm = Math.max(30, meta?.bpm || baseSongBpm || 125);
+    const clampedTarget = Math.max(30, Math.min(320, Number(targetBpm) || baseBpm));
+    const rate = Math.max(0.25, Math.min(4.0, clampedTarget / baseBpm));
+    WorkletSynthBridge.setSequencerPlaybackRate(rate);
+  }
+
   const synth = tinySynthInstance;
   if (!synth || !synth.song) return;
 
@@ -769,9 +805,15 @@ function computeMidiBaseDurationSec(synth: any): number {
   return Math.max(1, total);
 }
 
-export function syncInitialMidiInstruments(arrayBuffer: ArrayBuffer) {
+export function syncInitialMidiInstruments(arrayBuffer: ArrayBuffer, fileName = 'sequence.mid') {
   try {
-    const midi = BasicMIDI.fromArrayBuffer(arrayBuffer.slice(0));
+    activeSequenceFileNameCache = fileName || 'sequence.mid';
+    const midi = BasicMIDI.fromArrayBuffer(arrayBuffer.slice(0), fileName);
+    // Embedded SoundBanks (MOD/XM/S3M) manage their own auto-generated sample presets via Sequencer
+    if (midi?.embeddedSoundBank && midi.embeddedSoundBank.byteLength > 12) {
+      return;
+    }
+
     const bankMSB = new Int16Array(16).fill(0);
     const bankLSB = new Int16Array(16).fill(0);
     const firstProg = new Int16Array(16).fill(-1);
@@ -809,18 +851,95 @@ export function syncInitialMidiInstruments(arrayBuffer: ArrayBuffer) {
   }
 }
 
+function playMidiViaTinySynthFallback(
+  arrayBuffer: ArrayBuffer,
+  onEnded?: () => void,
+  targetBpm?: number,
+  baseSongBpm?: number,
+  initialSeekRatio = 0
+) {
+  const synth = getTinySynth();
+  if (!synth) return;
+  hookTinySynthEvents(synth);
+
+  SpessaSynth.sendGMReset(true);
+  WorkletSynthBridge.stopAll(true);
+  syncInitialMidiInstruments(arrayBuffer, activeSequenceFileNameCache);
+
+  synth.loadMIDI(arrayBuffer);
+  if (synth.song) {
+    (synth as any).__ariaBaseTimebase = synth.song.timebase || 1920;
+    const firstTempoEv = Array.isArray(synth.song.ev)
+      ? synth.song.ev.find((ev: any) => ev?.m?.[0] === 0xff51)
+      : null;
+    (synth as any).__ariaBaseBpm = baseSongBpm || firstTempoEv?.m?.[1] || synth.song.tempo || 120;
+  }
+
+  const status = synth.getPlayStatus?.();
+  midiMaxTickCache = Math.max(1, status?.maxTick || synth.maxTick || 1);
+  midiBaseDurationSecCache = computeMidiBaseDurationSec(synth);
+
+  if (initialSeekRatio > 0) {
+    const startTick = Math.round(Math.max(0, Math.min(0.995, initialSeekRatio)) * midiMaxTickCache);
+    suppressHookForward = true;
+    try {
+      synth.locateMIDI?.(startTick);
+    } finally {
+      suppressHookForward = false;
+    }
+  }
+
+  synth.playMIDI();
+  if (targetBpm) {
+    setMidiTempoBpm(targetBpm, baseSongBpm);
+  }
+
+  if (initialSeekRatio > 0 && Array.isArray(synth.pg)) {
+    for (let ch = 0; ch < 16; ch++) {
+      const prog = synth.pg[ch];
+      if (typeof prog === 'number') {
+        SpessaSynth.setChannelProgram(ch, prog);
+        if (!WorkletSynthBridge.getChannelState(ch).presetLocked) {
+          WorkletSynthBridge.programChange(ch, prog);
+        }
+      }
+    }
+  }
+
+  isMidiPlayingInternal = true;
+
+  if (midiPlaybackWatchdogTimer) clearInterval(midiPlaybackWatchdogTimer);
+  if (midiEndTailTimer) {
+    clearTimeout(midiEndTailTimer);
+    midiEndTailTimer = null;
+  }
+  midiPlaybackWatchdogTimer = setInterval(() => {
+    const curStatus = synth.getPlayStatus?.();
+    if (curStatus && !curStatus.play && isMidiPlayingInternal) {
+      isMidiPlayingInternal = false;
+      clearInterval(midiPlaybackWatchdogTimer);
+      midiPlaybackWatchdogTimer = null;
+      midiEndTailTimer = setTimeout(() => {
+        midiEndTailTimer = null;
+        SpessaSynth.allNotesOff();
+        onEnded?.();
+      }, 320);
+    }
+  }, 150);
+}
+
 /**
- * Phase-locked Synchronized MIDI Player
- * TinySynth's master sequencer dynamically parses delta ticks, multi-tracks, and tempo changes (0xff51).
- * Both SpessaSynth and WebAudioTinySynth receive all events simultaneously on the shared AudioContext timeline,
- * eliminating sound engine delay, desync on tempo changes, and phasing jitter!
+ * Unified SpessaSynth Sequencer + WorkletSynthesizer Player
+ * Supports Standard MIDI (.mid/.midi/.kar/.rmi/.xmf) AND converted Amiga/PC Tracker modules (.mod/.xm/.s3m)
+ * parsed via spessasynth_core BasicMIDI, with automatic fallback to TinySynth for plain SMF if worklet is unavailable.
  */
 export function playMidiBuffer(
   arrayBuffer: ArrayBuffer,
   onEnded?: () => void,
   targetBpm?: number,
   baseSongBpm?: number,
-  initialSeekRatio = 0
+  initialSeekRatio = 0,
+  fileName?: string
 ) {
   try {
     stopMidiPlayback();
@@ -828,89 +947,62 @@ export function playMidiBuffer(
 
     const ctx = getAudioContext();
     if (!ctx) return;
-    if (ctx.state === 'suspended') ctx.resume();
+    if (ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {});
+    }
 
-    const synth = getTinySynth();
-    if (synth) {
-      hookTinySynthEvents(synth);
+    const resolvedFileName = fileName || WorkletSynthBridge.getCurrentOriginalFileName() || activeSequenceFileNameCache || 'sequence.mid';
+    activeSequenceFileNameCache = resolvedFileName;
 
-      // Reset SpessaSynth channel states cleanly (preserving user oscilloscope mutes) before launching playback
-      SpessaSynth.sendGMReset(true);
-      WorkletSynthBridge.stopAll(true);
-      void WorkletSynthBridge.init(ctx);
-      syncInitialMidiInstruments(arrayBuffer);
+    const genAtStart = ++midiPlaybackGeneration;
+    isMidiPlayingInternal = true;
+    useWorkletSequencerActive = true;
 
-      // Load SMF binary and snapshot original MIDI timebase/tempo for live BPM scaling
-      synth.loadMIDI(arrayBuffer);
-      if (synth.song) {
-        (synth as any).__ariaBaseTimebase = synth.song.timebase || 1920;
-        const firstTempoEv = Array.isArray(synth.song.ev)
-          ? synth.song.ev.find((ev: any) => ev?.m?.[0] === 0xff51)
-          : null;
-        (synth as any).__ariaBaseBpm = baseSongBpm || firstTempoEv?.m?.[1] || synth.song.tempo || 120;
-      }
+    const meta = WorkletSynthBridge.getSequenceMetadata();
+    const baseBpm = Math.max(30, meta?.bpm || baseSongBpm || 125);
+    const clampedTarget = Math.max(30, Math.min(320, Number(targetBpm) || baseBpm));
+    const rate = Math.max(0.25, Math.min(4.0, clampedTarget / baseBpm));
 
-      const status = synth.getPlayStatus?.();
-      midiMaxTickCache = Math.max(1, status?.maxTick || synth.maxTick || 1);
-      midiBaseDurationSecCache = computeMidiBaseDurationSec(synth);
+    SpessaSynth.sendGMReset(true);
+    WorkletSynthBridge.stopAll(true);
 
-      if (initialSeekRatio > 0) {
-        const startTick = Math.round(Math.max(0, Math.min(0.995, initialSeekRatio)) * midiMaxTickCache);
-        suppressHookForward = true;
-        try {
-          synth.locateMIDI?.(startTick);
-        } finally {
-          suppressHookForward = false;
-        }
-      }
+    void WorkletSynthBridge.init(ctx).then(async () => {
+      if (midiPlaybackGeneration !== genAtStart || !isMidiPlayingInternal) return;
 
-      synth.playMIDI();
-      if (targetBpm) {
-        setMidiTempoBpm(targetBpm, baseSongBpm);
-      }
-
-      // Sync accumulated channel programs on seeked start
-      if (initialSeekRatio > 0 && Array.isArray(synth.pg)) {
-        for (let ch = 0; ch < 16; ch++) {
-          const prog = synth.pg[ch];
-          if (typeof prog === 'number') {
-            SpessaSynth.setChannelProgram(ch, prog);
-            if (!WorkletSynthBridge.getChannelState(ch).presetLocked) {
-              WorkletSynthBridge.programChange(ch, prog);
-            }
-          }
-        }
-      }
-
-      isMidiPlayingInternal = true;
-
-      // Watchdog interval detects when master sequencer reaches end of song
-      if (midiPlaybackWatchdogTimer) clearInterval(midiPlaybackWatchdogTimer);
-      if (midiEndTailTimer) {
-        clearTimeout(midiEndTailTimer);
-        midiEndTailTimer = null;
-      }
-      midiPlaybackWatchdogTimer = setInterval(() => {
-        const curStatus = synth.getPlayStatus?.();
-        if (curStatus && !curStatus.play && isMidiPlayingInternal) {
-          isMidiPlayingInternal = false;
-          clearInterval(midiPlaybackWatchdogTimer);
-          midiPlaybackWatchdogTimer = null;
-          // Allow TinySynth's 200ms lookahead buffer + final note release tail to finish naturally
-          midiEndTailTimer = setTimeout(() => {
-            midiEndTailTimer = null;
+      const started = await WorkletSynthBridge.playSequencerFromBuffer(
+        arrayBuffer,
+        resolvedFileName,
+        initialSeekRatio,
+        rate,
+        () => {
+          if (midiPlaybackGeneration === genAtStart) {
+            isMidiPlayingInternal = false;
+            useWorkletSequencerActive = false;
             SpessaSynth.allNotesOff();
             onEnded?.();
-          }, 320);
+          }
         }
-      }, 150);
-    }
+      );
+
+      if (!started && midiPlaybackGeneration === genAtStart && isMidiPlayingInternal) {
+        useWorkletSequencerActive = false;
+        playMidiViaTinySynthFallback(arrayBuffer, onEnded, targetBpm, baseSongBpm, initialSeekRatio);
+      }
+    });
   } catch (err) {
     console.log("MIDI playback error:", err);
   }
 }
 
 export function seekMidiPlayback(ratio0to1: number, targetBpm?: number, baseSongBpm?: number) {
+  if (useWorkletSequencerActive) {
+    WorkletSynthBridge.seekSequencer(ratio0to1);
+    if (targetBpm) {
+      setMidiTempoBpm(targetBpm, baseSongBpm);
+    }
+    return;
+  }
+
   const synth = tinySynthInstance;
   if (!synth || !synth.song) return;
   const clamped = Math.max(0, Math.min(0.995, ratio0to1));
@@ -952,6 +1044,8 @@ export function seekMidiPlayback(ratio0to1: number, targetBpm?: number, baseSong
 export function stopMidiPlayback() {
   try {
     isMidiPlayingInternal = false;
+    useWorkletSequencerActive = false;
+    WorkletSynthBridge.pauseSequencer();
     if (midiPlaybackWatchdogTimer) {
       clearInterval(midiPlaybackWatchdogTimer);
       midiPlaybackWatchdogTimer = null;
@@ -965,6 +1059,15 @@ export function stopMidiPlayback() {
 }
 
 export function getMidiPlayStatus(): { play: boolean; curTick: number; maxTick: number } {
+  if (useWorkletSequencerActive) {
+    const seqProg = WorkletSynthBridge.getSequencerProgress(1);
+    return {
+      play: isMidiPlayingInternal || seqProg.play,
+      curTick: Math.round(seqProg.ratio * 10000),
+      maxTick: 10000
+    };
+  }
+
   if (tinySynthInstance) {
     const st = tinySynthInstance.getPlayStatus?.();
     if (st) {
@@ -982,6 +1085,22 @@ export function getMidiPlaybackProgress(targetBpm?: number, baseSongBpm?: number
   elapsedSeconds: number;
   totalSeconds: number;
 } {
+  if (useWorkletSequencerActive) {
+    const meta = WorkletSynthBridge.getSequenceMetadata();
+    const baseBpm = Math.max(30, meta?.bpm || baseSongBpm || 125);
+    const curTargetBpm = Math.max(30, Math.min(320, targetBpm || baseBpm));
+    const rate = Math.max(0.25, Math.min(4.0, curTargetBpm / baseBpm));
+    const seqProg = WorkletSynthBridge.getSequencerProgress(rate);
+    return {
+      play: isMidiPlayingInternal || seqProg.play,
+      curTick: Math.round(seqProg.ratio * 10000),
+      maxTick: 10000,
+      ratio: seqProg.ratio,
+      elapsedSeconds: seqProg.elapsedSeconds,
+      totalSeconds: seqProg.totalSeconds
+    };
+  }
+
   const st = getMidiPlayStatus();
   const maxTick = Math.max(1, st.maxTick || midiMaxTickCache || 1);
   const curTick = Math.max(0, Math.min(maxTick, st.curTick || 0));

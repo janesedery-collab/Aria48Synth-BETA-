@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Cable, Play, FileCode, Check, Copy } from 'lucide-react';
+import WebMidiDeckPanel from './WebMidiDeckPanel';
+import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 
 interface HardwareConnectionScriptProps {
   hardwareConnected: boolean;
@@ -23,6 +25,15 @@ export default function HardwareConnectionScript({ hardwareConnected, setHardwar
       setDeviceStatus('Disconnected');
     }
   }, [hardwareConnected]);
+
+  useEffect(() => {
+    const unsubLog = WorkletSynthBridge.onLog((msg) => {
+      if (msg.includes('WEB MIDI') || msg.includes('MIDI IN') || msg.includes('MIDI OUT') || msg.includes('SysEx') || msg.includes('Sandbox')) {
+        setLogs((prev) => [...prev.slice(-80), msg]);
+      }
+    });
+    return () => unsubLog();
+  }, []);
 
   const handleConnect = async () => {
     try {
@@ -101,13 +112,18 @@ void loop() {
 }`;
 
   return (
-    <div className="h-full flex flex-col gap-4 font-mono select-none">
-      <div className="mb-2 flex items-center gap-2">
+    <div className="h-full flex flex-col gap-4 font-mono select-none overflow-y-auto custom-scrollbar pr-1">
+      <div className="flex items-center gap-2">
         <Cable className="text-orange-500 w-5 h-5"/>
-        <h2 className="text-sm font-bold uppercase tracking-wider text-white">External Physical Chip Bridge</h2>
+        <h2 className="text-sm font-bold uppercase tracking-wider text-white">External Physical Chip &amp; Web MIDI Hardware Deck</h2>
       </div>
+
+      {/* FULL WEB MIDI INPUT & OUTPUT HARDWARE DECK */}
+      <WebMidiDeckPanel
+        onStatusLog={(msg) => setLogs((prev) => [...prev.slice(-80), msg])}
+      />
       
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 overflow-hidden min-h-0">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 min-h-[340px]">
         
         {/* BRIDGE MANAGER */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col gap-4">

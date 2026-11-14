@@ -35,11 +35,11 @@ import {
   getDefaultSoundFontId,
   onDefaultSoundFontChange,
   setDefaultSoundFontId,
-  setMidiChannelMuted,
-  triggerSoundFontSwapLoading
+  setMidiChannelMuted
 } from './AudioEngine';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { getSavedSelectedSoundFont, saveSelectedSoundFont } from '../utils/recentSongsManager';
+import WebMidiDeckPanel, { SequenceMetadataStrip } from './WebMidiDeckPanel';
 
 interface SpessaMidiMixerPanelProps {
   compact?: boolean;
@@ -398,9 +398,6 @@ export default function SpessaMidiMixerPanel({
   const handleSoundFontSwitch = (sfId: string) => {
     setActiveSoundFontId(sfId);
     SpessaSynth.setActiveSoundFont(sfId);
-    WorkletSynthBridge.setActiveSoundBank(sfId);
-    const bankName = loadedSoundFonts.find(b => b.id === sfId)?.name || sfId;
-    triggerSoundFontSwapLoading(bankName, sfId);
     saveSelectedSoundFont(sfId || getSavedSelectedSoundFont());
     onSelectSoundFont?.(sfId);
     setSystemLog(`Active SoundFont switched to "${sfId}"`);
@@ -567,6 +564,12 @@ export default function SpessaMidiMixerPanel({
           </span>
         </div>
       </div>
+
+      {/* CONVERTED TRACKER / SEQUENCE METADATA & AUTO-GENERATED SAMPLE PRESETS */}
+      <SequenceMetadataStrip compact={compact} />
+
+      {/* WEB MIDI INPUT & OUTPUT HARDWARE CONTROLLER */}
+      <WebMidiDeckPanel compact={compact} onStatusLog={(msg) => setSystemLog(msg)} />
 
       {/* CHANNEL MATRIX SELECTOR (PRIMARY CH 1-16 + ARIA48 CH 17-48 ROUTING) */}
       <div>

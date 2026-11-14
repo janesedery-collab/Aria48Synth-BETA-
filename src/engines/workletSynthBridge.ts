@@ -12,18 +12,69 @@
  *   GS/XG Tone Shaping / Envelopes / Vibrato / Effects, and GM/GS/XG SysEx Resets.
  */
 
-import { WorkletSynthesizer } from 'spessasynth_lib';
+import { Sequencer, WorkletSynthesizer } from 'spessasynth_lib';
 import {
+  BasicMIDI,
   BasicSoundBank,
   InterpolationTypes,
   MIDIController,
-  MIDIPatchFull
+  MIDIPatchFull,
+  SoundBankLoader
 } from 'spessasynth_core';
 import { SoundFontInterpolationMode } from '../types';
 import { DEFAULT_GM_PROGRAMS } from './spressasynthLib';
 import { getInterpolationMode } from './soundFontInterpolation';
 
 export type VelocityCurveType = 'linear' | 'soft' | 'hard' | 'fixed';
+
+export interface SequenceSamplePresetInfo {
+  name: string;
+  bankMSB: number;
+  bankLSB: number;
+  program: number;
+  isDrum: boolean;
+}
+
+export interface LoadedSequenceMetadata {
+  fileName: string;
+  title: string;
+  format: string;
+  isTrackerConverted: boolean;
+  patternCount: number;
+  rowCount: number;
+  activeChannels: number[]; // 0-indexed MIDI channels
+  samplePresets: SequenceSamplePresetInfo[];
+  hasEmbeddedSoundBank: boolean;
+  durationSeconds: number;
+  bpm: number;
+  tracksCount: number;
+}
+
+export interface WebMidiPortInfo {
+  id: string;
+  name: string;
+  manufacturer: string;
+  state: string;
+  connection: string;
+}
+
+export interface WebMidiState {
+  supported: boolean;
+  status: 'uninitialized' | 'ready' | 'blocked' | 'unsupported';
+  sysexEnabled: boolean;
+  sandboxBlocked: boolean;
+  errorMessage: string | null;
+  inputs: WebMidiPortInfo[];
+  outputs: WebMidiPortInfo[];
+  selectedInputId: string;
+  selectedOutputId: string;
+  midiThruEnabled: boolean;
+  inputChannelFilter: 'all' | number; // 'all' or 0..15 (MIDI CH 1-16)
+  midiOutEnabled: boolean;
+  muteInternalOnMidiOut: boolean;
+  lastInputActivity: string | null;
+  lastOutputActivity: string | null;
+}
 
 export interface WorkletChannelMixerState {
   channel: number;
@@ -158,6 +209,15 @@ function channelToGSPart(ch: number): number {
   return c;
 }
 
+const PRIMARY_WORKLET_BANK_ID = 'aria-active-bank';
+
+function isRiffSoundBank(buf: ArrayBuffer): boolean {
+  if (!buf || buf.byteLength < 12) return false;
+  const u8 = new Uint8Array(buf, 0, 12);
+  // RIFF....sfbk or RIFF....DLS 
+  return u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46;
+}
+
 class WorkletSynthController {
   private audioCtx: AudioContext | null = null;
   private synth: WorkletSynthesizer | null = null;
@@ -169,6 +229,10 @@ class WorkletSynthController {
   private customBanksLoaded = new Set<string>();
   private soundBankBuffers = new Map<string, ArrayBuffer>();
   private activeBankId: string = 'aria-default-bank';
+  private activeBankSupportedByWorklet = true;
+  private isReplacingSoundBank = false;
+  private bankSwitchGen = 0;
+  private bankSwitchQueue: Promise<void> = Promise.resolve();
 
   private masterGain: GainNode | null = null;
   private limiter: DynamicsCompressorNode | null = null;
@@ -184,8 +248,66 @@ class WorkletSynthController {
   private logListeners = new Set<(msg: string) => void>();
   private targetMasterGainValue = 0.85;
 
+  // Sequencer & BasicMIDI state
+  private sequencer: Sequencer | null = null;
+  private currentBasicMIDI: BasicMIDI | null = null;
+  private currentOriginalFileName = '';
+  private currentSequenceBuffer: ArrayBuffer | null = null;
+  private currentSequenceMetadata: LoadedSequenceMetadata | null = null;
+  private sequencerPlaying = false;
+  private sequencerEndedCallback: (() => void) | null = null;
+  private sequencerWatchdogTimer: any = null;
+  private loadedSequencerKey = '';
+
+  // Web MIDI Input/Output state
+  private midiAccess: MIDIAccess | null = null;
+  private midiInitPromise: Promise<WebMidiState> | null = null;
+  private attachedMidiInput: MIDIInput | null = null;
+  private boundOutputProxy: { send: (data: number[]) => void } | null = null;
+  private webMidiState: WebMidiState = {
+    supported: typeof navigator !== 'undefined' && typeof navigator.requestMIDIAccess === 'function',
+    status: 'uninitialized',
+    sysexEnabled: false,
+    sandboxBlocked: false,
+    errorMessage: null,
+    inputs: [],
+    outputs: [],
+    selectedInputId: '',
+    selectedOutputId: '',
+    midiThruEnabled: true,
+    inputChannelFilter: 'all',
+    midiOutEnabled: false,
+    muteInternalOnMidiOut: false,
+    lastInputActivity: null,
+    lastOutputActivity: null
+  };
+
   public getSynth(): WorkletSynthesizer | null {
     return this.synth;
+  }
+
+  public getSequencer(): Sequencer | null {
+    return this.sequencer;
+  }
+
+  public getCurrentBasicMIDI(): BasicMIDI | null {
+    return this.currentBasicMIDI;
+  }
+
+  public getCurrentOriginalFileName(): string {
+    return this.currentOriginalFileName;
+  }
+
+  public getSequenceMetadata(): LoadedSequenceMetadata | null {
+    return this.currentSequenceMetadata;
+  }
+
+  public getWebMidiState(): WebMidiState {
+    return {
+      ...this.webMidiState,
+      inputs: [...this.webMidiState.inputs],
+      outputs: [...this.webMidiState.outputs]
+    };
   }
 
   public isReadySync(): boolean {
@@ -196,8 +318,13 @@ class WorkletSynthController {
     return Boolean(
       this.synth &&
       this.workletReady &&
+      this.activeBankSupportedByWorklet &&
       (this.defaultBankLoaded || this.customBanksLoaded.size > 0)
     );
+  }
+
+  public isActiveBankSupportedByWorklet(): boolean {
+    return this.activeBankSupportedByWorklet;
   }
 
   public getPresetList(): MIDIPatchFull[] {
@@ -266,12 +393,17 @@ class WorkletSynthController {
 
   public setMasterVolumeGain(gainValue: number) {
     this.targetMasterGainValue = Math.max(0, Math.min(1.5, gainValue));
-    if (this.masterGain && this.audioCtx) {
-      try {
-        this.masterGain.gain.setTargetAtTime(this.targetMasterGainValue, this.audioCtx.currentTime, 0.01);
-      } catch {
-        this.masterGain.gain.value = this.targetMasterGainValue;
-      }
+    this.applyInternalSynthMuteState();
+  }
+
+  private applyInternalSynthMuteState() {
+    if (!this.masterGain || !this.audioCtx) return;
+    const shouldSilence = this.webMidiState.midiOutEnabled && this.webMidiState.muteInternalOnMidiOut;
+    const effective = shouldSilence ? 0 : this.targetMasterGainValue;
+    try {
+      this.masterGain.gain.setTargetAtTime(effective, this.audioCtx.currentTime, 0.01);
+    } catch {
+      this.masterGain.gain.value = effective;
     }
   }
 
@@ -334,11 +466,13 @@ class WorkletSynthController {
         // Expand up to 48 channels when needed for Aria48 tracker
         this.ensureChannelCount(48);
 
-        // Load minimal valid SF2 bank so presetList is always populated before custom SF2 uploads
+        // Load single active bank slot with built-in SF2 bank so no SoundFonts ever mix presets
         try {
           const defaultBankBuffer = BasicSoundBank.getSampleSoundBankFile().slice(0);
-          await synth.soundBankManager.addSoundBank(defaultBankBuffer, 'aria-default-bank', 0);
+          this.soundBankBuffers.set('aria-default-bank', defaultBankBuffer.slice(0));
+          await synth.soundBankManager.addSoundBank(defaultBankBuffer, PRIMARY_WORKLET_BANK_ID, 0);
           this.defaultBankLoaded = true;
+          this.activeBankSupportedByWorklet = true;
         } catch (bankErr) {
           console.warn('Could not load default SpessaSynth sample bank:', bankErr);
         }
@@ -350,6 +484,9 @@ class WorkletSynthController {
         if (synth.presetList && synth.presetList.length > 0) {
           this.presetList = this.sortPresets(synth.presetList);
         }
+
+        // Ensure Sequencer instance exists and mirrors active MIDI Out setting
+        this.ensureSequencerInstance(synth);
 
         this.notifyListeners();
         this.emitLog(`WorkletSynthesizer ready (${this.presetList.length} presets, 48 channels active)`);
@@ -368,7 +505,8 @@ class WorkletSynthController {
     try {
       if (!this.masterGain) {
         this.masterGain = ctx.createGain();
-        this.masterGain.gain.setValueAtTime(this.targetMasterGainValue, ctx.currentTime);
+        const shouldSilence = this.webMidiState.midiOutEnabled && this.webMidiState.muteInternalOnMidiOut;
+        this.masterGain.gain.setValueAtTime(shouldSilence ? 0 : this.targetMasterGainValue, ctx.currentTime);
 
         this.limiter = ctx.createDynamicsCompressor();
         this.limiter.threshold.setValueAtTime(-6, ctx.currentTime);
@@ -417,81 +555,115 @@ class WorkletSynthController {
 
     eh.addEvent('presetListChange', 'aria48-mixer-presets', (presets) => {
       this.presetList = this.sortPresets(presets || []);
-      // Re-resolve displayed patch names against updated preset list
-      this.channelStates.forEach((st) => {
-        const match = this.findMatchingPreset(st.bankMSB, st.bankLSB, st.program, st.isDrum);
-        if (match) {
-          st.patchName = match.name;
-        }
-      });
-      this.notifyListeners();
+      if (!this.isReplacingSoundBank) {
+        // Re-resolve displayed patch names against updated preset list
+        this.channelStates.forEach((st) => {
+          const match = this.findMatchingPreset(st.bankMSB, st.bankLSB, st.program, st.isDrum);
+          if (match) {
+            st.patchName = match.name;
+          }
+        });
+        this.notifyListeners();
+      }
     });
 
     eh.addEvent('programChange', 'aria48-mixer-prog', (ev) => {
+      if (this.isReplacingSoundBank) return;
       const st = this.channelStates[ev.channel];
-      if (!st) return;
-      st.bankMSB = ev.bankMSB;
-      st.bankLSB = ev.bankLSB;
-      st.program = ev.program;
-      st.isDrum = Boolean(ev.isDrum || ev.isGMGSDrum);
-      st.patchName = ev.name || st.patchName;
-      this.notifyListeners();
+      if (st) {
+        st.bankMSB = ev.bankMSB;
+        st.bankLSB = ev.bankLSB;
+        st.program = ev.program;
+        st.isDrum = Boolean(ev.isDrum || ev.isGMGSDrum);
+        st.patchName = ev.name || st.patchName;
+        this.notifyListeners();
+      }
+      // Forward Bank Select + Program Change to external MIDI Output when enabled
+      if (this.webMidiState.midiOutEnabled && !this.sequencerExternalHandlingActive()) {
+        const ch = ev.channel & 0x0f;
+        this.sendToSelectedMidiOutput([0xb0 | ch, 0, ev.bankMSB & 0x7f]);
+        this.sendToSelectedMidiOutput([0xb0 | ch, 32, ev.bankLSB & 0x7f]);
+        this.sendToSelectedMidiOutput([0xc0 | ch, ev.program & 0x7f]);
+      }
     });
 
     eh.addEvent('controllerChange', 'aria48-mixer-cc', (ev) => {
       const st = this.channelStates[ev.channel];
-      if (!st) return;
-      if (ev.controller === WORKLET_CC.RESET_ALL_CONTROLLERS) {
-        Object.keys(DEFAULT_CC_VALUES).forEach((k) => {
-          const ccNum = Number(k);
-          // Per GM/RP15 reset behavior: Volume(7), Pan(10), Bank(0/32) are not reset by CC 121
-          if (ccNum === WORKLET_CC.VOLUME || ccNum === WORKLET_CC.PAN) return;
-          if (!st.lockedCCs[ccNum]) {
-            st.cc[ccNum] = DEFAULT_CC_VALUES[ccNum];
+      if (st) {
+        if (ev.controller === WORKLET_CC.RESET_ALL_CONTROLLERS) {
+          Object.keys(DEFAULT_CC_VALUES).forEach((k) => {
+            const ccNum = Number(k);
+            // Per GM/RP15 reset behavior: Volume(7), Pan(10), Bank(0/32) are not reset by CC 121
+            if (ccNum === WORKLET_CC.VOLUME || ccNum === WORKLET_CC.PAN) return;
+            if (!st.lockedCCs[ccNum]) {
+              st.cc[ccNum] = DEFAULT_CC_VALUES[ccNum];
+            }
+          });
+          if (!st.lockedCCs[1000]) {
+            st.pitchWheel = 0;
           }
-        });
-        if (!st.lockedCCs[1000]) {
-          st.pitchWheel = 0;
+        } else {
+          st.cc[ev.controller] = ev.value;
         }
-      } else {
-        st.cc[ev.controller] = ev.value;
+        this.notifyListeners();
       }
-      this.notifyListeners();
+      if (this.webMidiState.midiOutEnabled && !this.sequencerExternalHandlingActive()) {
+        const ch = ev.channel & 0x0f;
+        this.sendToSelectedMidiOutput([0xb0 | ch, ev.controller & 0x7f, ev.value & 0x7f]);
+      }
     });
 
     eh.addEvent('channelParamChange', 'aria48-mixer-param', (ev) => {
       const st = this.channelStates[ev.channel];
-      if (!st) return;
-      if (ev.parameter === 'pitchWheel') {
-        st.pitchWheel = Math.max(-8192, Math.min(8191, Math.round(Number(ev.value) - 8192)));
-      } else if (ev.parameter === 'pitchWheelRange') {
-        st.pitchWheelRange = Math.max(0, Math.min(24, Number(ev.value)));
-      } else if (ev.parameter === 'drumMap') {
-        st.isDrum = Number(ev.value) > 0;
-      } else if (ev.parameter === 'velocitySenseDepth') {
-        st.velocityDepth = Math.max(0, Math.min(127, Math.round(Number(ev.value))));
-      } else if (ev.parameter === 'velocitySenseOffset') {
-        st.velocityOffset = Math.max(0, Math.min(127, Math.round(Number(ev.value))));
+      if (st) {
+        if (ev.parameter === 'pitchWheel') {
+          st.pitchWheel = Math.max(-8192, Math.min(8191, Math.round(Number(ev.value) - 8192)));
+        } else if (ev.parameter === 'pitchWheelRange') {
+          st.pitchWheelRange = Math.max(0, Math.min(24, Number(ev.value)));
+        } else if (ev.parameter === 'drumMap') {
+          st.isDrum = Number(ev.value) > 0;
+        } else if (ev.parameter === 'velocitySenseDepth') {
+          st.velocityDepth = Math.max(0, Math.min(127, Math.round(Number(ev.value))));
+        } else if (ev.parameter === 'velocitySenseOffset') {
+          st.velocityOffset = Math.max(0, Math.min(127, Math.round(Number(ev.value))));
+        }
+        this.notifyListeners();
       }
-      this.notifyListeners();
+      if (
+        ev.parameter === 'pitchWheel' &&
+        this.webMidiState.midiOutEnabled &&
+        !this.sequencerExternalHandlingActive()
+      ) {
+        const ch = ev.channel & 0x0f;
+        const val14 = Math.max(0, Math.min(16383, Math.round(Number(ev.value))));
+        this.sendToSelectedMidiOutput([0xe0 | ch, val14 & 0x7f, (val14 >> 7) & 0x7f]);
+      }
     });
 
     eh.addEvent('noteOn', 'aria48-mixer-noteon', (ev) => {
       const st = this.channelStates[ev.channel];
-      if (!st) return;
-      if (!st.activeNotes.includes(ev.midiNote)) {
+      if (st && !st.activeNotes.includes(ev.midiNote)) {
         st.activeNotes.push(ev.midiNote);
         this.notifyListeners();
+      }
+      if (this.webMidiState.midiOutEnabled && !this.sequencerExternalHandlingActive()) {
+        const ch = ev.channel & 0x0f;
+        this.sendToSelectedMidiOutput([0x90 | ch, ev.midiNote & 0x7f, (ev.velocity ?? 100) & 0x7f]);
       }
     });
 
     eh.addEvent('noteOff', 'aria48-mixer-noteoff', (ev) => {
       const st = this.channelStates[ev.channel];
-      if (!st) return;
-      const idx = st.activeNotes.indexOf(ev.midiNote);
-      if (idx !== -1) {
-        st.activeNotes.splice(idx, 1);
-        this.notifyListeners();
+      if (st) {
+        const idx = st.activeNotes.indexOf(ev.midiNote);
+        if (idx !== -1) {
+          st.activeNotes.splice(idx, 1);
+          this.notifyListeners();
+        }
+      }
+      if (this.webMidiState.midiOutEnabled && !this.sequencerExternalHandlingActive()) {
+        const ch = ev.channel & 0x0f;
+        this.sendToSelectedMidiOutput([0x80 | ch, ev.midiNote & 0x7f, 0]);
       }
     });
 
@@ -505,6 +677,7 @@ class WorkletSynthController {
     });
 
     eh.addEvent('reset', 'aria48-mixer-reset', () => {
+      if (this.isReplacingSoundBank) return;
       this.channelStates.forEach((st, idx) => {
         const next = createDefaultChannelState(idx);
         // Preserve locked controllers, presetLock, mute, and solo states across resets
@@ -543,9 +716,17 @@ class WorkletSynthController {
       p => p.bankMSB === bankMSB && p.bankLSB === bankLSB && p.program === program && Boolean(p.isDrum) === Boolean(isDrum)
     );
     if (exact) return exact;
-    return this.presetList.find(
+    const gmBaseBank = isDrum
+      ? this.presetList.find(p => (p.bankMSB === 128 || p.bankMSB === 0) && p.bankLSB === 0 && p.program === program && p.isDrum)
+      : this.presetList.find(p => p.bankMSB === 0 && p.bankLSB === 0 && p.program === program && !p.isDrum);
+    if (gmBaseBank) return gmBaseBank;
+    const sameProg = this.presetList.find(
       p => p.program === program && Boolean(p.isDrum) === Boolean(isDrum)
     );
+    if (sameProg) return sameProg;
+    return isDrum
+      ? this.presetList.find(p => Boolean(p.isDrum))
+      : this.presetList.find(p => !p.isDrum);
   }
 
   public ensureChannelCount(count: number) {
@@ -575,81 +756,182 @@ class WorkletSynthController {
 
   public async loadSoundBank(arrayBuffer: ArrayBuffer, id: string, makePrimary = true): Promise<boolean> {
     const lower = id.toLowerCase();
-    // Only native spessasynth_core binary soundbanks (.sf2, .sf3, .dls) go to WorkletSynthesizer's SoundBankManager
+    // Only native RIFF SF2/SF3/DLS soundbanks go to WorkletSynthesizer's single active slot
+    if (!isRiffSoundBank(arrayBuffer)) {
+      if (makePrimary) {
+        this.activeBankId = id;
+        this.activeBankSupportedByWorklet = false;
+        this.notifyListeners();
+      }
+      return false;
+    }
+
     const synth = await this.init();
     if (!synth) return false;
     try {
       const bankCopy = arrayBuffer.slice(0);
-      await synth.soundBankManager.addSoundBank(bankCopy.slice(0), id, 0);
       this.customBanksLoaded.add(id);
       this.soundBankBuffers.set(id, bankCopy);
       if (makePrimary) {
-        this.activeBankId = id;
-        const rest = synth.soundBankManager.priorityOrder.filter(b => b !== id && b !== 'aria-default-bank');
-        const nextOrder = [id, ...rest];
-        if (this.defaultBankLoaded) nextOrder.push('aria-default-bank');
-        synth.soundBankManager.priorityOrder = nextOrder;
+        await this.setActiveSoundBank(id);
       }
-      if (synth.presetList?.length) {
-        this.presetList = this.sortPresets(synth.presetList);
-      }
-      this.notifyListeners();
-      this.emitLog(`Loaded SoundBank "${id}" into WorkletSynthesizer (${this.presetList.length} presets)`);
       return true;
     } catch (err) {
-      // Non-SF2/SF3/DLS custom banks (e.g., SFZ/PAT/SBK) remain handled by JS SpessaSynthCore gracefully
       console.warn(`WorkletSynthesizer SoundBank note for "${lower}":`, err);
       return false;
     }
   }
 
-  public setActiveSoundBank(id: string) {
-    if (!this.synth) return;
+  public setActiveSoundBank(id: string): Promise<void> {
     const mappedId =
       id === 'spessa-default-gm' || id === 'spessa-chiptune-sf2'
         ? 'aria-default-bank'
         : id;
-    const order = this.synth.soundBankManager.priorityOrder;
-    if (!order.includes(mappedId)) return;
-    this.activeBankId = mappedId;
-    const rest = order.filter(b => b !== mappedId && b !== 'aria-default-bank');
-    const nextOrder = [mappedId, ...rest];
-    if (this.defaultBankLoaded && mappedId !== 'aria-default-bank') {
-      nextOrder.push('aria-default-bank');
-    }
-    this.synth.soundBankManager.priorityOrder = nextOrder;
-    if (this.synth.presetList?.length) {
-      this.presetList = this.sortPresets(this.synth.presetList);
-    }
-    this.notifyListeners();
+    const reqGen = ++this.bankSwitchGen;
+
+    const task = this.bankSwitchQueue.then(async () => {
+      if (reqGen !== this.bankSwitchGen) return;
+      const synth = await this.init();
+      if (!synth || reqGen !== this.bankSwitchGen) return;
+
+      const bankBuffer = this.soundBankBuffers.get(mappedId);
+      if (!bankBuffer || bankBuffer.byteLength === 0) {
+        // Non-Worklet custom bank (e.g., SFZ/PAT) or chiptune synth mode
+        this.activeBankId = mappedId;
+        this.activeBankSupportedByWorklet = false;
+        this.notifyListeners();
+        return;
+      }
+
+      // Snapshot every channel's musical preset & CC assignments BEFORE replacing the bank in-place
+      const snapshots = this.channelStates.map(s => ({
+        ...s,
+        cc: { ...s.cc },
+        lockedCCs: { ...s.lockedCCs }
+      }));
+
+      // Silence old bank's ringing voices immediately
+      this.stopAll(true);
+      this.isReplacingSoundBank = true;
+      try {
+        // Replace ONLY the single active bank slot in WorkletSynthesizer so presets from
+        // previously loaded SoundFonts NEVER remain stacked or mix together!
+        await synth.soundBankManager.addSoundBank(bankBuffer.slice(0), PRIMARY_WORKLET_BANK_ID, 0);
+        if (reqGen !== this.bankSwitchGen) return;
+
+        this.activeBankId = mappedId;
+        this.activeBankSupportedByWorklet = id !== 'spessa-chiptune-sf2';
+
+        if (synth.presetList?.length) {
+          this.presetList = this.sortPresets(synth.presetList);
+        }
+
+        // Re-apply channel programs cleanly against the NEW SoundFont's preset list
+        const chCount = Math.min(synth.midiChannels.length || 16, this.channelStates.length);
+        for (let ch = 0; ch < chCount; ch++) {
+          const snap = snapshots[ch];
+          const st = this.channelStates[ch];
+          if (!snap || !st) continue;
+
+          const chObj = synth.midiChannels[ch];
+          if (chObj) {
+            chObj.setSystemParameter('presetLock', false);
+            chObj.lockController(WORKLET_CC.BANK_MSB as MIDIController, false);
+            chObj.lockController(WORKLET_CC.BANK_LSB as MIDIController, false);
+            chObj.setDrums(snap.isDrum);
+          }
+
+          const resolved = this.findMatchingPreset(snap.bankMSB, snap.bankLSB, snap.program, snap.isDrum);
+          const targetMSB = resolved ? resolved.bankMSB : (snap.isDrum ? 128 : 0);
+          const targetLSB = resolved ? resolved.bankLSB : 0;
+          const targetProg = resolved ? resolved.program : snap.program;
+
+          synth.controllerChange(ch, WORKLET_CC.BANK_MSB as MIDIController, targetMSB);
+          synth.controllerChange(ch, WORKLET_CC.BANK_LSB as MIDIController, targetLSB);
+          synth.programChange(ch, targetProg);
+
+          st.isDrum = snap.isDrum;
+          st.bankMSB = targetMSB;
+          st.bankLSB = targetLSB;
+          st.program = targetProg;
+          st.patchName = resolved?.name || (snap.isDrum ? 'Standard Drum Kit' : (DEFAULT_GM_PROGRAMS[targetProg] || `Program ${targetProg}`));
+
+          // Re-apply mixer CCs, pitch wheel, mutes, velocity & locks cleanly
+          for (const ccNum of LOCKABLE_MIXER_CCS) {
+            if (ccNum === WORKLET_CC.SUSTAIN || ccNum === WORKLET_CC.SOSTENUTO) continue;
+            const val = snap.cc[ccNum] ?? DEFAULT_CC_VALUES[ccNum];
+            if (val !== undefined) {
+              chObj?.lockController(ccNum as MIDIController, false);
+              synth.controllerChange(ch, ccNum as MIDIController, val);
+              st.cc[ccNum] = val;
+            }
+            if (snap.lockedCCs[ccNum]) {
+              chObj?.lockController(ccNum as MIDIController, true);
+              st.lockedCCs[ccNum] = true;
+            }
+          }
+
+          st.pitchWheelRange = snap.pitchWheelRange;
+          st.pitchWheel = snap.pitchWheel;
+          st.pitchWheelLocked = snap.pitchWheelLocked;
+          if (snap.pitchWheelRange !== 2) {
+            synth.pitchWheelRange(ch, snap.pitchWheelRange);
+          }
+          if (snap.pitchWheel !== 0) {
+            this.setPitchWheelSigned(ch, snap.pitchWheel, true);
+          }
+          if (snap.pitchWheelLocked) {
+            chObj?.lockMIDIParameter('pitchWheel', true);
+            chObj?.lockMIDIParameter('pitchWheelRange', true);
+          }
+
+          st.isMuted = snap.isMuted;
+          st.isSolo = snap.isSolo;
+          chObj?.setSystemParameter('isMuted', snap.isMuted);
+
+          st.presetLocked = snap.presetLocked;
+          if (snap.presetLocked) {
+            chObj?.setSystemParameter('presetLock', true);
+          }
+          if (snap.lockedCCs[WORKLET_CC.BANK_MSB]) {
+            st.lockedCCs[WORKLET_CC.BANK_MSB] = true;
+            chObj?.lockController(WORKLET_CC.BANK_MSB as MIDIController, true);
+          }
+          if (snap.lockedCCs[WORKLET_CC.BANK_LSB]) {
+            st.lockedCCs[WORKLET_CC.BANK_LSB] = true;
+            chObj?.lockController(WORKLET_CC.BANK_LSB as MIDIController, true);
+          }
+        }
+
+        this.notifyListeners();
+        this.emitLog(`Activated SoundBank "${id}" cleanly (${this.presetList.length} presets, zero cross-bank mixing)`);
+      } catch (err) {
+        console.warn(`WorkletSynthesizer bank switch note for "${id}":`, err);
+        this.activeBankSupportedByWorklet = false;
+      } finally {
+        this.isReplacingSoundBank = false;
+      }
+    }).catch(() => {});
+
+    this.bankSwitchQueue = task;
+    return task;
   }
 
   public async removeSoundBank(id: string) {
-    if (!this.synth || id === 'aria-default-bank') return;
-    if (!this.customBanksLoaded.has(id)) return;
-    try {
-      await this.synth.soundBankManager.deleteSoundBank(id);
-      this.customBanksLoaded.delete(id);
-      this.soundBankBuffers.delete(id);
-      if (this.activeBankId === id) {
-        this.activeBankId = this.synth.soundBankManager.priorityOrder[0] || 'aria-default-bank';
-      }
-      if (this.synth.presetList?.length) {
-        this.presetList = this.sortPresets(this.synth.presetList);
-      }
+    if (id === 'aria-default-bank') return;
+    this.customBanksLoaded.delete(id);
+    this.soundBankBuffers.delete(id);
+    if (this.activeBankId === id) {
+      await this.setActiveSoundBank('aria-default-bank');
+    } else {
       this.notifyListeners();
-    } catch (e) {}
+    }
   }
 
   public getActiveSoundBankBuffer(): ArrayBuffer {
     const active = this.soundBankBuffers.get(this.activeBankId);
     if (active && active.byteLength > 0) {
       return active.slice(0);
-    }
-    for (const buf of this.soundBankBuffers.values()) {
-      if (buf && buf.byteLength > 0) {
-        return buf.slice(0);
-      }
     }
     return BasicSoundBank.getSampleSoundBankFile().slice(0);
   }
@@ -733,6 +1015,9 @@ class WorkletSynthController {
     }
     if (!this.synth) return;
     this.synth.programChange(ch, prog);
+    if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+      this.sendToSelectedMidiOutput([0xc0 | (ch & 0x0f), prog & 0x7f]);
+    }
   }
 
   public controllerChange(channel: number, ccNumber: number, value: number, fromUserUI = true) {
@@ -758,6 +1043,9 @@ class WorkletSynthController {
     if (st && cc !== WORKLET_CC.ALL_SOUND_OFF && cc !== WORKLET_CC.RESET_ALL_CONTROLLERS && cc !== WORKLET_CC.ALL_NOTES_OFF) {
       st.cc[cc] = val;
       this.notifyListeners();
+    }
+    if (fromUserUI && this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+      this.sendToSelectedMidiOutput([0xb0 | (ch & 0x0f), cc & 0x7f, val & 0x7f]);
     }
   }
 
@@ -788,6 +1076,9 @@ class WorkletSynthController {
     if (st) {
       st.pitchWheel = val14 - 8192;
       this.notifyListeners();
+    }
+    if (fromUserUI && this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+      this.sendToSelectedMidiOutput([0xe0 | (ch & 0x0f), val14 & 0x7f, (val14 >> 7) & 0x7f]);
     }
   }
 
@@ -988,8 +1279,14 @@ class WorkletSynthController {
   }
 
   public systemExclusive(messageData: number[], channelOffset = 0) {
-    if (!this.synth) return;
-    this.synth.systemExclusive(messageData, channelOffset);
+    if (this.synth) {
+      this.synth.systemExclusive(messageData, channelOffset);
+    }
+    if (this.webMidiState.midiOutEnabled && messageData.length > 0) {
+      const bytes = messageData[0] === 0xf0 ? [...messageData] : [0xf0, ...messageData];
+      if (bytes[bytes.length - 1] !== 0xf7) bytes.push(0xf7);
+      this.sendToSelectedMidiOutput(bytes);
+    }
   }
 
   // --- NOTE TRIGGERING & PLAYBACK SYNC ---
@@ -1002,6 +1299,9 @@ class WorkletSynthController {
     const curvedVel = this.mapVelocityWithCurve(ch, velocity);
     const opts = atAudioTime !== undefined && Number.isFinite(atAudioTime) ? { time: atAudioTime } : undefined;
     this.synth.noteOn(ch, midiNote, curvedVel, opts);
+    if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+      this.sendToSelectedMidiOutput([0x90 | (ch & 0x0f), midiNote & 0x7f, curvedVel & 0x7f]);
+    }
   }
 
   public noteOff(channel: number, midiNote: number, atAudioTime?: number) {
@@ -1009,6 +1309,9 @@ class WorkletSynthController {
     if (!this.synth || !this.workletReady) return;
     const opts = atAudioTime !== undefined && Number.isFinite(atAudioTime) ? { time: atAudioTime } : undefined;
     this.synth.noteOff(ch, midiNote, opts);
+    if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+      this.sendToSelectedMidiOutput([0x80 | (ch & 0x0f), midiNote & 0x7f, 0]);
+    }
   }
 
   public sendRawMidiMessage(msg: number[], atAudioTime?: number) {
@@ -1070,33 +1373,34 @@ class WorkletSynthController {
 
   public sendGMSystemOn() {
     if (!this.synth) return;
-    this.synth.systemExclusive([0x7e, 0x7f, 0x09, 0x01, 0xf7]);
+    this.systemExclusive([0x7e, 0x7f, 0x09, 0x01, 0xf7]);
     this.emitLog('Global SysEx: GM System On (F0 7E 7F 09 01 F7)');
   }
 
   public sendGSReset() {
     if (!this.synth) return;
-    this.synth.systemExclusive([0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7f, 0x00, 0x41, 0xf7]);
+    this.systemExclusive([0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7f, 0x00, 0x41, 0xf7]);
     this.emitLog('Global SysEx: Roland GS Reset (F0 41 10 42 12 40 00 7F 00 41 F7)');
   }
 
   public sendXGSystemOn() {
     if (!this.synth) return;
-    this.synth.systemExclusive([0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7]);
+    this.systemExclusive([0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7]);
     this.emitLog('Global SysEx: Yamaha XG System On (F0 43 10 4C 00 00 7E 00 F7)');
   }
 
   public sendAllSoundOff() {
-    if (!this.synth) return;
-    const count = this.synth.midiChannels.length || 16;
-    for (let ch = 0; ch < count; ch++) {
-      try {
-        this.synth.controllerChange(ch, WORKLET_CC.SUSTAIN as MIDIController, 0);
-        this.synth.controllerChange(ch, WORKLET_CC.SOSTENUTO as MIDIController, 0);
-        this.synth.controllerChange(ch, WORKLET_CC.ALL_SOUND_OFF as MIDIController, 0);
-      } catch {}
+    if (this.synth) {
+      const count = this.synth.midiChannels.length || 16;
+      for (let ch = 0; ch < count; ch++) {
+        try {
+          this.synth.controllerChange(ch, WORKLET_CC.SUSTAIN as MIDIController, 0);
+          this.synth.controllerChange(ch, WORKLET_CC.SOSTENUTO as MIDIController, 0);
+          this.synth.controllerChange(ch, WORKLET_CC.ALL_SOUND_OFF as MIDIController, 0);
+        } catch {}
+      }
+      this.synth.stopAll(true);
     }
-    this.synth.stopAll(true);
     this.channelStates.forEach(s => {
       s.activeNotes = [];
       s.cc[WORKLET_CC.SUSTAIN] = 0;
@@ -1113,6 +1417,693 @@ class WorkletSynthController {
       this.synth.controllerChange(ch, WORKLET_CC.RESET_ALL_CONTROLLERS as MIDIController, 0);
     }
     this.emitLog('All Channels: Reset All Controllers (CC 121)');
+  }
+
+  // --- SEQUENCER & BASICMIDI CONVERSION / .MID EXPORT ---
+
+  private sequencerExternalHandlingActive(): boolean {
+    return Boolean(
+      this.sequencer &&
+      this.sequencerPlaying &&
+      this.webMidiState.midiOutEnabled &&
+      this.boundOutputProxy
+    );
+  }
+
+  private ensureSequencerInstance(synth: WorkletSynthesizer): Sequencer {
+    if (this.sequencer && this.sequencer.synth === synth) {
+      return this.sequencer;
+    }
+    const seq = new Sequencer(synth, { skipToFirstNoteOn: false });
+    seq.loopCount = 0;
+
+    seq.eventHandler.addEvent('songChange', 'aria48-seq-songchange', (data) => {
+      if (this.currentSequenceMetadata && data?.midiData) {
+        const dur = data.midiData.duration;
+        if (dur > 0) {
+          this.currentSequenceMetadata = {
+            ...this.currentSequenceMetadata,
+            durationSeconds: dur
+          };
+        }
+      }
+      this.notifyListeners();
+    });
+
+    seq.eventHandler.addEvent('songEnded', 'aria48-seq-ended', () => {
+      this.sequencerPlaying = false;
+      this.stopAll(true);
+      this.sendAllNotesOffToMidiOut();
+      const cb = this.sequencerEndedCallback;
+      if (cb) {
+        setTimeout(() => {
+          if (!this.sequencerPlaying) cb();
+        }, 120);
+      }
+      this.notifyListeners();
+    });
+
+    this.sequencer = seq;
+    this.syncSequencerMidiOutput();
+    return seq;
+  }
+
+  public extractBasicMidiMetadata(
+    arrayBuffer: ArrayBuffer,
+    fileName: string,
+    patternCount = 1,
+    rowCount = 64
+  ): { basicMidi: BasicMIDI; metadata: LoadedSequenceMetadata } {
+    const basicMidi = BasicMIDI.fromArrayBuffer(arrayBuffer.slice(0), fileName);
+    const ext = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.') + 1).toUpperCase() : 'MID';
+    const isTrackerConverted = ['MOD', 'XM', 'S3M', 'IT'].includes(ext);
+
+    let title = '';
+    try {
+      title = basicMidi.getName?.() || '';
+    } catch {}
+    if (!title) {
+      title = fileName.replace(/\.[^.]+$/, '') || 'Untitled Sequence';
+    }
+
+    const activeChSet = new Set<number>();
+    for (const trk of basicMidi.tracks || []) {
+      for (const ev of trk.events || []) {
+        const status = ev.statusByte || 0;
+        if ((status & 0xf0) === 0x90 && ev.data && ev.data[1] > 0) {
+          activeChSet.add(status & 0x0f);
+        }
+      }
+    }
+    const activeChannels = Array.from(activeChSet).sort((a, b) => a - b);
+
+    const firstTempo = basicMidi.tempoChanges && basicMidi.tempoChanges.length > 0
+      ? Math.round(basicMidi.tempoChanges[basicMidi.tempoChanges.length - 1].tempo || 125)
+      : 125;
+    const clampedBpm = Math.max(30, Math.min(320, firstTempo));
+
+    const durationSeconds = basicMidi.duration > 0
+      ? basicMidi.duration
+      : Math.max(1, basicMidi.midiTicksToSeconds(Math.max(1, basicMidi.lastVoiceEventTick || basicMidi.timeDivision || 480)));
+
+    const samplePresets: SequenceSamplePresetInfo[] = [];
+    if (basicMidi.embeddedSoundBank && basicMidi.embeddedSoundBank.byteLength > 12) {
+      try {
+        const sb = SoundBankLoader.fromArrayBuffer(basicMidi.embeddedSoundBank.slice(0));
+        for (const p of sb.presets || []) {
+          samplePresets.push({
+            name: p.name || `Preset ${p.program}`,
+            bankMSB: p.bankMSB ?? 0,
+            bankLSB: p.bankLSB ?? 0,
+            program: p.program ?? 0,
+            isDrum: Boolean(p.isDrum)
+          });
+        }
+      } catch (sbErr) {
+        console.warn('Embedded SoundBank preset inspection note:', sbErr);
+      }
+    }
+
+    const metadata: LoadedSequenceMetadata = {
+      fileName,
+      title,
+      format: ext,
+      isTrackerConverted,
+      patternCount,
+      rowCount,
+      activeChannels,
+      samplePresets,
+      hasEmbeddedSoundBank: Boolean(basicMidi.embeddedSoundBank),
+      durationSeconds,
+      bpm: clampedBpm,
+      tracksCount: basicMidi.tracks?.length || 1
+    };
+
+    return { basicMidi, metadata };
+  }
+
+  public registerLoadedSequence(
+    arrayBuffer: ArrayBuffer,
+    fileName = 'sequence.mid',
+    patternCount = 1,
+    rowCount = 64
+  ): LoadedSequenceMetadata | null {
+    try {
+      const copy = arrayBuffer.slice(0);
+      const { basicMidi, metadata } = this.extractBasicMidiMetadata(copy, fileName, patternCount, rowCount);
+      this.currentBasicMIDI = basicMidi;
+      this.currentOriginalFileName = fileName;
+      this.currentSequenceBuffer = copy;
+      this.currentSequenceMetadata = metadata;
+      this.loadedSequencerKey = `${fileName}:${copy.byteLength}`;
+
+      if (this.synth && this.workletReady) {
+        const seq = this.ensureSequencerInstance(this.synth);
+        seq.pause();
+        this.sequencerPlaying = false;
+        seq.loadNewSongList([{ binary: copy.slice(0), fileName }]);
+      }
+
+      this.notifyListeners();
+      this.emitLog(
+        `Loaded ${metadata.format}: "${metadata.title}" (${metadata.activeChannels.length} ch, ${metadata.patternCount} pat / ${metadata.rowCount} rows${
+          metadata.samplePresets.length > 0 ? `, ${metadata.samplePresets.length} embedded sample presets` : ''
+        })`
+      );
+      return metadata;
+    } catch (err) {
+      console.warn('registerLoadedSequence note:', err);
+      return null;
+    }
+  }
+
+  public updateSequenceGridCounts(patternCount: number, rowCount: number) {
+    if (!this.currentSequenceMetadata) return;
+    this.currentSequenceMetadata = {
+      ...this.currentSequenceMetadata,
+      patternCount,
+      rowCount
+    };
+    this.notifyListeners();
+  }
+
+  public clearCurrentSequence() {
+    this.pauseSequencer();
+    this.currentBasicMIDI = null;
+    this.currentOriginalFileName = '';
+    this.currentSequenceBuffer = null;
+    this.currentSequenceMetadata = null;
+    this.loadedSequencerKey = '';
+    this.notifyListeners();
+  }
+
+  public async playSequencerFromBuffer(
+    arrayBuffer: ArrayBuffer,
+    fileName = 'sequence.mid',
+    seekRatio = 0,
+    playbackRate = 1,
+    onEnded?: () => void
+  ): Promise<boolean> {
+    const synth = await this.init();
+    if (!synth || !this.workletReady) return false;
+
+    const key = `${fileName}:${arrayBuffer.byteLength}`;
+    if (!this.currentBasicMIDI || this.loadedSequencerKey !== key) {
+      this.registerLoadedSequence(
+        arrayBuffer,
+        fileName,
+        this.currentSequenceMetadata?.patternCount || 1,
+        this.currentSequenceMetadata?.rowCount || 64
+      );
+    }
+
+    const seq = this.ensureSequencerInstance(synth);
+    if (!this.sequencer || this.loadedSequencerKey !== key || !seq.midiData) {
+      seq.loadNewSongList([{ binary: arrayBuffer.slice(0), fileName }]);
+      this.loadedSequencerKey = key;
+    }
+
+    this.sequencerEndedCallback = onEnded || null;
+    seq.playbackRate = Math.max(0.25, Math.min(4.0, playbackRate || 1));
+
+    const totalDur = Math.max(
+      0.5,
+      seq.duration || this.currentSequenceMetadata?.durationSeconds || 10
+    );
+    const clampedRatio = Math.max(0, Math.min(0.995, seekRatio || 0));
+    seq.currentTime = clampedRatio * totalDur;
+
+    this.syncSequencerMidiOutput();
+    seq.play();
+    this.sequencerPlaying = true;
+
+    if (this.sequencerWatchdogTimer) clearInterval(this.sequencerWatchdogTimer);
+    this.sequencerWatchdogTimer = setInterval(() => {
+      if (!this.sequencer || !this.sequencerPlaying) {
+        clearInterval(this.sequencerWatchdogTimer);
+        this.sequencerWatchdogTimer = null;
+        return;
+      }
+      if (this.sequencer.isFinished || (this.sequencer.paused && this.sequencerPlaying)) {
+        this.sequencerPlaying = false;
+        clearInterval(this.sequencerWatchdogTimer);
+        this.sequencerWatchdogTimer = null;
+        this.stopAll(true);
+        const cb = this.sequencerEndedCallback;
+        if (cb) cb();
+      }
+    }, 150);
+
+    this.notifyListeners();
+    return true;
+  }
+
+  public pauseSequencer() {
+    this.sequencerPlaying = false;
+    if (this.sequencerWatchdogTimer) {
+      clearInterval(this.sequencerWatchdogTimer);
+      this.sequencerWatchdogTimer = null;
+    }
+    try {
+      this.sequencer?.pause();
+    } catch {}
+    this.stopAll(true);
+    this.sendAllNotesOffToMidiOut();
+  }
+
+  public seekSequencer(ratio0to1: number) {
+    if (!this.sequencer) return;
+    const clamped = Math.max(0, Math.min(0.995, ratio0to1));
+    const dur = Math.max(0.5, this.sequencer.duration || this.currentSequenceMetadata?.durationSeconds || 10);
+    this.stopAll(true);
+    this.sendAllNotesOffToMidiOut();
+    try {
+      this.sequencer.currentTime = clamped * dur;
+    } catch {}
+  }
+
+  public setSequencerPlaybackRate(rate: number) {
+    if (!this.sequencer) return;
+    try {
+      this.sequencer.playbackRate = Math.max(0.25, Math.min(4.0, rate || 1));
+    } catch {}
+  }
+
+  public isSequencerPlaying(): boolean {
+    return this.sequencerPlaying && Boolean(this.sequencer && !this.sequencer.paused);
+  }
+
+  public getSequencerProgress(rate = 1): {
+    play: boolean;
+    currentTime: number;
+    duration: number;
+    ratio: number;
+    elapsedSeconds: number;
+    totalSeconds: number;
+  } {
+    const seq = this.sequencer;
+    const baseDur = Math.max(0.5, seq?.duration || this.currentSequenceMetadata?.durationSeconds || 10);
+    const rawCur = Math.max(0, Math.min(baseDur, seq ? seq.currentHighResolutionTime : 0));
+    const ratio = Math.max(0, Math.min(1, rawCur / baseDur));
+    const safeRate = Math.max(0.25, Math.min(4.0, rate || 1));
+    const scaledTotal = Math.max(0.5, baseDur / safeRate);
+    return {
+      play: this.sequencerPlaying,
+      currentTime: rawCur,
+      duration: baseDur,
+      ratio,
+      elapsedSeconds: ratio * scaledTotal,
+      totalSeconds: scaledTotal
+    };
+  }
+
+  public exportCurrentBasicMIDIAsMid(): { filename: string; bytes: number } | null {
+    const midi = this.currentBasicMIDI;
+    if (!midi) return null;
+
+    const midiBinary = midi.writeMIDI();
+    const rawName = this.currentOriginalFileName || this.currentSequenceMetadata?.title || 'aria48_song';
+    const baseName = rawName.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_\-\s.]/g, '_').trim() || 'aria48_song';
+    const downloadName = baseName.endsWith('_converted') ? `${baseName}.mid` : `${baseName}_converted.mid`;
+
+    const blob = new Blob([midiBinary], { type: 'audio/midi' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = downloadName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+
+    this.emitLog(`Exported Standard MIDI: ${downloadName} (${(midiBinary.byteLength / 1024).toFixed(1)} KB)`);
+    return { filename: downloadName, bytes: midiBinary.byteLength };
+  }
+
+  // --- WEB MIDI INPUT & OUTPUT (EXTERNAL KEYBOARDS & SYNTHS) ---
+
+  public async requestWebMidiAccess(): Promise<WebMidiState> {
+    if (this.midiAccess) {
+      this.refreshWebMidiPorts();
+      return this.getWebMidiState();
+    }
+    if (this.midiInitPromise) return this.midiInitPromise;
+
+    this.midiInitPromise = (async () => {
+      if (typeof navigator === 'undefined' || typeof navigator.requestMIDIAccess !== 'function') {
+        this.webMidiState = {
+          ...this.webMidiState,
+          supported: false,
+          status: 'unsupported',
+          sandboxBlocked: false,
+          errorMessage: 'Web MIDI API (navigator.requestMIDIAccess) is not supported in this browser.'
+        };
+        this.emitLog('[WEB MIDI] Browser does not support navigator.requestMIDIAccess.');
+        this.notifyListeners();
+        return this.getWebMidiState();
+      }
+
+      try {
+        let access: MIDIAccess | null = null;
+        let sysexOk = false;
+        try {
+          access = await navigator.requestMIDIAccess({ sysex: true });
+          sysexOk = Boolean(access.sysexEnabled);
+        } catch (sysexErr: any) {
+          // Retry without SysEx only if basic Web MIDI is permitted while SysEx prompt was declined
+          const msg = String(sysexErr?.message || '');
+          if (msg.toLowerCase().includes('sysex')) {
+            access = await navigator.requestMIDIAccess({ sysex: false });
+            sysexOk = false;
+          } else {
+            throw sysexErr;
+          }
+        }
+
+        this.midiAccess = access;
+        this.webMidiState = {
+          ...this.webMidiState,
+          supported: true,
+          status: 'ready',
+          sysexEnabled: sysexOk,
+          sandboxBlocked: false,
+          errorMessage: null
+        };
+
+        access.onstatechange = () => {
+          this.refreshWebMidiPorts();
+        };
+
+        this.refreshWebMidiPorts();
+        this.emitLog(
+          `[WEB MIDI] Connected (SysEx: ${sysexOk ? 'ENABLED' : 'STANDARD'}) — ${this.webMidiState.inputs.length} input(s), ${this.webMidiState.outputs.length} output(s)`
+        );
+      } catch (err: any) {
+        const rawMsg = err?.message || 'Permission denied or blocked by iframe sandbox policy.';
+        const inIframe = typeof window !== 'undefined' && window.self !== window.top;
+        const isSecurityOrPolicy =
+          err?.name === 'SecurityError' ||
+          rawMsg.toLowerCase().includes('policy') ||
+          rawMsg.toLowerCase().includes('sandbox') ||
+          rawMsg.toLowerCase().includes('permission') ||
+          inIframe;
+
+        this.webMidiState = {
+          ...this.webMidiState,
+          status: 'blocked',
+          sandboxBlocked: isSecurityOrPolicy,
+          errorMessage: isSecurityOrPolicy
+            ? `Web MIDI access blocked by preview iframe sandbox permissions (${rawMsg}). Open Aria48 Tracker in a standalone browser tab for native hardware/virtual MIDI ports.`
+            : `Web MIDI error: ${rawMsg}`
+        };
+        this.emitLog(`[WEB MIDI BLOCKED] ${this.webMidiState.errorMessage}`);
+      } finally {
+        this.midiInitPromise = null;
+        this.notifyListeners();
+      }
+
+      return this.getWebMidiState();
+    })();
+
+    return this.midiInitPromise;
+  }
+
+  public refreshWebMidiPorts() {
+    if (!this.midiAccess) return;
+
+    const inputs: WebMidiPortInfo[] = [];
+    this.midiAccess.inputs.forEach((inp) => {
+      inputs.push({
+        id: inp.id,
+        name: inp.name || `MIDI Input (${inp.id.slice(0, 6)})`,
+        manufacturer: inp.manufacturer || 'Generic',
+        state: inp.state,
+        connection: inp.connection
+      });
+    });
+
+    const outputs: WebMidiPortInfo[] = [];
+    this.midiAccess.outputs.forEach((out) => {
+      outputs.push({
+        id: out.id,
+        name: out.name || `MIDI Output (${out.id.slice(0, 6)})`,
+        manufacturer: out.manufacturer || 'Generic',
+        state: out.state,
+        connection: out.connection
+      });
+    });
+
+    let nextInputId = this.webMidiState.selectedInputId;
+    if (nextInputId && !inputs.some(i => i.id === nextInputId)) {
+      nextInputId = '';
+    }
+    if (!nextInputId && inputs.length > 0) {
+      nextInputId = inputs[0].id;
+    }
+
+    let nextOutputId = this.webMidiState.selectedOutputId;
+    if (nextOutputId && !outputs.some(o => o.id === nextOutputId)) {
+      nextOutputId = '';
+    }
+    if (!nextOutputId && outputs.length > 0) {
+      nextOutputId = outputs[0].id;
+    }
+
+    this.webMidiState = {
+      ...this.webMidiState,
+      inputs,
+      outputs,
+      selectedInputId: nextInputId,
+      selectedOutputId: nextOutputId
+    };
+
+    this.attachActiveMidiInput();
+    this.syncSequencerMidiOutput();
+    this.notifyListeners();
+  }
+
+  private attachActiveMidiInput() {
+    if (this.attachedMidiInput) {
+      this.attachedMidiInput.onmidimessage = null;
+      this.attachedMidiInput = null;
+    }
+    if (!this.midiAccess || !this.webMidiState.selectedInputId) return;
+
+    const inp = this.midiAccess.inputs.get(this.webMidiState.selectedInputId);
+    if (!inp) return;
+
+    try {
+      void inp.open?.();
+    } catch {}
+
+    inp.onmidimessage = (ev: MIDIMessageEvent) => {
+      this.handleIncomingWebMidiMessage(ev);
+    };
+    this.attachedMidiInput = inp;
+  }
+
+  private handleIncomingWebMidiMessage(ev: MIDIMessageEvent) {
+    const data = ev.data;
+    if (!data || data.length === 0) return;
+
+    const status = data[0];
+    // Ignore MIDI active sensing / timing clock flooding (0xF8..0xFF)
+    if (status >= 0xf8) return;
+
+    if (!this.webMidiState.midiThruEnabled) return;
+
+    // Ensure AudioContext resumes smoothly on first keystroke
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      void this.audioCtx.resume().catch(() => {});
+    }
+    if (!this.synth) {
+      void this.init();
+    }
+
+    if (status === 0xf0) {
+      // SysEx message (strip leading 0xF0 for SpessaSynth systemExclusive)
+      const sysexPayload = Array.from(data.slice(1));
+      this.synth?.systemExclusive(sysexPayload, 0);
+      if (this.webMidiState.midiOutEnabled) {
+        this.sendToSelectedMidiOutput(Array.from(data));
+      }
+      this.webMidiState.lastInputActivity = `SysEx (${data.length} bytes)`;
+      this.emitLog(`[MIDI IN] SysEx (${data.length} bytes) -> WorkletSynthesizer`);
+      this.notifyListeners();
+      return;
+    }
+
+    const cmd = status & 0xf0;
+    const ch = status & 0x0f;
+    const filter = this.webMidiState.inputChannelFilter;
+    if (filter !== 'all' && ch !== filter) return;
+
+    const d1 = data.length > 1 ? data[1] & 0x7f : 0;
+    const d2 = data.length > 2 ? data[2] & 0x7f : 0;
+
+    if (cmd === 0x90) {
+      if (d2 > 0) {
+        const curvedVel = this.mapVelocityWithCurve(ch, d2);
+        this.synth?.noteOn(ch, d1, curvedVel);
+        if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+          this.sendToSelectedMidiOutput([0x90 | ch, d1, curvedVel]);
+        }
+        this.webMidiState.lastInputActivity = `CH${ch + 1} NoteOn #${d1} vel=${d2}`;
+      } else {
+        this.synth?.noteOff(ch, d1);
+        if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+          this.sendToSelectedMidiOutput([0x80 | ch, d1, 0]);
+        }
+        this.webMidiState.lastInputActivity = `CH${ch + 1} NoteOff #${d1}`;
+      }
+      this.notifyListeners();
+    } else if (cmd === 0x80) {
+      this.synth?.noteOff(ch, d1);
+      if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+        this.sendToSelectedMidiOutput([0x80 | ch, d1, 0]);
+      }
+      this.webMidiState.lastInputActivity = `CH${ch + 1} NoteOff #${d1}`;
+      this.notifyListeners();
+    } else if (cmd === 0xb0) {
+      this.synth?.controllerChange(ch, d1 as MIDIController, d2);
+      if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+        this.sendToSelectedMidiOutput([0xb0 | ch, d1, d2]);
+      }
+      this.webMidiState.lastInputActivity = `CH${ch + 1} CC ${d1} = ${d2}`;
+      this.notifyListeners();
+    } else if (cmd === 0xc0) {
+      this.synth?.programChange(ch, d1);
+      if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+        this.sendToSelectedMidiOutput([0xc0 | ch, d1]);
+      }
+      this.webMidiState.lastInputActivity = `CH${ch + 1} Program ${d1}`;
+      this.notifyListeners();
+    } else if (cmd === 0xe0) {
+      const val14 = (d2 << 7) | d1;
+      this.synth?.pitchWheel(ch, val14);
+      if (this.sequencerExternalHandlingActive() && this.webMidiState.midiOutEnabled) {
+        this.sendToSelectedMidiOutput([0xe0 | ch, d1, d2]);
+      }
+      this.webMidiState.lastInputActivity = `CH${ch + 1} PitchBend ${val14 - 8192}`;
+      this.notifyListeners();
+    }
+  }
+
+  public setSelectedMidiInputId(id: string) {
+    this.webMidiState = { ...this.webMidiState, selectedInputId: id };
+    this.attachActiveMidiInput();
+    this.notifyListeners();
+  }
+
+  public setMidiThruEnabled(enabled: boolean) {
+    this.webMidiState = { ...this.webMidiState, midiThruEnabled: enabled };
+    this.emitLog(`[WEB MIDI] MIDI Thru ${enabled ? 'ENABLED' : 'DISABLED'}`);
+    this.notifyListeners();
+  }
+
+  public setInputChannelFilter(filter: 'all' | number) {
+    this.webMidiState = { ...this.webMidiState, inputChannelFilter: filter };
+    this.emitLog(`[WEB MIDI] Input Channel Filter -> ${filter === 'all' ? 'All Channels (1–16)' : `Channel ${filter + 1}`}`);
+    this.notifyListeners();
+  }
+
+  public setSelectedMidiOutputId(id: string) {
+    this.sendAllNotesOffToMidiOut();
+    this.webMidiState = { ...this.webMidiState, selectedOutputId: id };
+    this.syncSequencerMidiOutput();
+    this.notifyListeners();
+  }
+
+  public setMidiOutEnabled(enabled: boolean) {
+    if (!enabled) {
+      this.sendAllNotesOffToMidiOut();
+    }
+    this.webMidiState = { ...this.webMidiState, midiOutEnabled: enabled };
+    this.syncSequencerMidiOutput();
+    this.applyInternalSynthMuteState();
+    this.emitLog(`[WEB MIDI] External MIDI Out ${enabled ? 'ENABLED' : 'DISABLED'}`);
+    this.notifyListeners();
+  }
+
+  public setMuteInternalOnMidiOut(mute: boolean) {
+    this.webMidiState = { ...this.webMidiState, muteInternalOnMidiOut: mute };
+    this.syncSequencerMidiOutput();
+    this.applyInternalSynthMuteState();
+    this.emitLog(`[WEB MIDI] Mute Internal Synth on MIDI Out: ${mute ? 'ON' : 'OFF'}`);
+    this.notifyListeners();
+  }
+
+  private getSelectedMidiOutputPort(): MIDIOutput | null {
+    if (!this.midiAccess || !this.webMidiState.selectedOutputId) return null;
+    return this.midiAccess.outputs.get(this.webMidiState.selectedOutputId) || null;
+  }
+
+  public sendToSelectedMidiOutput(bytes: number[]) {
+    if (!this.webMidiState.midiOutEnabled || !bytes || bytes.length === 0) return;
+    const out = this.getSelectedMidiOutputPort();
+    if (!out) return;
+
+    // Skip SysEx if browser did not grant SysEx permission (avoids InvalidAccessError)
+    if (bytes[0] === 0xf0 && !this.webMidiState.sysexEnabled) return;
+
+    try {
+      void out.open?.();
+      out.send(bytes);
+      const status = bytes[0];
+      const cmd = status & 0xf0;
+      const ch = (status & 0x0f) + 1;
+      if (status === 0xf0) {
+        this.webMidiState.lastOutputActivity = `SysEx (${bytes.length}B) -> ${out.name || 'MIDI Out'}`;
+      } else if (cmd === 0x90 && bytes[2] > 0) {
+        this.webMidiState.lastOutputActivity = `CH${ch} NoteOn #${bytes[1]} -> ${out.name || 'MIDI Out'}`;
+      } else if (cmd === 0xc0) {
+        this.webMidiState.lastOutputActivity = `CH${ch} Prog #${bytes[1]} -> ${out.name || 'MIDI Out'}`;
+      } else if (cmd === 0xb0) {
+        this.webMidiState.lastOutputActivity = `CH${ch} CC${bytes[1]}=${bytes[2]} -> ${out.name || 'MIDI Out'}`;
+      }
+    } catch (err) {
+      console.warn('MIDIOutput send note:', err);
+    }
+  }
+
+  private sendAllNotesOffToMidiOut() {
+    const out = this.getSelectedMidiOutputPort();
+    if (!out) return;
+    try {
+      for (let ch = 0; ch < 16; ch++) {
+        out.send([0xb0 | ch, 64, 0]);
+        out.send([0xb0 | ch, 120, 0]);
+        out.send([0xb0 | ch, 123, 0]);
+      }
+    } catch {}
+  }
+
+  private syncSequencerMidiOutput() {
+    const seq = this.sequencer;
+    if (!seq) return;
+
+    if (this.boundOutputProxy) {
+      try { seq.disconnectMIDIOutput(this.boundOutputProxy); } catch {}
+      this.boundOutputProxy = null;
+    }
+
+    const out = this.getSelectedMidiOutputPort();
+    if (this.webMidiState.midiOutEnabled && out) {
+      const proxy = {
+        send: (data: number[]) => {
+          this.sendToSelectedMidiOutput(data);
+        }
+      };
+      this.boundOutputProxy = proxy;
+      try {
+        seq.connectMIDIOutput(proxy, 0);
+        seq.externalMIDIPlayback = Boolean(this.webMidiState.muteInternalOnMidiOut);
+      } catch (e) {
+        console.warn('Sequencer MIDI output attach note:', e);
+      }
+    } else {
+      seq.externalMIDIPlayback = false;
+    }
   }
 }
 

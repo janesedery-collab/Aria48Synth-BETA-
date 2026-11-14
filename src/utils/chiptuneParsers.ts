@@ -1,7 +1,7 @@
 import { INITIAL_PATTERNS } from '../initialPatterns';
-import { getAudioContext, loadSoundFontIntoCoreAndLib, renderModToAudioBuffer } from '../components/AudioEngine';
+import { getAudioContext, loadSoundFontIntoCoreAndLib } from '../components/AudioEngine';
 import { isSoundFontFileName } from '../engines/spressasynthCore';
-import { registerCustomInstrument } from './soundFontEngine';
+import { LoadedSequenceMetadata, WorkletSynthBridge } from '../engines/workletSynthBridge';
 
 // Exact ProTracker Period Table (Octaves 2 through 6)
 const AMIGA_PERIOD_TABLE: { p: number; n: string }[] = [
@@ -52,6 +52,7 @@ export interface ChiptuneImportResult {
   bpm: number;
   chipType: string;
   title: string;
+  fileName?: string;
   duration?: string;
   log: string[];
   octaveRange?: string;
@@ -59,6 +60,7 @@ export interface ChiptuneImportResult {
   audioBuffer?: AudioBuffer;
   rawMidiBuffer?: ArrayBuffer;
   channelSoundFonts?: { [channelId: number]: string };
+  sequenceMetadata?: LoadedSequenceMetadata;
 }
 
 export function formatDuration(seconds: number): string {
@@ -150,14 +152,17 @@ export function parseChiptuneFile(
   
   let result: ChiptuneImportResult;
 
-  if (extension === '.mid' || extension === '.midi') {
-    result = parseMIDI(arrayBuffer, logs);
-  } else if (extension === '.mod') {
-    result = parseMOD(arrayBuffer, logs);
-  } else if (extension === '.xm') {
-    result = parseXM(arrayBuffer, logs);
-  } else if (extension === '.s3m') {
-    result = parseS3M(arrayBuffer, logs);
+  if (
+    extension === '.mid' ||
+    extension === '.midi' ||
+    extension === '.kar' ||
+    extension === '.rmi' ||
+    extension === '.xmf' ||
+    extension === '.mod' ||
+    extension === '.xm' ||
+    extension === '.s3m'
+  ) {
+    result = parseBasicMidiSequence(fileName, arrayBuffer, logs);
   } else if (extension === '.it') {
     result = parseIT(arrayBuffer, logs);
   } else if (extension === '.sid') {
@@ -214,9 +219,11 @@ export function parseChiptuneFile(
         log: [...logs, `[SUCCESS] Loaded sequence JSON mapping file.`]
       };
     } catch {
-      throw new Error(`Unsupported file format '${extension}'. Accepts MIDI, MOD, XM, S3M, IT, SID, NSF, GBS, VGM, SPC, FTM, SF2, SF3, WAV, MP3.`);
+      throw new Error(`Unsupported file format '${extension}'. Accepts MIDI (.mid/.rmi/.kar/.xmf), MOD, XM, S3M, IT, SID, NSF, GBS, VGM, SPC, FTM, SF2, SF3, WAV, MP3.`);
     }
   }
+
+  result.fileName = fileName;
 
   // ENRICH WITH DETAILED DYNAMIC METADATA ANALYSIS
   const analysis = analyzePatternMatrix(result.patterns);
@@ -233,31 +240,33 @@ export function parseChiptuneFile(
 }
 
 /**
- * 1. STANDARD MIDI FILE (.mid / .midi) MULTI-PATTERN PARSER
- * Splits the song chronologically into consecutive 64-row patterns without squashing or collision!
+ * 1. UNIFIED SPESSASYNTH BasicMIDI PARSER (.mid, .midi, .rmi, .kar, .xmf, .mod, .xm, .s3m)
+ * Uses BasicMIDI.fromArrayBuffer(arrayBuffer, fileName) from spessasynth_core directly
+ * (which automatically converts MOD/XM/S3M tracker modules into MIDI events + embedded SoundBank).
  */
-function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
-  const u8 = new Uint8Array(arrayBuffer);
-  const view = new DataView(arrayBuffer);
-  
-  const magic = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
-  if (magic !== "MThd") {
-    throw new Error("Invalid Standard MIDI File format (Missing MThd magic chunk)");
+function parseBasicMidiSequence(
+  fileName: string,
+  arrayBuffer: ArrayBuffer,
+  logs: string[]
+): ChiptuneImportResult {
+  const ext = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.') + 1).toUpperCase() : 'MID';
+  const { basicMidi, metadata } = WorkletSynthBridge.extractBasicMidiMetadata(arrayBuffer.slice(0), fileName);
+
+  const ticksPerQuarterNote = Math.max(1, basicMidi.timeDivision || 480);
+  const ticksPer16th = Math.max(1, ticksPerQuarterNote / 4);
+  const detectedBpm = metadata.bpm || 125;
+  const songTitle = metadata.title || fileName.replace(/\.[^.]+$/, '');
+
+  logs.push(
+    `[SPESSASYNTH] Parsed ${ext} via BasicMIDI.fromArrayBuffer -> "${songTitle}" | Tracks: ${basicMidi.tracks?.length || 1} | PPQ: ${ticksPerQuarterNote} | BPM: ${detectedBpm}`
+  );
+  if (metadata.hasEmbeddedSoundBank) {
+    logs.push(
+      `[TRACKER BANK] Embedded SoundFont compiled from ${ext} audio samples (${metadata.samplePresets.length} sample presets)`
+    );
   }
 
-  const headerLength = view.getUint32(4, false);
-  const formatType = view.getUint16(8, false);
-  const trackCount = view.getUint16(10, false);
-  const ticksPerQuarterNote = view.getUint16(12, false) || 480;
-  
-  logs.push(`[MIDI] Format Type ${formatType} | Tracks: ${trackCount} | Division: ${ticksPerQuarterNote} PPQ`);
-
-  let offset = 8 + headerLength;
-  let maxAbsoluteTick = 0;
-  let detectedBpm = 120;
-  let songTitle = "MIDI Track";
-  
-  interface MidiNoteEvent {
+  interface ParsedNoteEvent {
     tick: number;
     channel: number;
     track: number;
@@ -265,123 +274,67 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
     velocity: number;
     instrument: number;
   }
-  const noteEvents: MidiNoteEvent[] = [];
-  const MAX_TRACKER_PREVIEW_EVENTS = 64000;
-  let totalRawNotesParsed = 0;
-  const channelInstruments: { [channel: number]: number } = {};
 
-  for (let trackIdx = 0; trackIdx < trackCount; trackIdx++) {
-    if (offset + 8 > u8.length) break;
-    const chunkType = String.fromCharCode(u8[offset], u8[offset + 1], u8[offset + 2], u8[offset + 3]);
-    const chunkLen = view.getUint32(offset + 4, false);
-    
-    if (chunkType === "MTrk") {
-      let tOffset = offset + 8;
-      const tEnd = Math.min(tOffset + chunkLen, u8.length);
-      let absoluteTick = 0;
-      let runningStatus = 0;
-      
-      while (tOffset < tEnd) {
-        // Delta time
-        let deltaTime = 0;
-        while (tOffset < tEnd) {
-          const byte = u8[tOffset++];
-          deltaTime = (deltaTime << 7) | (byte & 0x7F);
-          if (!(byte & 0x80)) break;
-        }
-        absoluteTick += deltaTime;
-        if (absoluteTick > maxAbsoluteTick) maxAbsoluteTick = absoluteTick;
-        if (tOffset >= tEnd) break;
-        
-        let statusByte = u8[tOffset++];
-        if (!(statusByte & 0x80)) {
-          statusByte = runningStatus;
-          tOffset--;
-        } else {
-          runningStatus = statusByte;
-        }
-        
-        const eventType = statusByte & 0xF0;
-        const midiCh = statusByte & 0x0F;
-        
-        if (eventType === 0x90) { // Note ON
-          if (tOffset + 1 >= tEnd) break;
-          const noteNumber = u8[tOffset++];
-          const velocity = u8[tOffset++];
-          
-          if (velocity > 0) {
-            totalRawNotesParsed++;
-            if (noteEvents.length < MAX_TRACKER_PREVIEW_EVENTS) {
-              noteEvents.push({
-                tick: absoluteTick,
-                channel: midiCh,
-                track: trackIdx + 1,
-                note: noteNumber,
-                velocity,
-                instrument: channelInstruments[midiCh] ?? (midiCh === 9 ? 128 : 0)
-              });
-            }
+  const noteEvents: ParsedNoteEvent[] = [];
+  const MAX_TRACKER_PREVIEW_EVENTS = 64000;
+  let maxAbsoluteTick = Math.max(1, basicMidi.lastVoiceEventTick || 0);
+  let totalRawNotesParsed = 0;
+
+  const tracks = basicMidi.tracks || [];
+  for (let trackIdx = 0; trackIdx < tracks.length; trackIdx++) {
+    const trk = tracks[trackIdx];
+    const events = trk?.events || [];
+    const trackPrograms = new Int16Array(16).fill(-1);
+    let trackBaseChannel = 0;
+
+    for (const ev of events) {
+      const tick = typeof ev.ticks === 'number' ? ev.ticks : 0;
+      if (tick > maxAbsoluteTick) maxAbsoluteTick = tick;
+
+      const status = ev.statusByte || 0;
+      const cmd = status & 0xf0;
+      const ch = status & 0x0f;
+      const data = ev.data;
+      if (!data) continue;
+
+      if (cmd === 0xc0) {
+        trackPrograms[ch] = data[0] & 0x7f;
+        trackBaseChannel = ch;
+      } else if (cmd === 0x90) {
+        const noteNumber = data[0] & 0x7f;
+        const velocity = data[1] & 0x7f;
+        if (velocity > 0) {
+          totalRawNotesParsed++;
+          trackBaseChannel = ch;
+          if (noteEvents.length < MAX_TRACKER_PREVIEW_EVENTS) {
+            const inst = trackPrograms[ch] >= 0 ? trackPrograms[ch] : (ch === 9 ? 128 : 0);
+            noteEvents.push({
+              tick,
+              channel: ch,
+              track: trackIdx + 1,
+              note: noteNumber,
+              velocity,
+              instrument: inst
+            });
           }
-        } else if (eventType === 0x80) { // Note OFF
-          tOffset += 2;
-        } else if (eventType === 0xC0) { // Program / Instrument change
-          if (tOffset < tEnd) {
-            const prog = u8[tOffset++];
-            channelInstruments[midiCh] = prog;
-          }
-        } else if (eventType === 0xD0) {
-          tOffset += 1;
-        } else if (eventType === 0xA0 || eventType === 0xB0 || eventType === 0xE0) {
-          tOffset += 2;
-        } else if (statusByte === 0xFF) { // Meta Event
-          if (tOffset >= tEnd) break;
-          const metaType = u8[tOffset++];
-          let metaLen = 0;
-          while (tOffset < tEnd) {
-            const byte = u8[tOffset++];
-            metaLen = (metaLen << 7) | (byte & 0x7F);
-            if (!(byte & 0x80)) break;
-          }
-          if (metaType === 0x51 && metaLen === 3 && tOffset + 3 <= tEnd) {
-            const mspq = (u8[tOffset] << 16) | (u8[tOffset + 1] << 8) | u8[tOffset + 2];
-            const bpm = Math.round(60000000 / mspq);
-            if (bpm >= 30 && bpm <= 320) detectedBpm = bpm;
-          } else if ((metaType === 0x03 || metaType === 0x01) && metaLen > 0 && tOffset + metaLen <= tEnd) {
-            let t = "";
-            for (let c = 0; c < Math.min(metaLen, 40); c++) t += String.fromCharCode(u8[tOffset + c]);
-            if (t.trim() && songTitle === "MIDI Track") songTitle = t.trim();
-          }
-          tOffset += metaLen;
-        } else if (statusByte === 0xF0 || statusByte === 0xF7) { // SysEx
-          let syxLen = 0;
-          while (tOffset < tEnd) {
-            const byte = u8[tOffset++];
-            syxLen = (syxLen << 7) | (byte & 0x7F);
-            if (!(byte & 0x80)) break;
-          }
-          tOffset += syxLen;
         }
       }
     }
-    offset += 8 + chunkLen;
+    void trackBaseChannel;
   }
-  
-  logs.push(`[MIDI] Parsed ${totalRawNotesParsed} raw note events across tracks.`);
 
-  // Calculate chronological 16th note steps and patterns count
-  const ticksPer16th = Math.max(1, ticksPerQuarterNote / 4);
-  const totalSteps = Math.ceil(maxAbsoluteTick / ticksPer16th);
+  logs.push(`[SPESSASYNTH] Extracted ${totalRawNotesParsed} MIDI note events across ${tracks.length} tracks.`);
+
+  const totalSteps = Math.max(64, Math.ceil(maxAbsoluteTick / ticksPer16th));
   const totalPatterns = Math.max(1, Math.min(256, Math.ceil(totalSteps / 64)));
+  const totalRowCount = totalPatterns * 64;
 
-  logs.push(`[MIDI] Total Steps: ${totalSteps} -> Generating ${totalPatterns} consecutive 64-row patterns`);
+  const updatedMetadata: LoadedSequenceMetadata = {
+    ...metadata,
+    patternCount: totalPatterns,
+    rowCount: totalRowCount
+  };
 
-  // Build clean sequential patterns (16 channels base for Standard MIDI)
-  const allPatternsList: any[][] = [];
-  for (let p = 0; p < totalPatterns; p++) {
-    allPatternsList.push(createEmptyPattern(16));
-  }
-
-  // Detect whether MIDI channels or MIDI tracks delineate separate parts
   const distinctChannels = new Set<number>();
   const distinctTracksWithNotes = new Set<number>();
   for (const ev of noteEvents) {
@@ -390,7 +343,23 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
   }
   const useTrackAsChannel = distinctChannels.size <= 1 && distinctTracksWithNotes.size > 1;
 
-  function getGmPreset(prog: number, isDrums = false): string {
+  const baseChCount = Math.max(
+    4,
+    Math.min(
+      48,
+      Math.max(
+        useTrackAsChannel ? tracks.length : Math.max(...Array.from(distinctChannels).map(c => c + 1), 8),
+        metadata.isTrackerConverted ? 8 : 16
+      )
+    )
+  );
+
+  const allPatternsList: any[][] = [];
+  for (let p = 0; p < totalPatterns; p++) {
+    allPatternsList.push(createEmptyPattern(Math.max(16, baseChCount)));
+  }
+
+  function getGmPresetId(prog: number, isDrums = false): string {
     if (isDrums) return 'gm_drums';
     if (prog <= 7) return 'gm_piano';
     if (prog <= 15) return 'gm_epiano';
@@ -407,23 +376,25 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
 
   const channelSoundFonts: { [ch: number]: string } = {};
 
-  // Populate note events into their exact pattern and row
   for (const ev of noteEvents) {
     const step = Math.round(ev.tick / ticksPer16th);
     const patIdx = Math.floor(step / 64);
     const rowIdx = step % 64;
 
     if (patIdx >= 0 && patIdx < totalPatterns && rowIdx >= 0 && rowIdx < 64) {
-      let targetCh = useTrackAsChannel 
-        ? ((ev.track - 1) % 16) + 1 
+      let targetCh = useTrackAsChannel
+        ? ((ev.track - 1) % 16) + 1
         : (ev.channel % 16) + 1;
       if (targetCh < 1) targetCh = 1;
 
       const isDrums = ev.channel === 9 || targetCh === 10;
-      const presetId = getGmPreset(ev.instrument, isDrums);
-      channelSoundFonts[targetCh] = presetId;
+      const presetId = metadata.hasEmbeddedSoundBank
+        ? `embedded_${ev.instrument.toString().padStart(3, '0')}`
+        : getGmPresetId(ev.instrument, isDrums);
+      if (!metadata.hasEmbeddedSoundBank) {
+        channelSoundFonts[targetCh] = presetId;
+      }
 
-      // If channel is already occupied at this row (polyphony/chords), find companion voice
       const existingCell = allPatternsList[patIdx][rowIdx][targetCh];
       if (existingCell && existingCell.note !== "---") {
         let placed = false;
@@ -431,7 +402,7 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
           const altCell = allPatternsList[patIdx][rowIdx][altCh];
           if (!altCell || altCell.note === "---") {
             targetCh = altCh;
-            channelSoundFonts[targetCh] = presetId;
+            if (!metadata.hasEmbeddedSoundBank) channelSoundFonts[targetCh] = presetId;
             placed = true;
             break;
           }
@@ -441,7 +412,7 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
             const checkCell = allPatternsList[patIdx][rowIdx][c];
             if (!checkCell || checkCell.note === "---") {
               targetCh = c;
-              channelSoundFonts[targetCh] = presetId;
+              if (!metadata.hasEmbeddedSoundBank) channelSoundFonts[targetCh] = presetId;
               break;
             }
           }
@@ -450,452 +421,57 @@ function parseMIDI(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResu
 
       allPatternsList[patIdx][rowIdx][targetCh] = {
         note: getNoteNameFromMidi(ev.note),
-        inst: isDrums ? "99" : (ev.instrument > 0 ? ev.instrument.toString(16).toUpperCase().padStart(2, '0') : "01"),
+        inst: isDrums && !metadata.hasEmbeddedSoundBank
+          ? "99"
+          : (ev.instrument + 1).toString(16).toUpperCase().padStart(2, '0'),
         vol: Math.min(99, Math.round((ev.velocity / 127) * 99)).toString(16).toUpperCase().padStart(2, '0'),
         delay: "000"
       };
     }
   }
 
-  const ticksPerQ = ticksPerQuarterNote > 0 ? ticksPerQuarterNote : 480;
-  const totalBeats = maxAbsoluteTick / ticksPerQ;
-  const midiDurationSeconds = totalBeats * (60 / detectedBpm);
-  const computedDuration = formatDuration(midiDurationSeconds > 4 ? midiDurationSeconds : (totalPatterns * 8));
+  const computedDuration = formatDuration(
+    updatedMetadata.durationSeconds > 1 ? updatedMetadata.durationSeconds : totalPatterns * 8
+  );
 
-  const finalChCount = Math.max(8, Math.min(48, Math.max(...Object.keys(channelSoundFonts).map(Number), 8)));
+  const chipTypeLabel =
+    ext === 'MOD'
+      ? 'PAULA (Amiga MOD via SpessaSynth)'
+      : ext === 'XM'
+        ? 'FastTracker II (XM via SpessaSynth)'
+        : ext === 'S3M'
+          ? 'ScreamTracker III (S3M via SpessaSynth)'
+          : ext === 'RMI'
+            ? 'RIFF MIDI (.RMI via SpessaSynth)'
+            : ext === 'KAR'
+              ? 'Karaoke MIDI (.KAR via SpessaSynth)'
+              : ext === 'XMF'
+                ? 'Mobile XMF (.XMF via SpessaSynth)'
+                : 'General MIDI (SoundFont)';
+
+  const finalChCount = Math.max(
+    4,
+    Math.min(48, Math.max(metadata.activeChannels.length, ...Object.keys(channelSoundFonts).map(Number), baseChCount))
+  );
 
   return {
     patterns: allPatternsList[0],
     allPatterns: allPatternsList,
     bpm: detectedBpm,
-    chipType: "General MIDI (SoundFont)",
+    chipType: chipTypeLabel,
     title: songTitle,
+    fileName,
     duration: computedDuration,
     channelsCount: finalChCount,
     rawMidiBuffer: arrayBuffer,
-    channelSoundFonts,
-    log: [
-      ...logs, 
-      `[SUCCESS] Multi-track Standard MIDI parsed into ${totalPatterns} ordered patterns!`,
-      `[METADATA] Calculated duration: ${computedDuration} (${totalPatterns} patterns @ ${detectedBpm} BPM)`
-    ]
-  };
-}
-
-/**
- * 2. AMIGA PROTRACKER (.mod) MULTI-PATTERN PARSER
- * Follows the authentic song order table to build the full chronological song!
- */
-function parseMOD(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
-  const u8 = new Uint8Array(arrayBuffer);
-  
-  let title = "";
-  for (let i = 0; i < 20; i++) {
-    const char = u8[i];
-    if (char === 0) break;
-    title += String.fromCharCode(char);
-  }
-  title = title.trim() || "Amiga ProTracker Module";
-  logs.push(`[MOD] Title: "${title}"`);
-  
-  let signature = "";
-  for (let i = 1080; i < 1084; i++) {
-    signature += String.fromCharCode(u8[i]);
-  }
-  
-  let channelsCount = 4;
-  const sigMatch = signature.match(/(\d+)CH/);
-  const cnMatch = signature.match(/(\d+)CN/);
-  if (sigMatch) channelsCount = parseInt(sigMatch[1], 10);
-  else if (cnMatch) channelsCount = parseInt(cnMatch[1], 10);
-  else if (signature === "M.K." || signature === "M!K!" || signature === "FLT4") channelsCount = 4;
-
-  const songLength = u8[950] || 1;
-  const orderList: number[] = [];
-  let maxPatternIdx = 0;
-  // Scan strictly within active song orders (0 .. songLength - 1)
-  for (let i = 0; i < songLength; i++) {
-    const patIdx = u8[952 + i];
-    orderList.push(patIdx);
-    if (patIdx < 128 && patIdx > maxPatternIdx) maxPatternIdx = patIdx;
-  }
-
-  logs.push(`[MOD] Channels: ${channelsCount} | Orders: ${songLength} | Distinct Patterns: ${maxPatternIdx + 1}`);
-
-  const patternStartOffset = 1084;
-  let modBpm = 125;
-
-  // Extract authentic 8-bit signed PCM samples from the module
-  try {
-    const ctx = getAudioContext();
-    if (ctx) {
-      // Calculate total sample size across all 31 sample slots
-      let totalSampleBytes = 0;
-      const sampleHeaders: { lengthBytes: number; repeatOffsetWords: number; repeatLengthWords: number; sName: string; finetune: number }[] = [];
-      for (let sIdx = 0; sIdx < 31; sIdx++) {
-        const headerOffset = 20 + (sIdx * 30);
-        let sName = "";
-        let lengthBytes = 0;
-        let repeatOffsetWords = 0;
-        let repeatLengthWords = 0;
-        let finetune = 0;
-        if (headerOffset + 30 <= u8.length) {
-          for (let c = 0; c < 22; c++) {
-            const char = u8[headerOffset + c];
-            if (char > 32 && char < 127) sName += String.fromCharCode(char);
-          }
-          const lengthWords = (u8[headerOffset + 22] << 8) | u8[headerOffset + 23];
-          lengthBytes = lengthWords * 2;
-          finetune = u8[headerOffset + 24] & 0x0F;
-          if (finetune > 7) finetune -= 16;
-          repeatOffsetWords = (u8[headerOffset + 26] << 8) | u8[headerOffset + 27];
-          repeatLengthWords = (u8[headerOffset + 28] << 8) | u8[headerOffset + 29];
-        }
-        totalSampleBytes += lengthBytes;
-        sampleHeaders.push({ lengthBytes, repeatOffsetWords, repeatLengthWords, sName, finetune });
-      }
-
-      const patternBytes = 64 * channelsCount * 4;
-      const sampleStartFromPatterns = patternStartOffset + (maxPatternIdx + 1) * patternBytes;
-      let sampleDataOffset = sampleStartFromPatterns;
-      if (sampleStartFromPatterns + totalSampleBytes > u8.length) {
-        const sampleStartFromEnd = arrayBuffer.byteLength - totalSampleBytes;
-        if (sampleStartFromEnd >= patternStartOffset) {
-          sampleDataOffset = sampleStartFromEnd;
-        }
-      }
-
-      for (let sIdx = 0; sIdx < 31; sIdx++) {
-        const { lengthBytes, repeatOffsetWords, repeatLengthWords, sName } = sampleHeaders[sIdx];
-        if (lengthBytes > 0 && sampleDataOffset < u8.length) {
-          const readLen = Math.min(lengthBytes, u8.length - sampleDataOffset);
-          const sampleBuf = ctx.createBuffer(1, lengthBytes, 8287);
-          const channelPcm = sampleBuf.getChannelData(0);
-          const s8 = new Int8Array(arrayBuffer, sampleDataOffset, readLen);
-          for (let i = 0; i < readLen; i++) {
-            channelPcm[i] = s8[i] / 128.0;
-          }
-
-          const instHex = (sIdx + 1).toString(16).toUpperCase().padStart(2, '0');
-          const instId = `mod_inst_${instHex.toLowerCase()}`;
-          const instName = `${instHex}: ${sName.trim() || `Amiga Sample ${instHex}`}`;
-          
-          let loopStart: number | undefined = undefined;
-          let loopEnd: number | undefined = undefined;
-          // In ProTracker: loop length is words; when <= 1 word (<= 2 bytes), sample does not loop
-          if (repeatLengthWords > 1) {
-            const lStart = repeatOffsetWords * 2;
-            const lEnd = (repeatOffsetWords + repeatLengthWords) * 2;
-            if (lStart < lengthBytes && lEnd > lStart + 2) {
-              loopStart = lStart;
-              loopEnd = Math.min(lengthBytes, lEnd);
-            }
-          }
-
-          registerCustomInstrument(instId, instName, sampleBuf, 60, 8287, loopStart, loopEnd);
-          sampleDataOffset += readLen;
-        }
-      }
-      logs.push(`[MOD] Extracted authentic 8-bit Amiga PCM samples into Audio Sampler.`);
-    }
-  } catch (sampleErr) {
-    console.log("MOD PCM extraction skipped:", sampleErr);
-  }
-
-  // 1. Unpack all distinct pattern blocks
-  const distinctPatternsMap = new Map<number, any[]>();
-  for (let pIdx = 0; pIdx <= maxPatternIdx; pIdx++) {
-    const pOffset = patternStartOffset + pIdx * (64 * channelsCount * 4);
-    if (pOffset + (64 * channelsCount * 4) <= arrayBuffer.byteLength) {
-      const pat = createEmptyPattern(channelsCount);
-      for (let row = 0; row < 64; row++) {
-        for (let ch = 0; ch < channelsCount; ch++) {
-          const offset = pOffset + (row * channelsCount * 4) + (ch * 4);
-          const byte0 = u8[offset];
-          const byte1 = u8[offset + 1];
-          const byte2 = u8[offset + 2];
-          const byte3 = u8[offset + 3];
-          
-          const period = ((byte0 & 0x0F) << 8) | byte1;
-          const instIdx = (byte0 & 0xF0) | ((byte2 & 0xF0) >> 4);
-          const effect = byte2 & 0x0F;
-          const effectParam = byte3;
-          
-          if (effect === 0x0F && effectParam >= 32 && modBpm === 125) {
-            modBpm = effectParam;
-          }
-          
-          const noteName = getNoteNameFromPeriod(period);
-          if (noteName !== "---") {
-            const activeCh = ch + 1;
-            pat[row][activeCh] = {
-              note: noteName,
-              inst: instIdx > 0 ? instIdx.toString(16).toUpperCase().padStart(2, '0') : "01",
-              vol: "80", 
-              delay: (effect === 9) ? effectParam.toString().padStart(3, '0') : "000"
-            };
-          }
-        }
-      }
-      distinctPatternsMap.set(pIdx, pat);
-    }
-  }
-
-  // 2. Build ordered full song patterns sequence
-  const fullSongPatterns: any[][] = [];
-  for (const patIdx of orderList) {
-    const pat = distinctPatternsMap.get(patIdx) || createEmptyPattern(channelsCount);
-    fullSongPatterns.push(pat);
-  }
-
-  if (fullSongPatterns.length === 0) {
-    fullSongPatterns.push(createEmptyPattern(channelsCount));
-  }
-
-  const modDurationInSeconds = songLength * ((64 * 60) / (modBpm * 4));
-  const computedDuration = formatDuration(modDurationInSeconds);
-
-  // Render authentic 8-bit Paula PCM audio buffer
-  let renderedAudioBuffer: AudioBuffer | undefined = undefined;
-  try {
-    const ctx = getAudioContext();
-    if (ctx) {
-      const rendered = renderModToAudioBuffer(arrayBuffer, ctx);
-      if (rendered) {
-        renderedAudioBuffer = rendered;
-        logs.push(`[MOD ENGINE] Rendered 8-bit Paula PCM samples to pristine ${rendered.duration.toFixed(1)}s stereo AudioBuffer.`);
-      }
-    }
-  } catch (renderErr) {
-    console.log("ProTracker PCM audio render bypassed:", renderErr);
-  }
-
-  return {
-    patterns: fullSongPatterns[0],
-    allPatterns: fullSongPatterns,
-    bpm: modBpm,
-    chipType: "PAULA (Amiga PCM)",
-    title,
-    duration: computedDuration,
-    channelsCount,
-    audioBuffer: renderedAudioBuffer,
-    log: [
-      ...logs, 
-      `[SUCCESS] Amiga ProTracker unpacked into ${fullSongPatterns.length} sequential song patterns!`,
-      `[METADATA] Total duration: ${computedDuration} (${songLength} orders @ ${modBpm} BPM)`
-    ]
-  };
-}
-
-/**
- * 3. FASTTRACKER II EXTENDED MODULE (.xm) MULTI-PATTERN PARSER
- */
-function parseXM(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
-  const u8 = new Uint8Array(arrayBuffer);
-  const view = new DataView(arrayBuffer);
-  
-  let sig = "";
-  for (let i = 0; i < 17; i++) sig += String.fromCharCode(u8[i]);
-  if (!sig.startsWith("Extended Module")) {
-    throw new Error("Invalid FastTracker II XM file (Missing 'Extended Module' signature)");
-  }
-
-  let title = "";
-  for (let i = 17; i < 37; i++) {
-    if (u8[i] === 0) break;
-    title += String.fromCharCode(u8[i]);
-  }
-  title = title.trim() || "FastTracker II Module";
-  logs.push(`[XM] Title: "${title}"`);
-
-  const headerSize = view.getUint32(60, true);
-  const songLength = view.getUint16(64, true) || 1;
-  const channelsCount = Math.min(48, view.getUint16(68, true) || 8);
-  const patternsCount = view.getUint16(70, true) || 1;
-  const defaultTempo = view.getUint16(78, true) || 125;
-
-  // Read order list from offset 80
-  const orderList: number[] = [];
-  for (let i = 0; i < songLength; i++) {
-    orderList.push(u8[80 + i]);
-  }
-
-  logs.push(`[XM] Channels: ${channelsCount} | Patterns: ${patternsCount} | Song Length: ${songLength} orders`);
-
-  // Unpack distinct patterns
-  const distinctPatternsMap = new Map<number, any[]>();
-  let pOffset = 60 + headerSize;
-
-  for (let p = 0; p < patternsCount; p++) {
-    if (pOffset + 9 > u8.length) break;
-    const pHeaderLen = view.getUint32(pOffset, true);
-    const numRows = view.getUint16(pOffset + 5, true) || 64;
-    const pDataSize = view.getUint16(pOffset + 7, true);
-    let dOffset = pOffset + pHeaderLen;
-    const dEnd = dOffset + pDataSize;
-
-    const pat = createEmptyPattern(channelsCount);
-
-    if (pDataSize > 0) {
-      for (let r = 0; r < Math.min(numRows, 64); r++) {
-        for (let ch = 0; ch < channelsCount; ch++) {
-          if (dOffset >= dEnd || dOffset >= u8.length) break;
-          const byte0 = u8[dOffset++];
-          
-          let note = 0;
-          let inst = 0;
-          let vol = 0;
-          let fxType = 0;
-          let fxParam = 0;
-
-          if (byte0 & 0x80) { // Compressed packing
-            if (byte0 & 0x01) note = u8[dOffset++];
-            if (byte0 & 0x02) inst = u8[dOffset++];
-            if (byte0 & 0x04) vol = u8[dOffset++];
-            if (byte0 & 0x08) fxType = u8[dOffset++];
-            if (byte0 & 0x10) fxParam = u8[dOffset++];
-          } else {
-            note = byte0;
-            inst = u8[dOffset++];
-            vol = u8[dOffset++];
-            fxType = u8[dOffset++];
-            fxParam = u8[dOffset++];
-          }
-
-          if (note > 0 && note <= 96) {
-            const noteName = getNoteNameFromMidi(note + 11);
-            const activeCh = ch + 1;
-            pat[r][activeCh] = {
-              note: noteName,
-              inst: inst > 0 ? inst.toString(16).toUpperCase().padStart(2, '0') : "01",
-              vol: vol >= 0x10 && vol <= 0x50 ? Math.min(99, vol - 16).toString(16).toUpperCase().padStart(2, '0') : "80",
-              delay: fxType === 9 ? fxParam.toString().padStart(3, '0') : "000"
-            };
-          }
-        }
-      }
-    }
-    distinctPatternsMap.set(p, pat);
-    pOffset += pHeaderLen + pDataSize;
-  }
-
-  // Construct full ordered sequence
-  const fullSongPatterns: any[][] = [];
-  for (const patIdx of orderList) {
-    fullSongPatterns.push(distinctPatternsMap.get(patIdx) || createEmptyPattern(channelsCount));
-  }
-
-  if (fullSongPatterns.length === 0) {
-    fullSongPatterns.push(createEmptyPattern(channelsCount));
-  }
-
-  const durationSec = songLength * ((64 * 60) / (defaultTempo * 4));
-
-  return {
-    patterns: fullSongPatterns[0],
-    allPatterns: fullSongPatterns,
-    bpm: defaultTempo,
-    chipType: "Virtual DAC",
-    title,
-    duration: formatDuration(durationSec),
-    channelsCount,
+    channelSoundFonts: Object.keys(channelSoundFonts).length > 0 ? channelSoundFonts : undefined,
+    sequenceMetadata: updatedMetadata,
     log: [
       ...logs,
-      `[SUCCESS] FastTracker II XM unpacked ${fullSongPatterns.length} sequential patterns!`,
-      `[METADATA] Total duration: ${formatDuration(durationSec)}`
-    ]
-  };
-}
-
-/**
- * 4. SCREAMTRACKER III (.s3m) MULTI-PATTERN PARSER
- */
-function parseS3M(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
-  const u8 = new Uint8Array(arrayBuffer);
-  const view = new DataView(arrayBuffer);
-
-  let title = "";
-  for (let i = 0; i < 28; i++) {
-    if (u8[i] === 0) break;
-    title += String.fromCharCode(u8[i]);
-  }
-  title = title.trim() || "ScreamTracker III Song";
-
-  const orderCount = view.getUint16(32, true);
-  const instrumentCount = view.getUint16(34, true);
-  const patternCount = view.getUint16(36, true);
-  const initialTempo = u8[50] || 125;
-
-  // Read orders
-  const orders: number[] = [];
-  for (let i = 0; i < orderCount; i++) {
-    const ord = u8[96 + i];
-    if (ord < 254) orders.push(ord);
-  }
-
-  logs.push(`[S3M] Orders: ${orders.length} | Patterns: ${patternCount} | Tempo: ${initialTempo} BPM`);
-
-  const patternPointersOffset = 96 + orderCount + (instrumentCount * 2);
-  const distinctPatternsMap = new Map<number, any[]>();
-
-  for (let p = 0; p < Math.min(patternCount, 32); p++) {
-    if (patternPointersOffset + (p * 2) + 2 <= u8.length) {
-      const patPara = view.getUint16(patternPointersOffset + (p * 2), true);
-      const patOffset = patPara * 16;
-      if (patOffset + 2 < u8.length) {
-        const patLen = view.getUint16(patOffset, true);
-        let dOffset = patOffset + 2;
-        const dEnd = Math.min(patOffset + patLen, u8.length);
-
-        const pat = createEmptyPattern(16);
-        let row = 0;
-        while (dOffset < dEnd && row < 64) {
-          const b = u8[dOffset++];
-          if (b === 0) {
-            row++;
-            continue;
-          }
-          const ch = (b & 31) + 1;
-          if (b & 32) {
-            const noteRaw = u8[dOffset++];
-            const inst = u8[dOffset++];
-            if (noteRaw !== 255 && noteRaw !== 254 && ch <= 16) {
-              const oct = (noteRaw >> 4) & 0x0F;
-              const noteIdx = noteRaw & 0x0F;
-              const noteName = `${NOTE_NAMES[noteIdx % 12]}${Math.min(8, oct)}`;
-              pat[row][ch] = {
-                note: noteName,
-                inst: inst > 0 ? inst.toString(16).toUpperCase().padStart(2, '0') : "01",
-                vol: "80",
-                delay: "000"
-              };
-            }
-          }
-          if (b & 64) dOffset++;
-          if (b & 128) dOffset += 2;
-        }
-        distinctPatternsMap.set(p, pat);
-      }
-    }
-  }
-
-  const fullSongPatterns: any[][] = [];
-  for (const ord of orders) {
-    fullSongPatterns.push(distinctPatternsMap.get(ord) || createEmptyPattern(16));
-  }
-  if (fullSongPatterns.length === 0) fullSongPatterns.push(createEmptyPattern(16));
-
-  return {
-    patterns: fullSongPatterns[0],
-    allPatterns: fullSongPatterns,
-    bpm: initialTempo,
-    chipType: "YMF262 (OPL3 FM)",
-    title,
-    duration: formatDuration(orders.length * 7.5),
-    channelsCount: 16,
-    log: [
-      ...logs,
-      `[SUCCESS] ScreamTracker III OPL3 FM channels mapped across ${fullSongPatterns.length} patterns!`
+      `[SUCCESS] ${ext} decoded natively with spessasynth_core BasicMIDI (${totalPatterns} patterns, ${totalRowCount} rows, ${metadata.activeChannels.length} active channels)!`,
+      `[METADATA] Duration: ${computedDuration} @ ${detectedBpm} BPM${
+        metadata.samplePresets.length > 0 ? ` | Embedded Presets: ${metadata.samplePresets.length}` : ''
+      }`
     ]
   };
 }

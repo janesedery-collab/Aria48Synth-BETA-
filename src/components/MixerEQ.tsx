@@ -370,13 +370,21 @@ export default function MixerEQ({
             setActiveSoundFont(newSf);
 
             const sfInstruments = getAvailableSoundFontInstruments();
-            if (setChannels && channels && sfInstruments.length > 0) {
+            const customInsts = sfInstruments.filter(i => i.id.startsWith('core_sf_'));
+            if (setChannels && channels && customInsts.length > 0) {
               setChannels(prev => prev.map((ch, idx) => {
-                const inst = sfInstruments[idx % sfInstruments.length];
+                const isDrum = idx === 9 || ch.soundFontPreset === 'gm_drums' || ch.soundFontPreset === 'gm_electronic_drums';
+                const currentInst = sfInstruments.find(i => i.id === ch.soundFontPreset);
+                const targetProg = currentInst?.program ?? (idx % 16);
+                const matched =
+                  (isDrum ? customInsts.find(i => i.bank === 128 && i.program === 0) || customInsts.find(i => i.bank === 128) : undefined) ||
+                  customInsts.find(i => i.bank !== 128 && i.program === targetProg) ||
+                  customInsts.find(i => i.bank !== 128) ||
+                  customInsts[idx % customInsts.length];
                 return {
                   ...ch,
                   chip: 'General MIDI (SoundFont)',
-                  soundFontPreset: inst ? inst.id : ch.soundFontPreset
+                  soundFontPreset: matched ? matched.id : ch.soundFontPreset
                 };
               }));
             }

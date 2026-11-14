@@ -9,9 +9,11 @@ import {
   isSoundFontFileName,
   loadSoundFontIntoCoreAndLib,
   onDefaultSoundFontChange,
-  setDefaultSoundFontId
+  setDefaultSoundFontId,
+  SOUNDFONT_ACCEPT_ATTR
 } from './AudioEngine';
 import { SpessaSynth, SpessaSoundFont } from '../engines/spressasynthLib';
+import { BasicMIDI } from 'spessasynth_core';
 import { SoundFontBankInfo, SoundFontInstrument } from '../types';
 
 interface FileConverterUIProps {
@@ -26,7 +28,8 @@ interface FileConverterUIProps {
     allPatterns?: any[][],
     audioBuffer?: AudioBuffer,
     channelSoundFonts?: { [channelId: number]: string },
-    rawMidiBuffer?: ArrayBuffer
+    rawMidiBuffer?: ArrayBuffer,
+    fileName?: string
   ) => void;
 }
 
@@ -37,6 +40,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   const [conversionLog, setConversionLog] = useState<string[]>([]);
   const [isConverting, setIsConverting] = useState(false);
   const [convertedFileUrl, setConvertedFileUrl] = useState<string | null>(null);
+  const [convertedDownloadBlobUrl, setConvertedDownloadBlobUrl] = useState<string | null>(null);
   const [parsedPatterns, setParsedPatterns] = useState<any[] | null>(null);
   const [parsedAllPatterns, setParsedAllPatterns] = useState<any[][] | null>(null);
   const [parsedAudioBuffer, setParsedAudioBuffer] = useState<AudioBuffer | null>(null);
@@ -166,16 +170,39 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         ]);
 
         setTimeout(() => {
-          const outputFilename = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+          const outputBaseName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+          const outExt = selectedFormat.toLowerCase();
+          const outFileName =
+            selectedFormat === '.MID'
+              ? `${outputBaseName}_converted.mid`
+              : `${outputBaseName}${outExt}`;
+
+          let nextBlobUrl: string | null = null;
+          if (selectedFormat === '.MID') {
+            try {
+              const sourceBuf = result.rawMidiBuffer || fileBuffer;
+              const midiObj = BasicMIDI.fromArrayBuffer(sourceBuf.slice(0), file.name);
+              const midiBytes = midiObj.writeMIDI();
+              nextBlobUrl = URL.createObjectURL(new Blob([midiBytes], { type: 'audio/midi' }));
+            } catch {
+              nextBlobUrl = null;
+            }
+          }
+
+          setConvertedDownloadBlobUrl((prevUrl) => {
+            if (prevUrl) URL.revokeObjectURL(prevUrl);
+            return nextBlobUrl;
+          });
+
           setConversionLog(prev => [
             ...prev, 
             `[SUCCESS] Compiled translation package!`,
-            `[SUCCESS] Output file: ${outputFilename}${selectedFormat.toLowerCase()}`,
+            `[SUCCESS] Output file: ${outFileName}`,
             `[SYSTEM] Real-time sequencer ready for playback.`
           ]);
           setIsConverting(false);
-          setConvertedFileUrl(`${outputFilename}${selectedFormat.toLowerCase()}`);
-        }, 600);
+          setConvertedFileUrl(outFileName);
+        }, 300);
 
       } catch (err: any) {
         setConversionLog(prev => [
@@ -184,7 +211,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         ]);
         setIsConverting(false);
       }
-    }, 400);
+    }, 200);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -243,7 +270,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
            Universal Music & SoundFont Station
          </h2>
          <p className="text-zinc-400 text-[11px] mt-1 font-sans">
-           Translate and play Standard MIDI (.mid), ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2/.sf3), and Audio files.
+           Translate and play Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2/.sf3), and Audio files.
          </p>
        </div>
 
@@ -426,6 +453,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
               <input 
                 type="file" 
                 ref={fileInputRef} 
+                accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                 onChange={handleFileSelect} 
                 className="hidden" 
               />
@@ -441,13 +469,13 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-1.5">
-                  <div className="font-bold text-xs text-zinc-200">Drag & drop any music file or chiptune here</div>
+                  <div className="font-bold text-xs text-zinc-200">Drag &amp; drop any music file or chiptune here</div>
                   <div className="text-zinc-600 text-[9px] font-sans">or</div>
                   <div className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-400 rounded-lg font-bold text-[10.5px] border border-cyan-800/40 font-mono tracking-widest shadow-sm transition uppercase">
                      Browse Files
                   </div>
                   <div className="text-[8.5px] text-zinc-500 mt-1.5 font-sans leading-relaxed max-w-xs">
-                     Accepts MIDI (.mid), MOD, XM, S3M, IT, C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM, SNES SPC, SoundFonts (.sf2/.sf3), WAV, MP3
+                     Accepts MIDI (.mid, .rmi, .kar, .xmf), MOD, XM, S3M, IT, C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM, SNES SPC, SoundFonts (.sf2/.sf3), WAV, MP3
                   </div>
                 </div>
               )}
@@ -529,7 +557,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                        </div>
                     </div>
                     <a 
-                      href={`data:text/plain;charset=utf-8,${encodeURIComponent("Aria48 Tracker Generated Binary File Stream")}`} 
+                      href={convertedDownloadBlobUrl || `data:text/plain;charset=utf-8,${encodeURIComponent("Aria48 Tracker Generated Binary File Stream")}`} 
                       download={convertedFileUrl}
                       className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold hover:shadow transition-all flex items-center gap-1.5 cursor-pointer text-[10px]"
                     >
@@ -552,7 +580,8 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                           parsedAllPatterns || undefined,
                           parsedAudioBuffer || undefined,
                           parsedChannelSoundFonts || undefined,
-                          parsedRawMidiBuffer || undefined
+                          parsedRawMidiBuffer || undefined,
+                          file?.name
                         );
                       }}
                       className="w-full py-3 bg-cyan-950/60 hover:bg-cyan-900/70 text-cyan-400 border border-cyan-800/40 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(34,211,238,0.1)] font-mono duration-300"

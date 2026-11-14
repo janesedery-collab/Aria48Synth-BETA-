@@ -32,11 +32,15 @@ import {
   syncInitialMidiInstruments,
   restoreSavedSoundFontsFromCookies,
   SoundFontLoadingState,
-  onSoundFontLoadingChange
+  onSoundFontLoadingChange,
+  loadSoundFontIntoCoreAndLib,
+  isSoundFontFileName
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
 import { VideoRecorder } from './utils/videoRecorder';
+import { WorkletSynthBridge } from './engines/workletSynthBridge';
+import { parseChiptuneFile } from './utils/chiptuneParsers';
 
 function parseDurationStringSec(dur?: string | null): number | null {
   if (!dur) return null;
@@ -115,6 +119,7 @@ export default function App() {
   const [playMode, setPlayMode] = useState<'song' | 'pattern'>('song');
   const [loadedAudioBuffer, setLoadedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [loadedMidiBuffer, setLoadedMidiBuffer] = useState<ArrayBuffer | null>(null);
+  const [loadedMidiFileName, setLoadedMidiFileName] = useState<string>('sequence.mid');
 
   // Loaded Track Metadata for exact duration and song length tracking
   const [trackTitle, setTrackTitle] = useState<string | null>(null);
@@ -304,7 +309,8 @@ export default function App() {
           },
           bpm,
           baseSongBpm,
-          pendingSeekRatioRef.current
+          pendingSeekRatioRef.current,
+          loadedMidiFileName
         );
         const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
         setMidiLiveTotalSec(prog.totalSeconds);
@@ -479,9 +485,11 @@ export default function App() {
     allPatterns?: any[][],
     audioBuffer?: AudioBuffer,
     channelSoundFonts?: { [channelId: number]: string },
-    rawMidiBuffer?: ArrayBuffer
+    rawMidiBuffer?: ArrayBuffer,
+    fileName?: string
   ) => {
     const finalAllPatterns = (allPatterns && allPatterns.length > 0) ? allPatterns : [importedPatterns];
+    const resolvedName = fileName || (title ? `${title}.mid` : 'sequence.mid');
     pendingSeekRatioRef.current = 0;
     setMidiLiveTotalSec(null);
     setLiveElapsedSec(0);
@@ -492,7 +500,16 @@ export default function App() {
     setLoadedAudioBuffer(audioBuffer || null);
     setLoadedMidiBuffer(rawMidiBuffer || null);
     if (rawMidiBuffer) {
-      syncInitialMidiInstruments(rawMidiBuffer);
+      setLoadedMidiFileName(resolvedName);
+      WorkletSynthBridge.registerLoadedSequence(
+        rawMidiBuffer,
+        resolvedName,
+        finalAllPatterns.length,
+        finalAllPatterns.length * 64
+      );
+      syncInitialMidiInstruments(rawMidiBuffer, resolvedName);
+    } else {
+      WorkletSynthBridge.clearCurrentSequence();
     }
 
     if (importedBpm) {
@@ -561,8 +578,55 @@ export default function App() {
     setIsPlaying(true);
   };
 
+  const handleGlobalDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    // Let dedicated inner dropzones (like Convert tab) handle drops inside themselves unless fallback
+    if (activeTab === 'convert') return;
+    const dropped = e.dataTransfer?.files?.[0];
+    if (!dropped) return;
+    e.preventDefault();
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      const buf = ev.target?.result;
+      if (!(buf instanceof ArrayBuffer)) return;
+      if (isSoundFontFileName(dropped.name)) {
+        try {
+          await loadSoundFontIntoCoreAndLib(buf, dropped.name);
+        } catch (err) {
+          console.warn('Global SoundFont drop error:', err);
+        }
+        return;
+      }
+      try {
+        const res = parseChiptuneFile(dropped.name, buf);
+        handleImportMasterSequence(
+          res.patterns,
+          res.bpm,
+          res.duration,
+          res.title,
+          res.chipType,
+          res.octaveRange,
+          res.channelsCount,
+          res.allPatterns,
+          res.audioBuffer,
+          res.channelSoundFonts,
+          res.rawMidiBuffer,
+          res.fileName || dropped.name
+        );
+      } catch (err) {
+        console.warn('Global song drop parse error:', err);
+      }
+    };
+    reader.readAsArrayBuffer(dropped);
+  };
+
   return (
-    <div className="min-h-screen flex flex-col font-sans text-xs bg-zinc-950 text-zinc-350 selection:bg-cyan-500/30 selection:text-cyan-200">
+    <div
+      onDragOver={(e) => {
+        if (activeTab !== 'convert') e.preventDefault();
+      }}
+      onDrop={handleGlobalDrop}
+      className="min-h-screen flex flex-col font-sans text-xs bg-zinc-950 text-zinc-350 selection:bg-cyan-500/30 selection:text-cyan-200"
+    >
       
       {/* HEADER / TOOLBAR */}
       <Header 
@@ -696,7 +760,6 @@ export default function App() {
               active={activeTab} 
               setTab={setActiveTab} 
               label="Hardware" 
-              disabled={!hardwareConnected} 
               glow={hardwareConnected}
             />
           </div>
@@ -761,7 +824,7 @@ export default function App() {
                   trackTitle={trackTitle}
                   onSwitchChiptuneMode={handleSwitchChiptuneMode}
                   currentChiptuneMode={chiptuneMode}
-                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer) => {
+                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName) => {
                     handleImportMasterSequence(
                       allPatterns?.[0] || patterns,
                       importedBpm,
@@ -773,7 +836,8 @@ export default function App() {
                       allPatterns,
                       audioBuffer,
                       channelSoundFonts,
-                      rawMidiBuffer
+                      rawMidiBuffer,
+                      fileName
                     );
                   }}
                 />

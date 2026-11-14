@@ -1240,6 +1240,15 @@ export function initBuiltInSoundFont(ctx: AudioContext) {
 /**
  * Register custom audio sample into SoundFont Engine (used by MOD/XM/SF2/SF3/DLS/SFZ decoders)
  */
+export function clearCustomSoundFontInstruments() {
+  for (const [key, val] of registeredPresets.entries()) {
+    if (val.isCustom && key.startsWith('core_sf_')) {
+      registeredPresets.delete(key);
+    }
+  }
+  loadedBankInfo.instrumentCount = registeredPresets.size;
+}
+
 export function registerCustomInstrument(
   id: string, 
   name: string, 

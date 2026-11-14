@@ -6,7 +6,7 @@
  * Directly linked to spressasynth_lib-master.zip for 16-channel synthesis.
  */
 
-import { registerCustomInstrument } from '../utils/soundFontEngine';
+import { clearCustomSoundFontInstruments, registerCustomInstrument } from '../utils/soundFontEngine';
 import type { SoundFontInstrument, SoundFontBankInfo } from '../types';
 
 export const SPRESSASYNTH_CORE_ENGINE_ID = "spressasynth_core-master.zip";
@@ -245,6 +245,7 @@ class SpessaSynthCoreEngine {
 
     this.loadedSoundFonts.set(result.soundFont.id, result.soundFont);
     this.activeSoundFontId = result.soundFont.id;
+    this.syncCatalogForActiveSoundFont();
     this.coreLogs.push(...logs.slice(-4));
     return result;
   }
@@ -465,9 +466,6 @@ class SpessaSynthCoreEngine {
         }
       }
     }
-
-    // Register presets & decoded sample voices into SoundFont catalog
-    this.registerDecodedPresetsInCatalog(bankName, validPresets, zones, sampleHeaders);
 
     const soundFontId = `spessa-core-${Date.now()}`;
     const presetNames = validPresets.length > 0
@@ -738,7 +736,9 @@ class SpessaSynthCoreEngine {
 
     if (decodedSf3 > 0) {
       logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] Decoded ${decodedSf3} compressed SF3 audio streams.`);
-      this.registerDecodedPresetsInCatalog(soundFont.name, soundFont.presetHeaders, soundFont.zones, soundFont.sampleHeaders);
+      if (this.activeSoundFontId === soundFont.id) {
+        this.syncCatalogForActiveSoundFont();
+      }
     }
   }
 
@@ -961,8 +961,6 @@ class SpessaSynthCoreEngine {
     traverseDls(12, u8.length);
     logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] Parsed DLS bank "${bankName}": ${presetHeaders.length} instruments, ${sampleHeaders.length} waves.`);
 
-    this.registerDecodedPresetsInCatalog(bankName, presetHeaders, zones, sampleHeaders);
-
     const soundFontId = `spessa-core-dls-${Date.now()}`;
     const presetNames = presetHeaders.length > 0
       ? presetHeaders.map(p => `${p.program.toString().padStart(3, '0')}: ${p.name}`)
@@ -1092,7 +1090,6 @@ class SpessaSynthCoreEngine {
       });
     });
 
-    this.registerDecodedPresetsInCatalog(bankName, presetHeaders, zones, sampleHeaders);
     logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] Parsed SFZ definition "${bankName}" with ${regions.length} regions.`);
 
     const soundFontId = `spessa-core-sfz-${Date.now()}`;
@@ -1226,7 +1223,6 @@ class SpessaSynthCoreEngine {
       offset = pcmEnd;
     }
 
-    this.registerDecodedPresetsInCatalog(bankName, presetHeaders, zones, sampleHeaders);
     logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] Parsed GUS Patch "${bankName}" (${sampleHeaders.length} waves).`);
 
     const soundFontId = `spessa-core-pat-${Date.now()}`;
@@ -1329,8 +1325,6 @@ class SpessaSynthCoreEngine {
         attenuationGain: 0.92
       });
     });
-
-    this.registerDecodedPresetsInCatalog(bankName, presetHeaders, zones, sampleHeaders);
 
     const soundFontId = `spessa-core-${Date.now()}`;
     const soundFont: SpessaCoreSoundFont = {
@@ -1545,9 +1539,18 @@ class SpessaSynthCoreEngine {
     return null;
   }
 
+  private syncCatalogForActiveSoundFont() {
+    clearCustomSoundFontInstruments();
+    const sf = this.getActiveSoundFont();
+    if (sf && sf.isCustom) {
+      this.registerDecodedPresetsInCatalog(sf.name, sf.presetHeaders, sf.zones, sf.sampleHeaders);
+    }
+  }
+
   public setActiveSoundFont(id: string | null) {
     if (!id) {
       this.activeSoundFontId = null;
+      this.syncCatalogForActiveSoundFont();
       return;
     }
     if (this.loadedSoundFonts.has(id)) {
@@ -1556,6 +1559,7 @@ class SpessaSynthCoreEngine {
       // Built-in default IDs disable custom SF sample override so built-in synth voices run
       this.activeSoundFontId = null;
     }
+    this.syncCatalogForActiveSoundFont();
   }
 
   public removeSoundFont(id: string) {
@@ -1564,6 +1568,7 @@ class SpessaSynthCoreEngine {
     if (this.activeSoundFontId === id) {
       this.activeSoundFontId = null;
     }
+    this.syncCatalogForActiveSoundFont();
   }
 
   public getLoadedSoundFonts(): SpessaCoreSoundFont[] {
