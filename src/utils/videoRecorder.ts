@@ -13,7 +13,13 @@
 
 import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4ArrayBufferTarget } from 'mp4-muxer';
 import { Muxer as WebmMuxer, ArrayBufferTarget as WebmArrayBufferTarget } from 'webm-muxer';
-import { getAudioContext, getTinySynthMasterGain, getSyntheticMasterGain } from '../components/AudioEngine';
+import {
+  getAudioContext,
+  getDirectAudioProgress,
+  getSyntheticMasterGain,
+  getTinySynthMasterGain,
+  isMidiPlaying
+} from '../components/AudioEngine';
 import { WebScope, WebScopePreset, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
@@ -62,6 +68,8 @@ export interface LiveTrackerRecorderState {
   isPlaying: boolean;
   loadedAudioBuffer?: AudioBuffer | null;
   loadedMidiBuffer?: ArrayBuffer | null;
+  oscPreset?: WebScopePreset;
+  oscAmplifier?: number;
 }
 
 export interface VideoRecorderStatus {
@@ -84,6 +92,7 @@ export interface VideoRecorderStatus {
 export interface VideoRecordOptions {
   targetDurationSeconds?: number;
   activePreset?: WebScopePreset;
+  amplifier?: number;
   format?: VideoContainerFormat;
   fps?: number;
   quality?: VideoQualityPreset;
@@ -271,7 +280,8 @@ class VideoRecorderService {
     const format: VideoContainerFormat = options.format || 'mp4';
     const fps = clampFps(options.fps || 60);
     const quality: VideoQualityPreset = options.quality || '1080p';
-    const activePreset: WebScopePreset = options.activePreset || 'protracker';
+    const activePreset: WebScopePreset = options.activePreset || this.liveState.oscPreset || 'protracker';
+    const amplifier = Math.max(0.2, Math.min(12, options.amplifier ?? this.liveState.oscAmplifier ?? 1.0));
     const qSpec = VIDEO_QUALITY_PRESETS[quality] || VIDEO_QUALITY_PRESETS['1080p'];
 
     const snapshot = options.liveState
@@ -516,6 +526,7 @@ class VideoRecorderService {
           elapsedSecs: tSec,
           targetDur: renderedAudio.durationSeconds,
           activePreset,
+          amplifier,
           snapshot,
           patIdx: curPatIdx,
           rowIdx: curRowIdx,
@@ -730,7 +741,8 @@ class VideoRecorderService {
       this.targetDuration = options.targetDurationSeconds || 0;
       this.onCompleteCallback = options.onComplete;
       this.onAutoStopCallback = options.onAutoStop;
-      const activePreset = options.activePreset || 'protracker';
+      const activePreset = options.activePreset || this.liveState.oscPreset || 'protracker';
+      const amplifier = Math.max(0.2, Math.min(12, options.amplifier ?? this.liveState.oscAmplifier ?? 1.0));
       this.lastDownloadedFilename = null;
       this.lastErrorMessage = null;
 
@@ -829,6 +841,7 @@ class VideoRecorderService {
           elapsedSecs,
           targetDur: this.targetDuration,
           activePreset,
+          amplifier,
           snapshot: {
             ...snapshot,
             songPatterns: this.liveState.songPatterns,
@@ -943,6 +956,7 @@ class VideoRecorderService {
       elapsedSecs: number;
       targetDur: number;
       activePreset: WebScopePreset;
+      amplifier?: number;
       snapshot: OfflineSongSnapshot;
       patIdx: number;
       rowIdx: number;
@@ -961,11 +975,12 @@ class VideoRecorderService {
 
     const contentY = 44;
     const contentH = height - contentY - (params.targetDur > 0 ? 10 : 6);
+    const amp = Math.max(0.2, Math.min(12, params.amplifier ?? 1.0));
 
     if (mode === 'oscilloscope') {
       this.drawOscilloscopePanel(
         ctx, 12, contentY, width - 24, contentH,
-        params.activePreset, false, params.snapshot, params.elapsedSecs, params.offlineAudio
+        params.activePreset, amp, false, params.snapshot, params.elapsedSecs, params.offlineAudio
       );
     } else if (mode === 'tracker') {
       this.drawTrackerPanel(ctx, 12, contentY, width - 24, contentH, false, params.snapshot, params.patIdx, params.rowIdx, params.offlineAudio?.channelLabels);
@@ -979,7 +994,7 @@ class VideoRecorderService {
 
       this.drawOscilloscopePanel(
         ctx, 12 + paneW + gap, contentY, paneW, contentH,
-        params.activePreset, true, params.snapshot, params.elapsedSecs, params.offlineAudio
+        params.activePreset, amp, true, params.snapshot, params.elapsedSecs, params.offlineAudio
       );
     }
 
@@ -1226,6 +1241,7 @@ class VideoRecorderService {
     pw: number,
     ph: number,
     preset: WebScopePreset,
+    amplifier: number,
     mini: boolean,
     snapshot: OfflineSongSnapshot,
     elapsedSecs: number,
@@ -1267,6 +1283,13 @@ class VideoRecorderService {
     const cellH = Math.floor((gridH - gap * 3) / 4);
     const pStyle = WEBSCOPE_PRESETS[preset] || WEBSCOPE_PRESETS.protracker;
 
+    const liveAudioActive =
+      this.liveState.isPlaying ||
+      isMidiPlaying() ||
+      SpessaSynth.isMidiPlaying() ||
+      Chiptune3.isChiptunePlaying() ||
+      getDirectAudioProgress().playing;
+
     for (let row = 0; row < 4; row++) {
       for (let col = 0; col < 4; col++) {
         const idx = row * 4 + col;
@@ -1307,18 +1330,19 @@ class VideoRecorderService {
             offlineAudio.sampleRate,
             elapsedSecs,
             Boolean(chMeta?.mute),
+            amplifier,
             pStyle
           );
         } else {
-          const liveCanvas = this.getReusableSubCanvas();
-          const isActiveAudio = this.liveState.isPlaying || SpessaSynth.isMidiPlaying() || Chiptune3.isChiptunePlaying();
-          WebScope.renderChannel(liveCanvas, idx, isActiveAudio && !chMeta?.mute, {
+          const liveCanvas = this.getReusableSubCanvas(idx);
+          WebScope.renderChannel(liveCanvas, idx, liveAudioActive && !chMeta?.mute, {
             preset,
             scanlines: true,
             glowBloom: true,
             gridDividers: true,
             triggerLock: true,
-            phaseSync: true
+            phaseSync: true,
+            amplifier
           });
           ctx.drawImage(liveCanvas, scopeX, scopeY, scopeW, scopeH);
         }
@@ -1328,14 +1352,16 @@ class VideoRecorderService {
     ctx.restore();
   }
 
-  private reusableSubCanvas: HTMLCanvasElement | null = null;
-  private getReusableSubCanvas(): HTMLCanvasElement {
-    if (!this.reusableSubCanvas) {
-      this.reusableSubCanvas = document.createElement('canvas');
-      this.reusableSubCanvas.width = 240;
-      this.reusableSubCanvas.height = 104;
+  private reusableSubCanvases: HTMLCanvasElement[] = [];
+  private getReusableSubCanvas(channelIdx: number): HTMLCanvasElement {
+    const idx = Math.max(0, Math.min(15, channelIdx));
+    if (!this.reusableSubCanvases[idx]) {
+      const c = document.createElement('canvas');
+      c.width = 240;
+      c.height = 104;
+      this.reusableSubCanvases[idx] = c;
     }
-    return this.reusableSubCanvas;
+    return this.reusableSubCanvases[idx];
   }
 
   /**
@@ -1351,6 +1377,7 @@ class VideoRecorderService {
     sampleRate: number,
     elapsedSecs: number,
     isMuted: boolean,
+    amplifier: number,
     pStyle: (typeof WEBSCOPE_PRESETS)['protracker']
   ) {
     ctx.save();
@@ -1358,47 +1385,98 @@ class VideoRecorderService {
     ctx.rect(x, y, w, h);
     ctx.clip();
 
+    ctx.fillStyle = '#030305';
+    ctx.fillRect(x, y, w, h);
     ctx.fillStyle = pStyle.fill;
     ctx.fillRect(x, y, w, h);
 
-    // Graticule center axis
+    // CRT Graticule center crosshairs + subdivision dots
     const midY = y + h * 0.5;
     ctx.strokeStyle = pStyle.grid;
-    ctx.lineWidth = 0.8;
+    ctx.lineWidth = 0.6;
     ctx.beginPath();
     ctx.moveTo(x, midY);
     ctx.lineTo(x + w, midY);
+    ctx.moveTo(x + w * 0.5, y);
+    ctx.lineTo(x + w * 0.5, y + h);
     ctx.stroke();
+
+    ctx.fillStyle = pStyle.grid;
+    for (let c = 1; c < 8; c++) {
+      for (let r = 1; r < 4; r++) {
+        ctx.fillRect(x + (w * c) / 8 - 0.5, y + (h * r) / 4 - 0.5, 1, 1);
+      }
+    }
+
+    let hasActiveSignal = false;
+    let peak = 0;
 
     if (signal && signal.length > 0 && !isMuted) {
       const centerSample = Math.floor(elapsedSecs * sampleRate);
-      const winLen = 512;
+      const winLen = 768;
       const baseStart = Math.max(0, Math.min(signal.length - winLen, centerSample - 256));
-
-      // Rising zero-crossing trigger lock for stable CRT trace
-      let trig = baseStart;
-      const searchEnd = Math.min(signal.length - 1, baseStart + 256);
-      for (let i = baseStart + 1; i < searchEnd; i++) {
-        if (signal[i - 1] <= 0 && signal[i] > 0) {
-          trig = i;
-          break;
-        }
+      const scanEnd = Math.min(signal.length, baseStart + winLen);
+      for (let i = baseStart; i < scanEnd; i++) {
+        const av = Math.abs(signal[i]);
+        if (av > peak) peak = av;
       }
 
-      const drawSamples = Math.min(256, signal.length - trig);
-      if (drawSamples > 4) {
-        ctx.strokeStyle = pStyle.stroke;
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        for (let i = 0; i < drawSamples; i++) {
-          const px = x + (i / (drawSamples - 1)) * w;
-          const v = Math.max(-1, Math.min(1, signal[trig + i] * 1.35));
-          const py = midY - v * (h * 0.42);
-          if (i === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
+      if (peak > 0.0004) {
+        hasActiveSignal = true;
+        // Rising zero-crossing trigger lock for stable CRT trace
+        let trig = baseStart;
+        const searchEnd = Math.min(signal.length - 1, baseStart + 384);
+        const trigThresh = Math.min(0.008, peak * 0.15);
+        for (let i = baseStart + 1; i < searchEnd; i++) {
+          if (signal[i - 1] <= 0 && signal[i] > trigThresh) {
+            trig = i;
+            break;
+          }
         }
-        ctx.stroke();
+
+        const drawSamples = Math.min(384, signal.length - trig);
+        const autoBoost = peak < 0.08 ? 2.4 : peak < 0.25 ? 1.8 : 1.35;
+        const effectiveGain = autoBoost * Math.max(0.2, amplifier);
+
+        if (drawSamples > 4) {
+          ctx.save();
+          ctx.shadowColor = pStyle.glow;
+          ctx.shadowBlur = 7;
+          ctx.strokeStyle = pStyle.stroke;
+          ctx.lineWidth = 1.65;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.beginPath();
+          for (let i = 0; i < drawSamples; i++) {
+            const px = x + (i / (drawSamples - 1)) * w;
+            const v = Math.max(-1.35, Math.min(1.35, signal[trig + i] * effectiveGain));
+            const py = midY - v * (h * 0.42);
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
       }
+    }
+
+    if (!hasActiveSignal) {
+      // Flat idle cathode baseline
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = pStyle.stroke;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x, midY);
+      ctx.lineTo(x + w, midY);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // CRT micro-scanlines
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.16)';
+    for (let sy = y; sy < y + h; sy += 3) {
+      ctx.fillRect(x, sy, w, 1);
     }
 
     ctx.restore();

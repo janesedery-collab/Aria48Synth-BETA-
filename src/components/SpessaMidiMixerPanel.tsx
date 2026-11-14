@@ -27,7 +27,7 @@ import {
   WorkletSynthBridge
 } from '../engines/workletSynthBridge';
 import { DEFAULT_GM_PROGRAMS, SpessaSoundFont, SpessaSynth } from '../engines/spressasynthLib';
-import { getAudioContext, setMidiChannelMuted } from './AudioEngine';
+import { getAudioContext, setMidiChannelMuted, triggerSoundFontSwapLoading } from './AudioEngine';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { getSavedSelectedSoundFont, saveSelectedSoundFont } from '../utils/recentSongsManager';
 
@@ -382,6 +382,8 @@ export default function SpessaMidiMixerPanel({
     setActiveSoundFontId(sfId);
     SpessaSynth.setActiveSoundFont(sfId);
     WorkletSynthBridge.setActiveSoundBank(sfId);
+    const bankName = loadedSoundFonts.find(b => b.id === sfId)?.name || sfId;
+    triggerSoundFontSwapLoading(bankName, sfId);
     saveSelectedSoundFont(sfId || getSavedSelectedSoundFont());
     onSelectSoundFont?.(sfId);
     setSystemLog(`Active SoundFont switched to "${sfId}"`);

@@ -81,6 +81,7 @@ class WebScopeEngine {
   private timeDomainBuffer = new Float32Array(1024);
   private workletScratchBuffer = new Float32Array(1024);
   private spessaScratchBuffer = new Float32Array(1024);
+  private chipScratchBuffer = new Float32Array(1024);
 
   /**
    * Find zero-crossing trigger index to lock waveform and prevent horizontal jitter
@@ -172,24 +173,23 @@ class WebScopeEngine {
     };
 
     if (isPlaying) {
-      if (Chiptune3.isChiptunePlaying()) {
-        const chipRes = readAnalyser(Chiptune3.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
-        if (chipRes) {
-          this.timeDomainBuffer.set(chipRes.buf);
-          peakLevel = chipRes.peak;
-          sumSquares = chipRes.sumSq;
-          hasSignal = peakLevel > 0.005;
-        }
-      } else {
-        const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
-        const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
-        const best = (workletRes && workletRes.peak >= (spessaRes?.peak ?? 0)) ? workletRes : spessaRes;
-        if (best) {
-          this.timeDomainBuffer.set(best.buf);
-          peakLevel = best.peak;
-          sumSquares = best.sumSq;
-          hasSignal = peakLevel > 0.005;
-        }
+      const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
+      const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
+      const chipRes = readAnalyser(Chiptune3.getChannelAnalyser(channelIndex), this.chipScratchBuffer);
+
+      let best = workletRes;
+      if (spessaRes && (!best || spessaRes.peak > best.peak)) {
+        best = spessaRes;
+      }
+      if (chipRes && (!best || Chiptune3.isChiptunePlaying() || chipRes.peak > best.peak)) {
+        best = chipRes;
+      }
+
+      if (best) {
+        this.timeDomainBuffer.set(best.buf);
+        peakLevel = best.peak;
+        sumSquares = best.sumSq;
+        hasSignal = peakLevel > 0.0005;
       }
     }
 

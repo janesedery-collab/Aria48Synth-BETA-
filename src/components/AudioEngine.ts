@@ -31,9 +31,113 @@ export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
 export type { SoundEnginesConfig };
 
+export interface SoundFontLoadingState {
+  isLoading: boolean;
+  soundFontName: string;
+  progress: number;
+  elapsedMs: number;
+  durationMs: number;
+}
+
+const SOUNDFONT_SWAP_DURATION_MS = 3000;
 let isRestoringSoundFonts = false;
 let soundFontRestorePromise: Promise<void> | null = null;
 const defaultSoundFontListeners: Array<(id: string) => void> = [];
+
+let sfLoadingState: SoundFontLoadingState = {
+  isLoading: false,
+  soundFontName: '',
+  progress: 0,
+  elapsedMs: 0,
+  durationMs: SOUNDFONT_SWAP_DURATION_MS
+};
+const sfLoadingListeners: Array<(state: SoundFontLoadingState) => void> = [];
+let sfLoadingInterval: any = null;
+let lastTriggeredSfSwapId = 'spessa-default-gm';
+let lastTriggeredSfSwapAt = 0;
+
+function notifySoundFontLoadingListeners() {
+  const copy = { ...sfLoadingState };
+  sfLoadingListeners.forEach(cb => {
+    try { cb(copy); } catch (e) {}
+  });
+}
+
+export function getSoundFontLoadingState(): SoundFontLoadingState {
+  return { ...sfLoadingState };
+}
+
+export function onSoundFontLoadingChange(listener: (state: SoundFontLoadingState) => void): () => void {
+  sfLoadingListeners.push(listener);
+  return () => {
+    const idx = sfLoadingListeners.indexOf(listener);
+    if (idx !== -1) sfLoadingListeners.splice(idx, 1);
+  };
+}
+
+/**
+ * Triggers the 3-second SoundFont swap loading screen (pauses song for 3s and resumes afterwards).
+ * Deduplicates rapid back-to-back calls for the exact same SoundFont ID within 250ms.
+ */
+export function triggerSoundFontSwapLoading(
+  soundFontName?: string,
+  swapId?: string,
+  durationMs = SOUNDFONT_SWAP_DURATION_MS
+): void {
+  const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const normalizedId = swapId || soundFontName || '';
+  if (normalizedId && normalizedId === lastTriggeredSfSwapId && now - lastTriggeredSfSwapAt < 250 && sfLoadingState.isLoading) {
+    return;
+  }
+  if (normalizedId) {
+    lastTriggeredSfSwapId = normalizedId;
+  }
+  lastTriggeredSfSwapAt = now;
+
+  if (sfLoadingInterval) {
+    clearInterval(sfLoadingInterval);
+    sfLoadingInterval = null;
+  }
+
+  const totalMs = Math.max(500, durationMs);
+  const startAt = Date.now();
+  const displayName = (soundFontName || 'SoundFont Bank').trim() || 'SoundFont Bank';
+
+  sfLoadingState = {
+    isLoading: true,
+    soundFontName: displayName,
+    progress: 0,
+    elapsedMs: 0,
+    durationMs: totalMs
+  };
+  notifySoundFontLoadingListeners();
+
+  sfLoadingInterval = setInterval(() => {
+    const elapsed = Date.now() - startAt;
+    const pct = Math.min(100, Math.round((elapsed / totalMs) * 100));
+    if (elapsed >= totalMs) {
+      clearInterval(sfLoadingInterval);
+      sfLoadingInterval = null;
+      sfLoadingState = {
+        isLoading: false,
+        soundFontName: displayName,
+        progress: 100,
+        elapsedMs: totalMs,
+        durationMs: totalMs
+      };
+      notifySoundFontLoadingListeners();
+    } else {
+      sfLoadingState = {
+        isLoading: true,
+        soundFontName: displayName,
+        progress: pct,
+        elapsedMs: elapsed,
+        durationMs: totalMs
+      };
+      notifySoundFontLoadingListeners();
+    }
+  }, 33);
+}
 
 function notifyDefaultSoundFontListeners(id: string) {
   defaultSoundFontListeners.forEach(cb => {
@@ -47,11 +151,16 @@ export function getDefaultSoundFontId(): string {
 
 export function setDefaultSoundFontId(id: string): void {
   if (!id) return;
+  const prevActive = SpessaSynth.getActiveSoundFont()?.id || lastTriggeredSfSwapId;
   saveDefaultSoundFontCookie(id);
   if (SpessaSynth.getLoadedSoundFonts().some(s => s.id === id)) {
     SpessaSynth.setActiveSoundFont(id);
   }
   WorkletSynthBridge.setActiveSoundBank(id);
+  if (!isRestoringSoundFonts && id !== prevActive) {
+    const sfName = SpessaSynth.getLoadedSoundFonts().find(s => s.id === id)?.name || id;
+    triggerSoundFontSwapLoading(sfName, id);
+  }
   notifyDefaultSoundFontListeners(id);
 }
 
@@ -149,6 +258,9 @@ export function restoreSavedSoundFontsFromCookies(): Promise<void> {
       if (targetId) {
         SpessaSynth.setActiveSoundFont(targetId);
         WorkletSynthBridge.setActiveSoundBank(targetId);
+        lastTriggeredSfSwapId = targetId;
+      } else {
+        lastTriggeredSfSwapId = SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm';
       }
     } finally {
       isRestoringSoundFonts = false;
@@ -158,10 +270,14 @@ export function restoreSavedSoundFontsFromCookies(): Promise<void> {
 }
 
 if (typeof window !== 'undefined') {
-  SpessaSynth.onSoundFontChange((_, activeId) => {
+  SpessaSynth.onSoundFontChange((fonts, activeId) => {
     if (!isRestoringSoundFonts && activeId) {
       saveActiveSoundFontCookie(activeId);
       WorkletSynthBridge.setActiveSoundBank(activeId);
+      if (activeId !== lastTriggeredSfSwapId) {
+        const sfName = fonts.find(f => f.id === activeId)?.name || activeId;
+        triggerSoundFontSwapLoading(sfName, activeId);
+      }
     }
   });
   onInterpolationModeChange((mode) => {

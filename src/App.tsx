@@ -30,7 +30,9 @@ import {
   setAudioPlaybackRate,
   setMidiTempoBpm,
   syncInitialMidiInstruments,
-  restoreSavedSoundFontsFromCookies
+  restoreSavedSoundFontsFromCookies,
+  SoundFontLoadingState,
+  onSoundFontLoadingChange
 } from './components/AudioEngine';
 import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
@@ -236,6 +238,39 @@ export default function App() {
   const [midiLiveTotalSec, setMidiLiveTotalSec] = useState<number | null>(null);
   const [liveElapsedSec, setLiveElapsedSec] = useState<number | null>(null);
 
+  const [soundFontLoading, setSoundFontLoading] = useState<SoundFontLoadingState>({
+    isLoading: false,
+    soundFontName: '',
+    progress: 0,
+    elapsedMs: 0,
+    durationMs: 3000
+  });
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const wasPlayingBeforeSfSwapRef = useRef(false);
+  const prevSfLoadingRef = useRef(false);
+
+  // Pause active playback during 3-second SoundFont swap loading screen and auto-resume cleanly afterwards
+  useEffect(() => {
+    const unsub = onSoundFontLoadingChange((next) => {
+      setSoundFontLoading(next);
+      if (next.isLoading && !prevSfLoadingRef.current) {
+        prevSfLoadingRef.current = true;
+        wasPlayingBeforeSfSwapRef.current = isPlayingRef.current;
+        if (isPlayingRef.current) {
+          setIsPlaying(false);
+        }
+      } else if (!next.isLoading && prevSfLoadingRef.current) {
+        prevSfLoadingRef.current = false;
+        if (wasPlayingBeforeSfSwapRef.current) {
+          wasPlayingBeforeSfSwapRef.current = false;
+          setIsPlaying(true);
+        }
+      }
+    });
+    return () => unsub();
+  }, []);
+
   // Sync real tracker state + offline snapshot buffers into internal VideoRecorder
   useEffect(() => {
     VideoRecorder.setLiveTrackerState({
@@ -248,9 +283,11 @@ export default function App() {
       trackTitle,
       isPlaying,
       loadedAudioBuffer,
-      loadedMidiBuffer
+      loadedMidiBuffer,
+      oscPreset: oscConfig.preset,
+      oscAmplifier: oscConfig.amplifier
     });
-  }, [songPatterns, currentPatternIndex, activeRow, channels, bpm, baseSongBpm, trackTitle, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
+  }, [songPatterns, currentPatternIndex, activeRow, channels, bpm, baseSongBpm, trackTitle, isPlaying, loadedAudioBuffer, loadedMidiBuffer, oscConfig.preset, oscConfig.amplifier]);
 
   // Synchronous Audio Playback Lifecycle (only triggers on play/pause or buffer swap)
   useEffect(() => {
@@ -775,6 +812,40 @@ export default function App() {
         onClose={() => setIsShareApkOpen(false)}
         trackTitle={trackTitle}
       />
+
+      {/* 3-SECOND SOUNDFONT SWAP LOADING SCREEN */}
+      {soundFontLoading.isLoading && (
+        <div
+          id="soundfont-loading-overlay"
+          className="fixed inset-0 z-[9999] bg-black/85 backdrop-blur-md flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-md bg-zinc-950 border border-cyan-500/45 rounded-2xl shadow-[0_0_50px_rgba(34,211,238,0.22)] p-6 flex flex-col items-center gap-4">
+            <div className="text-[16px] font-black font-mono uppercase tracking-[0.22em] text-cyan-300 text-center">
+              LOADING SOUNDFONT
+            </div>
+            <div className="text-[11px] font-mono text-zinc-400 truncate max-w-full text-center">
+              {soundFontLoading.soundFontName || 'SoundFont Bank'}
+            </div>
+
+            <div className="w-full h-4 bg-zinc-900 border border-zinc-700/80 rounded-full overflow-hidden p-0.5">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-sky-400 to-emerald-400 transition-[width] duration-75"
+                style={{ width: `${Math.max(0, Math.min(100, soundFontLoading.progress))}%` }}
+              />
+            </div>
+
+            <div className="w-full flex items-center justify-between text-[12px] font-mono font-bold tabular-nums text-zinc-200 px-1">
+              <span className="text-cyan-400">{soundFontLoading.progress}%</span>
+              <span className="text-zinc-400">
+                {(soundFontLoading.elapsedMs / 1000).toFixed(1)}s / {(soundFontLoading.durationMs / 1000).toFixed(1)}s
+              </span>
+              <span className="text-amber-300">
+                {Math.max(0, (soundFontLoading.durationMs - soundFontLoading.elapsedMs) / 1000).toFixed(1)}s
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

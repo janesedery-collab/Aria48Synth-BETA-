@@ -188,6 +188,8 @@ export async function renderSongSnapshotOffline(
   await synth.ready;
 
   const quantum = 128;
+  const blockL = new Float32Array(quantum);
+  const blockR = new Float32Array(quantum);
   const channelOutputs: Float32Array[][] = Array.from({ length: 16 }, () => [
     new Float32Array(quantum),
     new Float32Array(quantum)
@@ -227,13 +229,20 @@ export async function renderSongSnapshotOffline(
     while (offset < totalSamples) {
       checkAbort();
       const count = Math.min(quantum, totalSamples - offset);
+      blockL.fill(0);
+      blockR.fill(0);
       for (let c = 0; c < 16; c++) {
         channelOutputs[c][0].fill(0);
         channelOutputs[c][1].fill(0);
       }
 
       seq.processTick();
-      synth.process(outL, outR, offset, count, channelOutputs);
+      synth.process(blockL, blockR, 0, count, channelOutputs);
+
+      for (let i = 0; i < count; i++) {
+        outL[offset + i] = blockL[i];
+        outR[offset + i] = blockR[i];
+      }
 
       for (let c = 0; c < 16; c++) {
         const dst = channelSignals[c];
@@ -341,12 +350,19 @@ export async function renderSongSnapshotOffline(
     }
 
     const count = Math.min(quantum, totalSamples - offset);
+    blockL.fill(0);
+    blockR.fill(0);
     for (let c = 0; c < 16; c++) {
       channelOutputs[c][0].fill(0);
       channelOutputs[c][1].fill(0);
     }
 
-    synth.process(outL, outR, offset, count, channelOutputs);
+    synth.process(blockL, blockR, 0, count, channelOutputs);
+
+    for (let i = 0; i < count; i++) {
+      outL[offset + i] = blockL[i];
+      outR[offset + i] = blockR[i];
+    }
 
     for (let c = 0; c < 16; c++) {
       const dst = channelSignals[c];
