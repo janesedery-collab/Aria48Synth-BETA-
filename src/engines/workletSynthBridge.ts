@@ -605,12 +605,16 @@ class WorkletSynthController {
 
   public setActiveSoundBank(id: string) {
     if (!this.synth) return;
+    const mappedId =
+      id === 'spessa-default-gm' || id === 'spessa-chiptune-sf2'
+        ? 'aria-default-bank'
+        : id;
     const order = this.synth.soundBankManager.priorityOrder;
-    if (!order.includes(id)) return;
-    this.activeBankId = id;
-    const rest = order.filter(b => b !== id && b !== 'aria-default-bank');
-    const nextOrder = [id, ...rest];
-    if (this.defaultBankLoaded && id !== 'aria-default-bank') {
+    if (!order.includes(mappedId)) return;
+    this.activeBankId = mappedId;
+    const rest = order.filter(b => b !== mappedId && b !== 'aria-default-bank');
+    const nextOrder = [mappedId, ...rest];
+    if (this.defaultBankLoaded && mappedId !== 'aria-default-bank') {
       nextOrder.push('aria-default-bank');
     }
     this.synth.soundBankManager.priorityOrder = nextOrder;
@@ -1039,11 +1043,26 @@ class WorkletSynthController {
     }
   }
 
-  public stopAll(force = false) {
+  public stopAll(force = true) {
     if (this.synth && this.workletReady) {
+      const count = this.synth.midiChannels?.length || 16;
+      for (let ch = 0; ch < count; ch++) {
+        try {
+          // Release sustain / sostenuto pedals so paused or scrubbed notes cannot stay held
+          this.synth.controllerChange(ch, WORKLET_CC.SUSTAIN as MIDIController, 0);
+          this.synth.controllerChange(ch, WORKLET_CC.SOSTENUTO as MIDIController, 0);
+          if (force) {
+            this.synth.controllerChange(ch, WORKLET_CC.ALL_SOUND_OFF as MIDIController, 0);
+          }
+        } catch {}
+      }
       this.synth.stopAll(force);
     }
-    this.channelStates.forEach(s => { s.activeNotes = []; });
+    this.channelStates.forEach(s => {
+      s.activeNotes = [];
+      s.cc[WORKLET_CC.SUSTAIN] = 0;
+      s.cc[WORKLET_CC.SOSTENUTO] = 0;
+    });
     this.notifyListeners();
   }
 
@@ -1071,9 +1090,19 @@ class WorkletSynthController {
     if (!this.synth) return;
     const count = this.synth.midiChannels.length || 16;
     for (let ch = 0; ch < count; ch++) {
-      this.synth.controllerChange(ch, WORKLET_CC.ALL_SOUND_OFF as MIDIController, 0);
+      try {
+        this.synth.controllerChange(ch, WORKLET_CC.SUSTAIN as MIDIController, 0);
+        this.synth.controllerChange(ch, WORKLET_CC.SOSTENUTO as MIDIController, 0);
+        this.synth.controllerChange(ch, WORKLET_CC.ALL_SOUND_OFF as MIDIController, 0);
+      } catch {}
     }
     this.synth.stopAll(true);
+    this.channelStates.forEach(s => {
+      s.activeNotes = [];
+      s.cc[WORKLET_CC.SUSTAIN] = 0;
+      s.cc[WORKLET_CC.SOSTENUTO] = 0;
+    });
+    this.notifyListeners();
     this.emitLog('All Channels: All Sound Off (CC 120) & Stop All');
   }
 

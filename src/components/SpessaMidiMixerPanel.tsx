@@ -14,6 +14,8 @@ import {
   RotateCcw,
   Sliders,
   Sparkles,
+  Star,
+  Trash2,
   Unlock,
   Volume2,
   VolumeX,
@@ -27,7 +29,15 @@ import {
   WorkletSynthBridge
 } from '../engines/workletSynthBridge';
 import { DEFAULT_GM_PROGRAMS, SpessaSoundFont, SpessaSynth } from '../engines/spressasynthLib';
-import { getAudioContext, setMidiChannelMuted, triggerSoundFontSwapLoading } from './AudioEngine';
+import {
+  deleteSavedSoundFont,
+  getAudioContext,
+  getDefaultSoundFontId,
+  onDefaultSoundFontChange,
+  setDefaultSoundFontId,
+  setMidiChannelMuted,
+  triggerSoundFontSwapLoading
+} from './AudioEngine';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { getSavedSelectedSoundFont, saveSelectedSoundFont } from '../utils/recentSongsManager';
 
@@ -246,6 +256,7 @@ export default function SpessaMidiMixerPanel({
   const [activeSoundFontId, setActiveSoundFontId] = useState<string>(
     () => SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm'
   );
+  const [defaultSoundFontId, setDefaultSoundFontState] = useState<string>(() => getDefaultSoundFontId());
   const [selectedPresetFilter, setSelectedPresetFilter] = useState<'auto' | 'all' | 'melodic' | 'drums'>('auto');
   const [holdPitchWheel, setHoldPitchWheel] = useState<boolean>(false);
   const [systemLog, setSystemLog] = useState<string>(
@@ -284,6 +295,11 @@ export default function SpessaMidiMixerPanel({
       setActiveSoundFontId(activeId);
     });
 
+    const unsubDefaultSf = onDefaultSoundFontChange((defId) => {
+      if (!mountedRef.current) return;
+      setDefaultSoundFontState(defId);
+    });
+
     // Ensure initial built-in list hydration
     void getAvailableSoundFontInstruments();
 
@@ -292,6 +308,7 @@ export default function SpessaMidiMixerPanel({
       unsubBridge();
       unsubLog();
       unsubSf();
+      unsubDefaultSf();
     };
   }, []);
 
@@ -484,14 +501,14 @@ export default function SpessaMidiMixerPanel({
           </button>
         </div>
 
-        {/* SOUNDFONT BANK SELECTOR */}
-        <div className="flex items-center gap-2">
+        {/* SOUNDFONT BANK SELECTOR + SET DEFAULT + DELETE */}
+        <div className="flex flex-wrap items-center gap-1.5">
           <Disc3 size={13} className="text-emerald-400 shrink-0" />
           <span className="text-[9.5px] font-mono font-bold text-zinc-400 uppercase">Bank:</span>
           <select
             value={activeSoundFontId}
             onChange={(e) => handleSoundFontSwitch(e.target.value)}
-            className="bg-zinc-950 border border-zinc-700 text-emerald-300 font-mono text-[10.5px] rounded px-2 py-1 focus:outline-none focus:border-cyan-500 cursor-pointer max-w-[200px]"
+            className="bg-zinc-950 border border-zinc-700 text-emerald-300 font-mono text-[10.5px] rounded px-2 py-1 focus:outline-none focus:border-cyan-500 cursor-pointer max-w-[190px]"
           >
             {loadedSoundFonts.map((sf) => (
               <option key={sf.id} value={sf.id} className="bg-zinc-950 text-zinc-200">
@@ -499,6 +516,52 @@ export default function SpessaMidiMixerPanel({
               </option>
             ))}
           </select>
+
+          <button
+            type="button"
+            id="midi-panel-set-default-sf-btn"
+            onClick={() => {
+              const activeSf = loadedSoundFonts.find(s => s.id === activeSoundFontId);
+              setDefaultSoundFontId(activeSoundFontId);
+              setDefaultSoundFontState(activeSoundFontId);
+              setSystemLog(`Set "${activeSf?.name || activeSoundFontId}" as default SoundFont (saved in cookies)`);
+            }}
+            disabled={defaultSoundFontId === activeSoundFontId}
+            className={`px-2 py-1 rounded border text-[9.5px] font-mono font-bold transition flex items-center gap-1 ${
+              defaultSoundFontId === activeSoundFontId
+                ? 'bg-amber-950/75 border-amber-500/70 text-amber-300 cursor-default'
+                : 'bg-zinc-950 hover:bg-amber-950/60 border-zinc-700 hover:border-amber-500/60 text-zinc-300 hover:text-amber-200 cursor-pointer'
+            }`}
+            title={
+              defaultSoundFontId === activeSoundFontId
+                ? 'Currently set as default startup SoundFont'
+                : 'Set selected SoundFont as default startup SoundFont'
+            }
+          >
+            <Star size={10} fill={defaultSoundFontId === activeSoundFontId ? 'currentColor' : 'none'} />
+            <span>{defaultSoundFontId === activeSoundFontId ? 'Default' : 'Set Default'}</span>
+          </button>
+
+          {loadedSoundFonts.find(s => s.id === activeSoundFontId)?.isCustom && (
+            <button
+              type="button"
+              id="midi-panel-delete-sf-btn"
+              onClick={async () => {
+                const target = loadedSoundFonts.find(s => s.id === activeSoundFontId);
+                await deleteSavedSoundFont(activeSoundFontId);
+                setLoadedSoundFonts(SpessaSynth.getLoadedSoundFonts());
+                setActiveSoundFontId(SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
+                setDefaultSoundFontState(getDefaultSoundFontId());
+                setSystemLog(`Deleted SoundFont "${target?.name || activeSoundFontId}"`);
+              }}
+              className="px-2 py-1 rounded border border-red-900/60 bg-red-950/40 hover:bg-red-900/70 text-red-300 font-mono font-bold text-[9.5px] transition flex items-center gap-1 cursor-pointer"
+              title="Delete currently selected custom SoundFont"
+            >
+              <Trash2 size={10} />
+              <span>Delete SF</span>
+            </button>
+          )}
+
           <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-950/60 border border-cyan-800/50 text-cyan-300">
             {presetList.length} Patches
           </span>

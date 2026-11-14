@@ -174,9 +174,10 @@ class SpessaSynthCoreEngine {
   public async parseAsync(
     arrayBuffer: ArrayBuffer,
     audioCtx?: AudioContext,
-    fileName = "SoundFont_Bank.sf2"
+    fileName = "SoundFont_Bank.sf2",
+    forcedId?: string
   ): Promise<SpessaCoreParseResult> {
-    const result = this.parse(arrayBuffer, audioCtx, fileName);
+    const result = this.parse(arrayBuffer, audioCtx, fileName, forcedId);
 
     // If compressed SF3 samples were queued, decode them asynchronously via AudioContext.decodeAudioData
     if (audioCtx && result.soundFont.sampleHeaders.some(s => s.isCompressed && !s.audioBuffer)) {
@@ -193,7 +194,8 @@ class SpessaSynthCoreEngine {
   public parse(
     arrayBuffer: ArrayBuffer,
     audioCtx?: AudioContext,
-    fileName = "SoundFont_Bank.sf2"
+    fileName = "SoundFont_Bank.sf2",
+    forcedId?: string
   ): SpessaCoreParseResult {
     const logs: string[] = [
       `[${SPRESSASYNTH_CORE_ENGINE_ID}] Reading SoundFont stream: "${fileName}" (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB)...`
@@ -236,6 +238,10 @@ class SpessaSynthCoreEngine {
         }
       }
     }
+
+    const slug = fileName.replace(/\.[^/.]+$/, '').toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 28) || 'bank';
+    const finalId = forcedId || `spessa-sf-${slug}-${u8.length}`;
+    result.soundFont.id = finalId;
 
     this.loadedSoundFonts.set(result.soundFont.id, result.soundFont);
     this.activeSoundFontId = result.soundFont.id;

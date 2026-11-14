@@ -625,6 +625,8 @@ export default function App() {
           if (loadedMidiBuffer) {
             if (isPlaying) {
               seekMidiPlayback(ratio, bpm, baseSongBpm);
+            } else {
+              stopAllChannelsSound();
             }
           } else if (loadedAudioBuffer) {
             if (isPlaying) {
@@ -641,7 +643,12 @@ export default function App() {
               });
               const rate = bpm / (baseSongBpm || 125);
               setAudioPlaybackRate(rate);
+            } else {
+              stopAllChannelsSound();
             }
+          } else {
+            // Pattern Sequencer mode: hard-silence any sustaining notes from the previous timestamp before the new row triggers
+            stopAllChannelsSound();
           }
         }}
       />

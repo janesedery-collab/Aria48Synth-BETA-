@@ -466,10 +466,11 @@ class SpessaSynthEngine {
   public async loadSoundFontAsync(
     arrayBuffer: ArrayBuffer,
     fileName = "Custom_Bank.sf2",
-    externalCtx?: AudioContext
+    externalCtx?: AudioContext,
+    forcedId?: string
   ) {
     const ctx = this.init(externalCtx);
-    const result = await SpessaSynthCore.parseAsync(arrayBuffer, ctx, fileName);
+    const result = await SpessaSynthCore.parseAsync(arrayBuffer, ctx, fileName, forcedId);
     const soundFont = this.registerCoreSoundFont(result.soundFont);
     return {
       soundFont,
@@ -736,15 +737,24 @@ class SpessaSynthEngine {
           if (sampleVoiceRecord.isDisposed) return;
           const nowTime = ctx.currentTime;
           try {
+            if (sampleVoiceRecord.startTime > nowTime) {
+              // Future-scheduled voice: dispose/disconnect immediately before it starts
+              noteGain.gain.setValueAtTime(0, nowTime);
+              try { source.stop(nowTime); } catch {}
+              sampleVoiceRecord.hasScheduledStop = true;
+              sampleVoiceRecord.stopAt = nowTime;
+              sampleVoiceRecord.dispose();
+              return;
+            }
             if (typeof noteGain.gain.cancelAndHoldAtTime === 'function') {
               noteGain.gain.cancelAndHoldAtTime(nowTime);
             } else {
               noteGain.gain.cancelScheduledValues(nowTime);
             }
-            noteGain.gain.setTargetAtTime(0.0001, nowTime, 0.006);
+            noteGain.gain.setValueAtTime(0.0001, nowTime);
             if (!sampleVoiceRecord.hasScheduledStop) {
               sampleVoiceRecord.hasScheduledStop = true;
-              const stopAt = Math.max(nowTime + 0.035, sampleVoiceRecord.startTime + 0.004);
+              const stopAt = Math.max(nowTime + 0.012, sampleVoiceRecord.startTime + 0.002);
               sampleVoiceRecord.stopAt = stopAt;
               source.stop(stopAt);
             }
@@ -860,11 +870,18 @@ class SpessaSynthEngine {
           if (drumVoiceRecord.isDisposed) return;
           const nowTime = ctx.currentTime;
           try {
+            if (drumVoiceRecord.startTime > nowTime) {
+              gain.gain.setValueAtTime(0, nowTime);
+              try { osc.stop(nowTime); subOsc.stop(nowTime); } catch {}
+              drumVoiceRecord.stopAt = nowTime;
+              drumVoiceRecord.dispose();
+              return;
+            }
             gain.gain.cancelScheduledValues(nowTime);
-            gain.gain.setTargetAtTime(0.0001, nowTime, 0.005);
-            osc.stop(Math.max(nowTime + 0.025, now + 0.004));
-            subOsc.stop(Math.max(nowTime + 0.025, now + 0.004));
-            drumVoiceRecord.stopAt = nowTime + 0.03;
+            gain.gain.setValueAtTime(0.0001, nowTime);
+            osc.stop(Math.max(nowTime + 0.012, now + 0.002));
+            subOsc.stop(Math.max(nowTime + 0.012, now + 0.002));
+            drumVoiceRecord.stopAt = nowTime + 0.015;
           } catch (e) {}
         }
       };
@@ -1022,15 +1039,23 @@ class SpessaSynthEngine {
         if (voiceRecord.isDisposed) return;
         const nowTime = ctx.currentTime;
         try {
+          if (voiceRecord.startTime > nowTime) {
+            noteGain.gain.setValueAtTime(0, nowTime);
+            try { osc.stop(nowTime); subOsc.stop(nowTime); } catch {}
+            voiceRecord.hasScheduledStop = true;
+            voiceRecord.stopAt = nowTime;
+            voiceRecord.dispose();
+            return;
+          }
           if (typeof noteGain.gain.cancelAndHoldAtTime === 'function') {
             noteGain.gain.cancelAndHoldAtTime(nowTime);
           } else {
             noteGain.gain.cancelScheduledValues(nowTime);
           }
-          noteGain.gain.setTargetAtTime(0.0001, nowTime, 0.006);
+          noteGain.gain.setValueAtTime(0.0001, nowTime);
           if (!voiceRecord.hasScheduledStop) {
             voiceRecord.hasScheduledStop = true;
-            const stopAt = Math.max(nowTime + 0.035, voiceRecord.startTime + 0.004);
+            const stopAt = Math.max(nowTime + 0.012, voiceRecord.startTime + 0.002);
             voiceRecord.stopAt = stopAt;
             osc.stop(stopAt);
             subOsc.stop(stopAt);
@@ -1394,24 +1419,28 @@ class SpessaSynthEngine {
 
   public allNotesOff(channel?: number, atTime?: number) {
     if (channel !== undefined) {
-      this.noteOff(channel, undefined, atTime);
+      const ch = Math.max(0, Math.min(15, channel));
+      const chState = this.channelStates[ch];
+      if (chState) chState.sustainPedal = false;
+      this.noteOff(ch, undefined, atTime);
       return;
     }
+    this.channelStates.forEach(ch => {
+      ch.activeNoteCount = 0;
+      ch.sustainPedal = false;
+      ch.lastNote = null;
+    });
     for (let i = 0; i < this.allVoiceRecords.length; i++) {
       try { this.allVoiceRecords[i].forceStop(); } catch (e) {}
     }
     this.lastTriggerAudioTime.fill(0);
-    this.channelStates.forEach(ch => {
-      ch.activeNoteCount = 0;
-      ch.sustainPedal = false;
-    });
     for (let i = 0; i < 16; i++) {
       this.noteOff(i);
     }
-    // Schedule immediate node cleanup after quick fade-out
+    this.reapExpiredVoices();
     setTimeout(() => {
       this.reapExpiredVoices();
-    }, 70);
+    }, 45);
   }
 
   public allSoundOff() {
@@ -1425,7 +1454,7 @@ class SpessaSynthEngine {
         for (let i = 0; i < 16; i++) {
           this.updateChannelGainNode(i);
         }
-      }, 50);
+      }, 30);
     }
   }
 

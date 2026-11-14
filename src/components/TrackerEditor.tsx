@@ -901,9 +901,20 @@ export default function TrackerEditor({
                   {sf.isCustom && (
                     <button
                       type="button"
-                      onClick={() => void deleteSavedSoundFont(sf.id)}
-                      className="p-0.5 rounded text-zinc-500 hover:text-red-400 hover:bg-red-950/40 transition cursor-pointer"
-                      title={`Remove "${sf.name}" from saved SoundFonts`}
+                      id={`tracker-sf-delete-btn-${sf.id}`}
+                      onClick={async () => {
+                        await deleteSavedSoundFont(sf.id);
+                        setLoadedSoundFonts(SpessaSynth.getLoadedSoundFonts());
+                        setActiveSoundFontId(SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
+                        setDefaultSoundFontState(getDefaultSoundFontId());
+                        setImportFeedback({
+                          success: true,
+                          msg: `Removed "${sf.name}" from saved SoundFonts.`
+                        });
+                        setTimeout(() => setImportFeedback(null), 3000);
+                      }}
+                      className="p-0.5 rounded text-zinc-400 hover:text-red-400 hover:bg-red-950/40 transition cursor-pointer"
+                      title={`Delete "${sf.name}" from saved SoundFonts`}
                     >
                       <Trash2 size={9.5} />
                     </button>

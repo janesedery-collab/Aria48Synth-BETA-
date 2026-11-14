@@ -365,15 +365,38 @@ export async function loadSavedSoundFontBinary(entry: SavedSoundFontCookieEntry)
 /**
  * Remove an added SoundFont from browser cookies and IndexedDB cache
  */
-export async function removeSavedSoundFontFromCookies(id: string): Promise<void> {
-  clearSoundFontCookieChunks(id);
-  await deleteSoundFontBinaryFromIDB(id);
-  const remaining = getSavedSoundFontsFromCookies().filter(e => e.id !== id);
-  setCookie(COOKIE_ADDED_SOUNDFONTS_KEY, JSON.stringify(remaining), 365);
-  if (getDefaultSoundFontCookie() === id) {
+export async function removeSavedSoundFontFromCookies(
+  id: string,
+  fallbackNameOrFile?: string
+): Promise<void> {
+  const existing = getSavedSoundFontsFromCookies();
+  const idsToDelete = new Set<string>([id]);
+  if (fallbackNameOrFile) {
+    existing.forEach(e => {
+      if (e.name === fallbackNameOrFile || e.fileName === fallbackNameOrFile) {
+        idsToDelete.add(e.id);
+      }
+    });
+  }
+
+  for (const targetId of idsToDelete) {
+    clearSoundFontCookieChunks(targetId);
+    await deleteSoundFontBinaryFromIDB(targetId);
+  }
+
+  const remaining = existing.filter(e => !idsToDelete.has(e.id));
+  if (remaining.length > 0) {
+    setCookie(COOKIE_ADDED_SOUNDFONTS_KEY, JSON.stringify(remaining), 365);
+  } else {
+    deleteCookie(COOKIE_ADDED_SOUNDFONTS_KEY);
+  }
+
+  const defCookie = getDefaultSoundFontCookie();
+  if (defCookie && idsToDelete.has(defCookie)) {
     clearDefaultSoundFontCookie();
   }
-  if (getActiveSoundFontCookie() === id) {
+  const activeCookie = getActiveSoundFontCookie();
+  if (activeCookie && idsToDelete.has(activeCookie)) {
     deleteCookie(COOKIE_ACTIVE_SOUNDFONT_KEY);
   }
 }
