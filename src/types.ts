@@ -47,10 +47,10 @@ export interface OscilloscopeConfig {
 }
 
 export interface SoundEnginesConfig {
-  spessaSynth: boolean;    // SpessaSynth (SF2/SF3 SoundFont & 16-channel MIDI)
-  tinySynth: boolean;      // WebAudio TinySynth (GM FM Synthesis)
-  syntheticOsc: boolean;   // Hardware Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3)
-  chiptune3: boolean;      // Chiptune-3 (Amiga ProTracker / MOD / XM / S3M / IT PCM)
+  spessaSynth: boolean;     // SpessaSynth (WorkletSynthesizer SF2/SF3 & 16-channel MIDI)
+  tinySynth: boolean;       // WebAudio TinySynth (GM FM Synthesis)
+  syntheticOsc: boolean;    // Hardware Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3)
+  spessaSynthCore: boolean; // spressasynth_core (SoundFont Core, PCM Voice Resolver & MOD/XM/S3M)
 }
 
 export type SoundFontInterpolationMode =

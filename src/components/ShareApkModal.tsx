@@ -55,7 +55,7 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
       try {
         await navigator.share({
           title: 'Aria48 Tracker - Universal Chiptune & MIDI Workstation',
-          text: `Check out Aria48 Tracker with 16 HTML5 oscilloscopes, spressasynth_lib SoundFonts and Chiptune-3!${trackTitle ? ` Now playing: ${trackTitle}` : ''}`,
+          text: `Check out Aria48 Tracker with 16 HTML5 oscilloscopes, spressasynth_lib SoundFonts, and native MOD/XM/S3M tracker synthesis!${trackTitle ? ` Now playing: ${trackTitle}` : ''}`,
           url: currentUrl
         });
       } catch (e) {
@@ -123,7 +123,7 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
           features: [
             "16-Channel HTML5 WebScope Oscilloscopes",
             "spressasynth_lib SoundFont2 Engine",
-            "Chiptune-3 48-Channel Tracker",
+            "Native MOD/XM/S3M 48-Channel Tracker",
             "WebUSB Hardware Synthesis Link",
             "Cloud SQL Storage"
           ],
@@ -187,7 +187,7 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
 
         setIsGeneratingApk(false);
         setDownloadSuccess(true);

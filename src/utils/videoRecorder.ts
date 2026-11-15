@@ -15,6 +15,7 @@ import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4ArrayBufferTarget } from 'mp
 import { Muxer as WebmMuxer, ArrayBufferTarget as WebmArrayBufferTarget } from 'webm-muxer';
 import {
   getAudioContext,
+  getDirectAudioMasterGain,
   getDirectAudioProgress,
   getSyntheticMasterGain,
   getTinySynthMasterGain,
@@ -23,7 +24,6 @@ import {
 import { WebScope, WebScopePreset, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
 import { SpessaSynth } from '../engines/spressasynthLib';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
-import { Chiptune3 } from '../engines/chiptune3';
 import {
   OfflineSongSnapshot,
   RenderedAudioData,
@@ -770,8 +770,8 @@ class VideoRecorderService {
           WorkletSynthBridge.connectRecordingDestination(dest);
           const spessaMaster = SpessaSynth.getMasterGain();
           if (spessaMaster) { try { spessaMaster.connect(dest); } catch {} }
-          const chiptuneMaster = Chiptune3.getMasterGain();
-          if (chiptuneMaster) { try { chiptuneMaster.connect(dest); } catch {} }
+          const directMaster = getDirectAudioMasterGain();
+          if (directMaster) { try { directMaster.connect(dest); } catch {} }
           const tinyMaster = getTinySynthMasterGain();
           if (tinyMaster) { try { tinyMaster.connect(dest); } catch {} }
           const synthMaster = getSyntheticMasterGain();
@@ -913,7 +913,7 @@ class VideoRecorderService {
     if (this.audioDestNode) {
       WorkletSynthBridge.disconnectRecordingDestination(this.audioDestNode);
       try { SpessaSynth.getMasterGain()?.disconnect(this.audioDestNode); } catch {}
-      try { Chiptune3.getMasterGain()?.disconnect(this.audioDestNode); } catch {}
+      try { getDirectAudioMasterGain()?.disconnect(this.audioDestNode); } catch {}
       try { getTinySynthMasterGain()?.disconnect(this.audioDestNode); } catch {}
       try { getSyntheticMasterGain()?.disconnect(this.audioDestNode); } catch {}
       this.audioDestNode = null;
@@ -1287,7 +1287,7 @@ class VideoRecorderService {
       this.liveState.isPlaying ||
       isMidiPlaying() ||
       SpessaSynth.isMidiPlaying() ||
-      Chiptune3.isChiptunePlaying() ||
+      WebScope.isDirectAudioPlaying() ||
       getDirectAudioProgress().playing;
 
     for (let row = 0; row < 4; row++) {

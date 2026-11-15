@@ -151,11 +151,16 @@ export default function TrackerEditor({
       spessaSynth: true,
       tinySynth: true,
       syntheticOsc: true,
-      chiptune3: true
+      spessaSynthCore: true
     });
   };
 
-  const activeEnginesCount = Object.values(enginesConfig).filter(Boolean).length;
+  const activeEnginesCount = [
+    enginesConfig.spessaSynth,
+    enginesConfig.tinySynth,
+    enginesConfig.syntheticOsc,
+    enginesConfig.spessaSynthCore
+  ].filter(Boolean).length;
 
   const totalPatterns = songPatterns?.length || 1;
   const currentPatternRows = (songPatterns && songPatterns[currentPatternIndex]) ? songPatterns[currentPatternIndex] : patterns;
@@ -787,19 +792,19 @@ export default function TrackerEditor({
             <span>Chip Osc (Synth)</span>
           </button>
 
-          {/* Chiptune-3 Tracker Engine */}
+          {/* spressasynth_core SoundFont Core & Tracker Core Engine */}
           <button
-            id="engine-toggle-chiptune3"
-            onClick={() => handleToggleEngine('chiptune3')}
+            id="engine-toggle-spressasynth-core"
+            onClick={() => handleToggleEngine('spessaSynthCore')}
             className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
-              enginesConfig.chiptune3
+              enginesConfig.spessaSynthCore
                 ? 'bg-fuchsia-950/70 border-fuchsia-500/60 text-fuchsia-300 shadow-[0_0_8px_rgba(217,70,239,0.25)]'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
             }`}
-            title={enginesConfig.chiptune3 ? 'Chiptune-3 Tracker Engine (MOD, XM, S3M, IT PCM): ACTIVE. Click to disable.' : 'Chiptune-3: MUTED. Click to enable.'}
+            title={enginesConfig.spessaSynthCore ? 'spressasynth_core (SoundFont Core, PCM Voice Resolver & MOD/XM/S3M Core): ACTIVE. Click to disable.' : 'spressasynth_core: MUTED. Click to enable.'}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.chiptune3 ? 'bg-fuchsia-400 shadow-[0_0_6px_rgba(232,121,249,0.8)]' : 'bg-zinc-600'}`} />
-            <span>Chiptune-3 (MOD)</span>
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.spessaSynthCore ? 'bg-fuchsia-400 shadow-[0_0_6px_rgba(232,121,249,0.8)]' : 'bg-zinc-600'}`} />
+            <span>spressasynth_core</span>
           </button>
         </div>
 

@@ -4,7 +4,6 @@ import { Channel, SoundEnginesConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { onInterpolationModeChange } from '../engines/soundFontInterpolation';
-import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { BasicMIDI } from 'spessasynth_core';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
 import { getGmProgramForPreset } from '../utils/soundFontEngine';
@@ -27,7 +26,6 @@ export {
   SOUNDFONT_ACCEPT_ATTR,
   isSoundFontFileName
 } from '../engines/spressasynthCore';
-export { Chiptune3, CHIPTUNE3_ENGINE_ID };
 export { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS };
 export type { SoundEnginesConfig };
 
@@ -334,13 +332,21 @@ export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
   spessaSynth: true,
   tinySynth: true,
   syntheticOsc: true,
-  chiptune3: true,
+  spessaSynthCore: true,
 };
 
 let activeEnginesConfig: SoundEnginesConfig = (() => {
   try {
-    const saved = localStorage.getItem('aria48_sound_engines');
-    if (saved) return { ...DEFAULT_SOUND_ENGINES, ...JSON.parse(saved) };
+    const raw = localStorage.getItem('aria48_sound_engines');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        spessaSynth: typeof parsed.spessaSynth === 'boolean' ? parsed.spessaSynth : DEFAULT_SOUND_ENGINES.spessaSynth,
+        tinySynth: typeof parsed.tinySynth === 'boolean' ? parsed.tinySynth : DEFAULT_SOUND_ENGINES.tinySynth,
+        syntheticOsc: typeof parsed.syntheticOsc === 'boolean' ? parsed.syntheticOsc : DEFAULT_SOUND_ENGINES.syntheticOsc,
+        spessaSynthCore: typeof parsed.spessaSynthCore === 'boolean' ? parsed.spessaSynthCore : DEFAULT_SOUND_ENGINES.spessaSynthCore,
+      };
+    }
   } catch (e) {}
   return { ...DEFAULT_SOUND_ENGINES };
 })();
@@ -352,7 +358,12 @@ export function getSoundEnginesConfig(): SoundEnginesConfig {
 }
 
 export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
-  activeEnginesConfig = { ...activeEnginesConfig, ...config };
+  activeEnginesConfig = {
+    spessaSynth: config.spessaSynth ?? activeEnginesConfig.spessaSynth,
+    tinySynth: config.tinySynth ?? activeEnginesConfig.tinySynth,
+    syntheticOsc: config.syntheticOsc ?? activeEnginesConfig.syntheticOsc,
+    spessaSynthCore: config.spessaSynthCore ?? activeEnginesConfig.spessaSynthCore,
+  };
   
   if (tinySynthMasterGain && audioCtx) {
     tinySynthMasterGain.gain.setValueAtTime(activeEnginesConfig.tinySynth ? 0.55 : 0, audioCtx.currentTime);
@@ -362,21 +373,19 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
   }
   const spessaMaster = SpessaSynth.getMasterGain();
   if (spessaMaster && audioCtx) {
-    spessaMaster.gain.setValueAtTime(activeEnginesConfig.spessaSynth ? 0.7 : 0, audioCtx.currentTime);
+    spessaMaster.gain.setValueAtTime(activeEnginesConfig.spessaSynthCore ? 0.7 : 0, audioCtx.currentTime);
   }
   WorkletSynthBridge.setMasterVolumeGain(activeEnginesConfig.spessaSynth ? 0.85 : 0);
-  const chipMaster = Chiptune3.getMasterGain();
-  if (chipMaster && audioCtx) {
-    chipMaster.gain.setValueAtTime(activeEnginesConfig.chiptune3 ? 0.85 : 0, audioCtx.currentTime);
-  }
 
   if (!activeEnginesConfig.syntheticOsc) {
     activeSyntheticVoices.forEach(v => { try { v.stop(); } catch(e) {} });
     activeSyntheticVoices.length = 0;
   }
   if (!activeEnginesConfig.spessaSynth) {
-    SpessaSynth.allNotesOff();
     WorkletSynthBridge.stopAll(false);
+  }
+  if (!activeEnginesConfig.spessaSynthCore) {
+    SpessaSynth.allNotesOff();
   }
   if (!activeEnginesConfig.tinySynth && tinySynthInstance) {
     try {
@@ -404,6 +413,7 @@ let tinySynthMasterGain: GainNode | null = null;
 let tinySynthLimiter: DynamicsCompressorNode | null = null;
 let syntheticMasterGain: GainNode | null = null;
 let syntheticLimiter: DynamicsCompressorNode | null = null;
+let directAudioMasterGain: GainNode | null = null;
 let directAudioSource: AudioBufferSourceNode | null = null;
 let directAudioBufferRef: AudioBuffer | null = null;
 let directAudioStartCtxTime = 0;
@@ -553,11 +563,11 @@ export function hookTinySynthEvents(synth: any) {
       }
     }
 
-    // 2. Forward full MIDI stream synchronously to WorkletSynthesizer & SpessaSynth with NO future Worklet queue
-    if (!suppressHookForward && activeEnginesConfig.spessaSynth && msg && msg.length > 0) {
-      const workletPrimary = shouldUseWorkletPrimary();
+    // 2. Forward full MIDI stream synchronously to WorkletSynthesizer (spessaSynth) & SpessaSynthCore (spessaSynthCore)
+    if (!suppressHookForward && (activeEnginesConfig.spessaSynth || activeEnginesConfig.spessaSynthCore) && msg && msg.length > 0) {
+      const workletPrimary = shouldUseWorkletPrimary() && activeEnginesConfig.spessaSynth;
 
-      if (WorkletSynthBridge.isReadySync()) {
+      if (activeEnginesConfig.spessaSynth && WorkletSynthBridge.isReadySync()) {
         if (status === 0xff) {
           WorkletSynthBridge.sendGMSystemOn();
         } else {
@@ -565,7 +575,7 @@ export function hookTinySynthEvents(synth: any) {
         }
       }
 
-      if (!workletPrimary) {
+      if (activeEnginesConfig.spessaSynthCore && !workletPrimary) {
         if (cmd === 0x90) {
           const note = msg[1];
           const vel = msg[2];
@@ -709,6 +719,12 @@ export function initSyntheticEngine(ctx: AudioContext) {
       syntheticMasterGain.connect(syntheticLimiter);
       syntheticLimiter.connect(ctx.destination);
     }
+    if (!directAudioMasterGain) {
+      directAudioMasterGain = ctx.createGain();
+      directAudioMasterGain.gain.setValueAtTime(0.85, ctx.currentTime);
+      directAudioMasterGain.connect(ctx.destination);
+    }
+    WebScope.initDirectAudioMatrix(ctx);
   } catch (e) {}
 }
 
@@ -719,7 +735,6 @@ export function getAudioContext(): AudioContext | null {
       audioCtx = new AudioContextClass();
       SpessaSynth.init(audioCtx);
       void WorkletSynthBridge.init(audioCtx);
-      Chiptune3.init(audioCtx);
       initTinySynth(audioCtx);
       initSyntheticEngine(audioCtx);
     }
@@ -743,6 +758,11 @@ export function getTinySynthMasterGain(): GainNode | null {
 export function getSyntheticMasterGain(): GainNode | null {
   getAudioContext();
   return syntheticMasterGain;
+}
+
+export function getDirectAudioMasterGain(): GainNode | null {
+  getAudioContext();
+  return directAudioMasterGain;
 }
 
 let useWorkletSequencerActive = false;
@@ -1127,378 +1147,6 @@ export function getMidiPlaybackProgress(targetBpm?: number, baseSongBpm?: number
 export function isMidiPlaying(): boolean {
   return isMidiPlayingInternal;
 }
-
-
-/**
- * Authentic Amiga ProTracker PCM Module Renderer
- * Converts MOD files (8-bit signed PCM samples, Amiga periods, orders, and effects)
- * directly into a CD-quality stereo AudioBuffer with zero synthetic beeping!
- */
-export function renderModToAudioBuffer(arrayBuffer: ArrayBuffer, ctx: AudioContext): AudioBuffer | null {
-  try {
-    const u8 = new Uint8Array(arrayBuffer);
-    if (u8.length < 1084) return null;
-
-    // Check signature
-    let signature = "";
-    for (let i = 1080; i < 1084; i++) {
-      signature += String.fromCharCode(u8[i]);
-    }
-    let channelsCount = 4;
-    const sigMatch = signature.match(/(\d+)CH/);
-    const cnMatch = signature.match(/(\d+)CN/);
-    if (sigMatch) channelsCount = parseInt(sigMatch[1], 10);
-    else if (cnMatch) channelsCount = parseInt(cnMatch[1], 10);
-    else if (signature === "M.K." || signature === "M!K!" || signature === "FLT4") channelsCount = 4;
-    else if (signature === "CD81" || signature === "OCTA") channelsCount = 8;
-
-    // Read 31 Sample Headers
-    interface ModSample {
-      name: string;
-      lengthBytes: number;
-      finetune: number;
-      volume: number;
-      loopStart: number;
-      loopLength: number;
-      pcm: Float32Array | null;
-    }
-    // Read 31 Sample Headers
-    interface ModSample {
-      name: string;
-      lengthBytes: number;
-      finetune: number;
-      volume: number;
-      loopStart: number;
-      loopLength: number;
-      pcm: Float32Array | null;
-    }
-    const samples: ModSample[] = [];
-    let totalSampleBytes = 0;
-    for (let sIdx = 0; sIdx < 31; sIdx++) {
-      const hOffset = 20 + sIdx * 30;
-      let sName = "";
-      for (let c = 0; c < 22; c++) {
-        const char = u8[hOffset + c];
-        if (char > 32 && char < 127) sName += String.fromCharCode(char);
-      }
-      const lenWords = (u8[hOffset + 22] << 8) | u8[hOffset + 23];
-      const lengthBytes = lenWords * 2;
-      let finetune = u8[hOffset + 24] & 0x0F;
-      if (finetune > 7) finetune -= 16; // signed 4-bit finetune (-8 to +7)
-      const volume = Math.min(64, u8[hOffset + 25]);
-      const repStartWords = (u8[hOffset + 26] << 8) | u8[hOffset + 27];
-      const repLenWords = (u8[hOffset + 28] << 8) | u8[hOffset + 29];
-      const loopStart = repStartWords * 2;
-      const loopLength = repLenWords * 2;
-
-      totalSampleBytes += lengthBytes;
-
-      samples.push({
-        name: sName.trim() || `Sample ${sIdx + 1}`,
-        lengthBytes,
-        finetune,
-        volume,
-        loopStart,
-        loopLength,
-        pcm: null
-      });
-    }
-
-    const songLength = u8[950] || 1;
-    const orderList: number[] = [];
-    let maxPatternIdx = 0;
-    // CRITICAL: Scan strictly within active songLength orders (0 .. songLength - 1).
-    // Residual bytes in 952 + songLength .. 127 are uninitialized in many tracker files!
-    for (let i = 0; i < songLength; i++) {
-      const p = u8[952 + i];
-      orderList.push(p);
-      if (p < 128 && p > maxPatternIdx) maxPatternIdx = p;
-    }
-
-    // Extract 8-bit signed PCM data for each sample
-    const patternDataStart = 1084;
-    const patternBytes = 64 * channelsCount * 4;
-    const sampleStartFromPatterns = patternDataStart + (maxPatternIdx + 1) * patternBytes;
-
-    // Authentic Amiga ProTracker standard: sample 1 starts immediately after patterns
-    let sampleDataOffset = sampleStartFromPatterns;
-    // Fallback if calculated start is beyond EOF (truncated file)
-    if (sampleStartFromPatterns + totalSampleBytes > u8.length) {
-      const sampleStartFromEnd = arrayBuffer.byteLength - totalSampleBytes;
-      if (sampleStartFromEnd >= patternDataStart) {
-        sampleDataOffset = sampleStartFromEnd;
-      }
-    }
-
-    for (let sIdx = 0; sIdx < 31; sIdx++) {
-      const smp = samples[sIdx];
-      if (smp.lengthBytes > 0 && sampleDataOffset < u8.length) {
-        const readLen = Math.min(smp.lengthBytes, u8.length - sampleDataOffset);
-        const s8 = new Int8Array(arrayBuffer, sampleDataOffset, readLen);
-        const floatPcm = new Float32Array(smp.lengthBytes);
-        for (let i = 0; i < readLen; i++) {
-          floatPcm[i] = s8[i] / 128.0;
-        }
-        smp.pcm = floatPcm;
-        sampleDataOffset += readLen;
-      }
-    }
-
-    // Output sample rate and buffers
-    const sampleRate = ctx.sampleRate || 44100;
-    const amigaClock = 3546895; // PAL Amiga Clock
-
-    // Channel state
-    interface RenderChannel {
-      sampleIdx: number;
-      samplePos: number;
-      period: number;
-      volume: number;
-      sampleRateRatio: number;
-      panLeft: number;
-      panRight: number;
-      portamentoTarget: number;
-      portamentoSpeed: number;
-    }
-
-    const channelStates: RenderChannel[] = [];
-    for (let c = 0; c < channelsCount; c++) {
-      let panL = 0.5, panR = 0.5;
-      if (channelsCount === 4) {
-        if (c === 0 || c === 3) { panL = 0.8; panR = 0.2; }
-        else { panL = 0.2; panR = 0.8; }
-      } else {
-        const panRatio = c / Math.max(1, channelsCount - 1);
-        panL = 1 - panRatio * 0.7;
-        panR = 0.3 + panRatio * 0.7;
-      }
-      channelStates.push({
-        sampleIdx: -1,
-        samplePos: 0,
-        period: 0,
-        volume: 64,
-        sampleRateRatio: 0,
-        panLeft: panL,
-        panRight: panR,
-        portamentoTarget: 0,
-        portamentoSpeed: 0
-      });
-    }
-
-    let speed = 6;     // ticks per row
-    let tempo = 125;   // BPM
-    let maxOrderLimit = Math.min(orderList.length, 128);
-
-    // Estimate frames
-    const estimatedSeconds = maxOrderLimit * 64 * (6 / (2.5 * tempo));
-    const maxSeconds = Math.min(estimatedSeconds, 360);
-    const maxFrames = Math.floor(maxSeconds * sampleRate);
-
-    const outLeft = new Float32Array(maxFrames);
-    const outRight = new Float32Array(maxFrames);
-    let outOffset = 0;
-
-    let orderIdx = 0;
-    let nextRowToPlay = 0;
-
-    orderLoop: while (orderIdx < maxOrderLimit && outOffset < maxFrames) {
-      const pIdx = orderList[orderIdx];
-      const pOffset = patternDataStart + pIdx * patternBytes;
-      if (pOffset + patternBytes > u8.length) break;
-
-      let row = nextRowToPlay;
-      nextRowToPlay = 0;
-
-      while (row < 64 && outOffset < maxFrames) {
-        let patternBreakRow = -1;
-        let positionJumpOrder = -1;
-
-        // Process row events at tick 0
-        for (let ch = 0; ch < channelsCount; ch++) {
-          const cellOffset = pOffset + (row * channelsCount * 4) + (ch * 4);
-          const b0 = u8[cellOffset];
-          const b1 = u8[cellOffset + 1];
-          const b2 = u8[cellOffset + 2];
-          const b3 = u8[cellOffset + 3];
-
-          const period = ((b0 & 0x0F) << 8) | b1;
-          const instIdx = (b0 & 0xF0) | ((b2 & 0xF0) >> 4);
-          const effect = b2 & 0x0F;
-          const effectParam = b3;
-
-          const chState = channelStates[ch];
-
-          if (instIdx > 0 && instIdx <= 31) {
-            chState.sampleIdx = instIdx - 1;
-            chState.volume = samples[chState.sampleIdx]?.volume ?? 64;
-          }
-
-          if (period > 0) {
-            if (effect === 0x03) {
-              // Tone Portamento
-              chState.portamentoTarget = period;
-              if (effectParam > 0) chState.portamentoSpeed = effectParam;
-            } else {
-              chState.period = period;
-              chState.samplePos = 0;
-              const smp = chState.sampleIdx >= 0 ? samples[chState.sampleIdx] : null;
-              const fine = smp ? smp.finetune : 0;
-              const tunedPeriod = fine !== 0 ? period * Math.pow(2, -fine / 96) : period;
-              const playFreq = amigaClock / (tunedPeriod * 2);
-              chState.sampleRateRatio = Math.max(0.01, Math.min(8.0, playFreq / sampleRate));
-            }
-          }
-
-          // Effects Processing
-          if (effect === 0x0C) { // Set volume
-            chState.volume = Math.max(0, Math.min(64, effectParam));
-          } else if (effect === 0x0F) { // Set speed / tempo
-            if (effectParam <= 32 && effectParam > 0) {
-              speed = effectParam;
-            } else if (effectParam > 32) {
-              tempo = effectParam;
-            }
-          } else if (effect === 0x0B) { // Position Jump
-            positionJumpOrder = effectParam;
-          } else if (effect === 0x0D) { // Pattern Break
-            const high = (effectParam >> 4) & 0x0F;
-            const low = effectParam & 0x0F;
-            patternBreakRow = (high * 10) + low;
-          }
-        }
-
-        // Render all ticks for this row
-        const samplesPerTick = Math.max(1, Math.round(sampleRate / (2.5 * tempo)));
-        for (let t = 0; t < speed; t++) {
-          // Non-zero tick effects: Portamento / Volume Slides
-          if (t > 0) {
-            for (let ch = 0; ch < channelsCount; ch++) {
-              const cellOffset = pOffset + (row * channelsCount * 4) + (ch * 4);
-              const b2 = u8[cellOffset + 2];
-              const b3 = u8[cellOffset + 3];
-              const effect = b2 & 0x0F;
-              const effectParam = b3;
-              const chState = channelStates[ch];
-
-              if (effect === 0x01 && chState.period > 0) { // Portamento Up
-                chState.period = Math.max(56, chState.period - effectParam);
-                const smp = chState.sampleIdx >= 0 ? samples[chState.sampleIdx] : null;
-                const fine = smp ? smp.finetune : 0;
-                const tunedPeriod = fine !== 0 ? chState.period * Math.pow(2, -fine / 96) : chState.period;
-                chState.sampleRateRatio = (amigaClock / (tunedPeriod * 2)) / sampleRate;
-              } else if (effect === 0x02 && chState.period > 0) { // Portamento Down
-                chState.period = Math.min(1712, chState.period + effectParam);
-                const smp = chState.sampleIdx >= 0 ? samples[chState.sampleIdx] : null;
-                const fine = smp ? smp.finetune : 0;
-                const tunedPeriod = fine !== 0 ? chState.period * Math.pow(2, -fine / 96) : chState.period;
-                chState.sampleRateRatio = (amigaClock / (tunedPeriod * 2)) / sampleRate;
-              } else if (effect === 0x03 && chState.period > 0 && chState.portamentoTarget > 0) { // Tone Portamento
-                if (chState.period < chState.portamentoTarget) {
-                  chState.period = Math.min(chState.portamentoTarget, chState.period + chState.portamentoSpeed);
-                } else if (chState.period > chState.portamentoTarget) {
-                  chState.period = Math.max(chState.portamentoTarget, chState.period - chState.portamentoSpeed);
-                }
-                const smp = chState.sampleIdx >= 0 ? samples[chState.sampleIdx] : null;
-                const fine = smp ? smp.finetune : 0;
-                const tunedPeriod = fine !== 0 ? chState.period * Math.pow(2, -fine / 96) : chState.period;
-                chState.sampleRateRatio = (amigaClock / (tunedPeriod * 2)) / sampleRate;
-              } else if (effect === 0x0A) { // Volume Slide
-                const up = (effectParam >> 4) & 0x0F;
-                const down = effectParam & 0x0F;
-                if (up > 0) chState.volume = Math.min(64, chState.volume + up);
-                else if (down > 0) chState.volume = Math.max(0, chState.volume - down);
-              }
-            }
-          }
-
-          for (let s = 0; s < samplesPerTick; s++) {
-            if (outOffset >= maxFrames) break orderLoop;
-
-            let sampleMixL = 0;
-            let sampleMixR = 0;
-
-            for (let ch = 0; ch < channelsCount; ch++) {
-              const chState = channelStates[ch];
-              if (chState.sampleIdx >= 0 && chState.sampleRateRatio > 0) {
-                const smp = samples[chState.sampleIdx];
-                if (smp && smp.pcm) {
-                  const pcm = smp.pcm;
-                  const intPos = Math.floor(chState.samplePos);
-                  const frac = chState.samplePos - intPos;
-                  const loopEnd = Math.min(pcm.length, smp.loopStart + smp.loopLength);
-                  const validLoopLen = loopEnd - smp.loopStart;
-                  const hasLoop = smp.loopLength > 2 && smp.loopStart < pcm.length && validLoopLen > 2;
-
-                  if (intPos >= 0 && intPos < pcm.length) {
-                    const s0 = pcm[intPos];
-                    // Linear interpolation to eliminate high-frequency glitching
-                    let s1 = s0;
-                    if (intPos + 1 < pcm.length) {
-                      s1 = pcm[intPos + 1];
-                    } else if (hasLoop) {
-                      s1 = pcm[smp.loopStart];
-                    }
-
-                    const sampleVal = (s0 + frac * (s1 - s0)) * (chState.volume / 64);
-                    if (!isNaN(sampleVal)) {
-                      sampleMixL += sampleVal * chState.panLeft;
-                      sampleMixR += sampleVal * chState.panRight;
-                    }
-                  }
-
-                  // Advance position
-                  chState.samplePos += chState.sampleRateRatio;
-
-                  // Handle authentic looping with bounds protection
-                  if (hasLoop) {
-                    if (chState.samplePos >= loopEnd) {
-                      chState.samplePos = smp.loopStart + ((chState.samplePos - loopEnd) % validLoopLen);
-                    }
-                  } else if (chState.samplePos >= pcm.length) {
-                    chState.sampleIdx = -1; // End of non-looping sample
-                  }
-                }
-              }
-            }
-
-            // Authentic soft saturation limiter prevents harsh digital clipping/buzzing
-            outLeft[outOffset] = Math.tanh(sampleMixL * 0.45);
-            outRight[outOffset] = Math.tanh(sampleMixR * 0.45);
-            outOffset++;
-          }
-        }
-
-        // Handle Pattern Break or Position Jump at end of row
-        if (positionJumpOrder >= 0) {
-          orderIdx = positionJumpOrder;
-          nextRowToPlay = patternBreakRow >= 0 ? Math.min(63, patternBreakRow) : 0;
-          continue orderLoop;
-        } else if (patternBreakRow >= 0) {
-          orderIdx++;
-          nextRowToPlay = Math.min(63, patternBreakRow);
-          continue orderLoop;
-        }
-
-        row++;
-      }
-
-      orderIdx++;
-    }
-
-    if (outOffset === 0) return null;
-
-    // Slice to exact length rendered
-    const finalBuffer = ctx.createBuffer(2, outOffset, sampleRate);
-    finalBuffer.getChannelData(0).set(outLeft.subarray(0, outOffset));
-    finalBuffer.getChannelData(1).set(outRight.subarray(0, outOffset));
-    return finalBuffer;
-
-  } catch (err) {
-    console.log("MOD PCM rendering failed:", err);
-    return null;
-  }
-}
-
 // Convert MIDI note number to frequency in Hz
 export function midiNoteToFrequency(note: number): number {
   return 440 * Math.pow(2, (note - 69) / 12);
@@ -1663,26 +1311,24 @@ export function playNote(
     const noteGen = midiPlaybackGeneration;
     const durMs = Math.max(30, Math.round(duration * 1000));
 
-    // 1. SpessaSynth / WorkletSynthesizer Engine (supports channels 0-47 natively)
-    if (activeEnginesConfig.spessaSynth) {
-      if (shouldUseWorkletPrimary()) {
-        if (soundFontPreset && !WorkletSynthBridge.getChannelState(workletChIdx).presetLocked) {
-          WorkletSynthBridge.programChange(workletChIdx, gmProg);
-        }
-        // Trigger immediately and schedule noteOff in generation-guarded JS timer so Pause/Seek cancels cleanly
-        WorkletSynthBridge.noteOn(workletChIdx, midiNum, volNorm);
-        const offTimer = setTimeout(() => {
-          scheduledNoteOffTimers.delete(offTimer);
-          if (noteGen !== midiPlaybackGeneration) return;
-          WorkletSynthBridge.noteOff(workletChIdx, midiNum);
-        }, durMs);
-        scheduledNoteOffTimers.add(offTimer);
-      } else {
-        if (soundFontPreset) {
-          SpessaSynth.setChannelProgram(chIdx, gmProg);
-        }
-        SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
+    // 1. SpessaSynth Lib (WorkletSynthesizer) & spressasynth_core (PCM Sample Resolver)
+    if (activeEnginesConfig.spessaSynth && shouldUseWorkletPrimary()) {
+      if (soundFontPreset && !WorkletSynthBridge.getChannelState(workletChIdx).presetLocked) {
+        WorkletSynthBridge.programChange(workletChIdx, gmProg);
       }
+      // Trigger immediately and schedule noteOff in generation-guarded JS timer so Pause/Seek cancels cleanly
+      WorkletSynthBridge.noteOn(workletChIdx, midiNum, volNorm);
+      const offTimer = setTimeout(() => {
+        scheduledNoteOffTimers.delete(offTimer);
+        if (noteGen !== midiPlaybackGeneration) return;
+        WorkletSynthBridge.noteOff(workletChIdx, midiNum);
+      }, durMs);
+      scheduledNoteOffTimers.add(offTimer);
+    } else if (activeEnginesConfig.spessaSynthCore) {
+      if (soundFontPreset) {
+        SpessaSynth.setChannelProgram(chIdx, gmProg);
+      }
+      SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
     }
 
     // 2. WebAudio TinySynth Engine (suppress hook forwarding so SpessaSynth isn't double-triggered)
@@ -1750,8 +1396,8 @@ export function stopAllChannelsSound() {
 }
 
 /**
- * Play authentic decoded direct audio stream (for rendered MOD, WAV, MP3)
- * Feeds exclusively through Chiptune-3.zip master gain and 16-channel visualizer
+ * Play decoded direct audio stream (WAV, MP3, OGG)
+ * Routes through native Web Audio master gain and feeds the 16-channel WebScope visualizer
  */
 export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: () => void) {
   try {
@@ -1765,24 +1411,18 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
 
-    // Connect exclusively to Chiptune-3.zip tracker engine
-    Chiptune3.init(ctx);
-    const masterGain = Chiptune3.getMasterGain();
-    if (masterGain) {
-      masterGain.gain.setValueAtTime(activeEnginesConfig.chiptune3 ? 0.85 : 0, ctx.currentTime);
-      source.connect(masterGain);
+    if (!directAudioMasterGain) {
+      initSyntheticEngine(ctx);
+    }
+    if (directAudioMasterGain) {
+      directAudioMasterGain.gain.setValueAtTime(0.85, ctx.currentTime);
+      source.connect(directAudioMasterGain);
     } else {
       source.connect(ctx.destination);
     }
 
-    // Feed Chiptune-3.zip 16-channel distributor so webscope-oscilloscope monitors all 16 channels!
-    Chiptune3.init(ctx);
-    const analysers = Chiptune3.getAllChannelAnalysers();
-    for (let i = 0; i < analysers.length; i++) {
-      try {
-        source.connect(analysers[i]);
-      } catch (e) {}
-    }
+    WebScope.connectDirectAudioNode(ctx, source);
+    WebScope.setDirectAudioPlaying(true);
 
     directAudioBufferRef = buffer;
     directAudioStartCtxTime = ctx.currentTime;
@@ -1792,6 +1432,7 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
     source.onended = () => {
       if (directAudioSource === source) {
         directAudioSource = null;
+        WebScope.setDirectAudioPlaying(false);
         onEnded?.();
       }
     };
@@ -1811,7 +1452,7 @@ export function stopDirectAudio() {
     } catch (e) {}
     directAudioSource = null;
   }
-  Chiptune3.stopChiptune();
+  WebScope.setDirectAudioPlaying(false);
 }
 
 export function getDirectAudioProgress(): {

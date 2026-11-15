@@ -273,7 +273,7 @@ export default function Header({
               spressasynth_lib (MIDI)
             </span>
             <span className="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 text-[8.5px] font-mono text-emerald-400 rounded">
-              Chiptune-3 (MOD/XM)
+              spessasynth_core (MOD/XM/S3M)
             </span>
             <span className="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 text-[8.5px] font-mono text-amber-400 rounded">
               webscope (16 Scopes)
@@ -711,7 +711,7 @@ export default function Header({
       <ExportStudioModal
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
-        songPatterns={songPatterns || []}
+        songPatterns={songPatterns && songPatterns.length > 0 ? songPatterns : (patterns ? [patterns] : [])}
         channels={channels}
         bpm={bpm}
         trackTitle={trackTitle}

@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, HelpCircle, FileAudio, RotateCw, CheckCircle2, Download, Disc3, Music, Play, Volume2, Star, Trash2, Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { parseChiptuneFile } from '../utils/chiptuneParsers';
+import {
+  generateFastTrackerXmBuffer,
+  generateMidiFileBuffer,
+  generateProTrackerModBuffer,
+  generateScreamTrackerS3mBuffer
+} from '../utils/chiptuneExporters';
 import { getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import {
   deleteSavedSoundFont,
@@ -178,6 +184,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
               : `${outputBaseName}${outExt}`;
 
           let nextBlobUrl: string | null = null;
+          const allPats = result.allPatterns && result.allPatterns.length > 0 ? result.allPatterns : [result.patterns];
+          const songTitle = result.title || outputBaseName;
+          const songBpm = result.bpm || 125;
+
           if (selectedFormat === '.MID') {
             try {
               const sourceBuf = result.rawMidiBuffer || fileBuffer;
@@ -185,8 +195,27 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
               const midiBytes = midiObj.writeMIDI();
               nextBlobUrl = URL.createObjectURL(new Blob([midiBytes], { type: 'audio/midi' }));
             } catch {
-              nextBlobUrl = null;
+              const fallbackMid = generateMidiFileBuffer(allPats, songBpm, songTitle);
+              nextBlobUrl = URL.createObjectURL(new Blob([fallbackMid], { type: 'audio/midi' }));
             }
+          } else if (selectedFormat === '.MOD') {
+            const modBuf = generateProTrackerModBuffer(allPats, songTitle, songBpm);
+            nextBlobUrl = URL.createObjectURL(new Blob([modBuf], { type: 'audio/x-mod' }));
+          } else if (selectedFormat === '.XM') {
+            const xmBuf = generateFastTrackerXmBuffer(allPats, songTitle, songBpm);
+            nextBlobUrl = URL.createObjectURL(new Blob([xmBuf], { type: 'audio/x-xm' }));
+          } else if (selectedFormat === '.S3M') {
+            const s3mBuf = generateScreamTrackerS3mBuffer(allPats, songTitle, songBpm);
+            nextBlobUrl = URL.createObjectURL(new Blob([s3mBuf], { type: 'audio/x-s3m' }));
+          } else if (selectedFormat === '.JSON') {
+            const jsonStr = JSON.stringify({
+              title: songTitle,
+              bpm: songBpm,
+              channelsCount: result.channelsCount || 8,
+              patternsCount: allPats.length,
+              patterns: allPats
+            }, null, 2);
+            nextBlobUrl = URL.createObjectURL(new Blob([jsonStr], { type: 'application/json' }));
           }
 
           setConvertedDownloadBlobUrl((prevUrl) => {
@@ -490,9 +519,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                   className="bg-black border border-zinc-800 rounded px-2.5 py-1 text-cyan-300 font-bold focus:outline-none cursor-pointer"
                 >
                   <option value=".MID">.MID (Standard MIDI File)</option>
-                  <option value=".G47">.G47 (Aria Hardware Stream)</option>
-                  <option value=".A48">.A48 (Aria Track File)</option>
-                  <option value=".VGM">.VGM (Video Game Music)</option>
+                  <option value=".MOD">.MOD (Amiga ProTracker Module)</option>
+                  <option value=".XM">.XM (FastTracker II Extended Module)</option>
+                  <option value=".S3M">.S3M (ScreamTracker 3 Module)</option>
+                  <option value=".JSON">.JSON (Aria48 Tracker Pattern Matrix)</option>
                 </select>
               </div>
             )}

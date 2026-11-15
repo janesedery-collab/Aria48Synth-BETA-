@@ -100,6 +100,12 @@ export default function ExportStudioModal({
   const [sequenceMeta, setSequenceMeta] = useState<LoadedSequenceMetadata | null>(() => WorkletSynthBridge.getSequenceMetadata());
 
   useEffect(() => {
+    if (currentMode) {
+      setSelectedChiptuneMode(currentMode);
+    }
+  }, [currentMode]);
+
+  useEffect(() => {
     const unsub = VideoRecorder.onStatusChange((status) => {
       setVideoStatus(status);
       if (status.downloadedFilename) {
@@ -127,16 +133,21 @@ export default function ExportStudioModal({
   };
 
   const handleExportChiptune = () => {
-    exportChiptuneFile(
-      selectedChiptuneMode as any,
-      songPatterns,
-      trackTitle || 'Aria48_Chiptune_Track',
-      bpm,
-      channels
-    );
-    setExportError(null);
-    setDownloadSuccess(`Exported ${selectedChiptuneMode.toUpperCase()} chiptune file.`);
-    setTimeout(() => setDownloadSuccess(null), 3000);
+    try {
+      const patternsToExport = songPatterns && songPatterns.length > 0 ? songPatterns : [];
+      const res = exportChiptuneFile(
+        selectedChiptuneMode as any,
+        patternsToExport,
+        trackTitle || 'Aria48_Chiptune_Track',
+        bpm,
+        channels
+      );
+      setExportError(null);
+      setDownloadSuccess(`Exported tracker file: ${res.filename} (${(res.bytes / 1024).toFixed(1)} KB)`);
+      setTimeout(() => setDownloadSuccess(null), 4000);
+    } catch (err: any) {
+      setExportError(err?.message || `Failed to export .${selectedChiptuneMode.toUpperCase()} tracker file.`);
+    }
   };
 
   const handleExportAudioFile = async () => {
@@ -400,27 +411,33 @@ export default function ExportStudioModal({
             )}
           </button>
 
-          {/* Compact Chiptune Module Exporters */}
+          {/* Chiptune & Tracker File Exporters */}
           <div className="border-t border-zinc-850 pt-2.5 flex flex-col gap-2">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-zinc-300">
                 <FileAudio size={13} className="text-cyan-400" />
-                <span>Chiptune Sequencer Modules</span>
+                <span>Chiptune Tracker File Export</span>
+                <span className="text-[8.5px] text-zinc-500 font-normal">
+                  ({Math.max(1, songPatterns?.length || 0)} pattern{(songPatterns?.length || 1) === 1 ? '' : 's'} · {Math.round(bpm)} BPM)
+                </span>
               </div>
               <button
+                id="export-chiptune-tracker-btn"
+                type="button"
                 onClick={handleExportChiptune}
-                className="px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-cyan-300 text-[10px] font-bold uppercase cursor-pointer flex items-center gap-1"
+                className="px-3 py-1.5 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-[10px] font-bold uppercase tracking-wider cursor-pointer flex items-center gap-1.5 shadow-sm transition"
               >
-                <Download size={11} />
-                <span>Export .{selectedChiptuneMode.toUpperCase()}</span>
+                <Download size={12} />
+                <span>Export Chiptune (.{selectedChiptuneMode.toUpperCase()})</span>
               </button>
             </div>
             <div className="grid grid-cols-5 gap-1.5">
               {CHIPTUNE_MODES.map(m => (
                 <button
                   key={m.id}
+                  type="button"
                   onClick={() => handleChiptuneModeSelect(m.id)}
-                  className={`px-1.5 py-1 rounded border text-center transition cursor-pointer ${
+                  className={`px-1.5 py-1.5 rounded border text-center transition cursor-pointer ${
                     selectedChiptuneMode === m.id
                       ? 'bg-cyan-950/60 border-cyan-500/60 text-white'
                       : 'bg-zinc-950 border-zinc-850 text-zinc-400 hover:border-zinc-700'
@@ -428,6 +445,7 @@ export default function ExportStudioModal({
                   title={m.label}
                 >
                   <div className="font-bold text-[10px] uppercase">{m.ext}</div>
+                  <div className="text-[8px] text-zinc-500 truncate font-sans">{m.id === 'mod' ? 'ProTracker' : m.id === 'xm' ? 'FastTracker' : m.id === 's3m' ? 'ScreamTrk' : m.id === 'mid' ? 'Std MIDI' : 'Matrix'}</div>
                 </button>
               ))}
             </div>

@@ -1,13 +1,12 @@
 /**
  * webscope-oscilloscope-master.zip
  * High-performance 16-Channel CRT Vector Oscilloscope Engine
- * Connects directly to spressasynth_lib-master.zip and Chiptune-3.zip
+ * Connects directly to spressasynth_lib-master.zip, WorkletSynthesizer, and direct-audio streams
  * Features zero-crossing trigger stabilization, phosphor decay persistence, and CRT graticules
  */
 
 import { SpessaSynth } from './spressasynthLib';
 import { WorkletSynthBridge } from './workletSynthBridge';
-import { Chiptune3 } from './chiptune3';
 
 export const WEBSCOPE_ENGINE_ID = "webscope-oscilloscope-master.zip";
 
@@ -81,7 +80,44 @@ class WebScopeEngine {
   private timeDomainBuffer = new Float32Array(1024);
   private workletScratchBuffer = new Float32Array(1024);
   private spessaScratchBuffer = new Float32Array(1024);
-  private chipScratchBuffer = new Float32Array(1024);
+  private directAudioScratchBuffer = new Float32Array(1024);
+  private directAudioAnalysers: AnalyserNode[] = [];
+  private directAudioPlaying = false;
+
+  public initDirectAudioMatrix(ctx: AudioContext) {
+    if (this.directAudioAnalysers.length === 16) return;
+    this.directAudioAnalysers = [];
+    for (let i = 0; i < 16; i++) {
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.8;
+      this.directAudioAnalysers.push(analyser);
+    }
+  }
+
+  public getDirectAudioAnalyser(channelIndex: number): AnalyserNode | null {
+    if (channelIndex >= 0 && channelIndex < this.directAudioAnalysers.length) {
+      return this.directAudioAnalysers[channelIndex];
+    }
+    return null;
+  }
+
+  public connectDirectAudioNode(ctx: AudioContext, sourceNode: AudioNode) {
+    this.initDirectAudioMatrix(ctx);
+    for (let i = 0; i < this.directAudioAnalysers.length; i++) {
+      try {
+        sourceNode.connect(this.directAudioAnalysers[i]);
+      } catch {}
+    }
+  }
+
+  public setDirectAudioPlaying(playing: boolean) {
+    this.directAudioPlaying = playing;
+  }
+
+  public isDirectAudioPlaying(): boolean {
+    return this.directAudioPlaying;
+  }
 
   /**
    * Find zero-crossing trigger index to lock waveform and prevent horizontal jitter
@@ -128,7 +164,7 @@ class WebScopeEngine {
 
   /**
    * Render single CRT oscilloscope frame onto HTML5 Canvas
-   * Retrieves live audio data from SpessaSynth or Chiptune-3
+   * Retrieves live audio data from WorkletSynthesizer, SpessaSynth, or direct audio stream
    */
   public renderChannel(
     canvas: HTMLCanvasElement,
@@ -151,7 +187,7 @@ class WebScopeEngine {
     const strokeWidth = opts.strokeWidth ?? 1.8;
     const amplifier = Math.max(0.2, Math.min(12.0, opts.amplifier ?? 1.0));
 
-    // 1. Resolve AnalyserNode from Chiptune-3 (Tracker), WorkletSynthesizer, or SpessaSynth
+    // 1. Resolve AnalyserNode from WorkletSynthesizer, SpessaSynth, or Direct Audio Matrix
     let hasSignal = false;
     let peakLevel = 0;
     let sumSquares = 0;
@@ -175,14 +211,14 @@ class WebScopeEngine {
     if (isPlaying) {
       const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
       const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
-      const chipRes = readAnalyser(Chiptune3.getChannelAnalyser(channelIndex), this.chipScratchBuffer);
+      const directRes = readAnalyser(this.getDirectAudioAnalyser(channelIndex), this.directAudioScratchBuffer);
 
       let best = workletRes;
       if (spessaRes && (!best || spessaRes.peak > best.peak)) {
         best = spessaRes;
       }
-      if (chipRes && (!best || Chiptune3.isChiptunePlaying() || chipRes.peak > best.peak)) {
-        best = chipRes;
+      if (directRes && (!best || this.directAudioPlaying || directRes.peak > best.peak)) {
+        best = directRes;
       }
 
       if (best) {

@@ -5,8 +5,8 @@ import {
 } from 'lucide-react';
 import { Channel, OscilloscopeConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID, MidiChannelState } from '../engines/spressasynthLib';
+import { SPRESSASYNTH_CORE_ENGINE_ID } from '../engines/spressasynthCore';
 import { WorkletSynthBridge, WorkletChannelMixerState } from '../engines/workletSynthBridge';
-import { Chiptune3, CHIPTUNE3_ENGINE_ID } from '../engines/chiptune3';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS, WebScopePreset } from '../engines/webscopeOscilloscope';
 import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
@@ -424,12 +424,12 @@ export default function MixerEQ({
             </span>
           </div>
 
-          {/* Chiptune-3 Engine Pill */}
+          {/* spressasynth_core Engine Pill */}
           <div className="flex items-center gap-1.5 px-2.5 py-1 bg-cyan-950/40 border border-cyan-600/40 text-cyan-300 rounded-lg text-[10px] font-bold">
             <Cpu size={12} className="text-cyan-400" />
-            <span>CHIPTUNE: {CHIPTUNE3_ENGINE_ID}</span>
+            <span>CORE: {SPRESSASYNTH_CORE_ENGINE_ID}</span>
             <span className="text-[8.5px] px-1 py-0.2 bg-cyan-900/60 text-cyan-200 rounded font-sans">
-              16 CH MATRIX
+              MOD/XM/S3M • SF2/3
             </span>
           </div>
 
