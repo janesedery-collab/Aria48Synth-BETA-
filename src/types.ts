@@ -10,6 +10,7 @@ export interface Channel {
   mute: boolean;
   solo: boolean;
   soundFontPreset?: string; // Optional SoundFont / GM instrument ID
+  label?: string;           // Optional chip/voice/stereo role label (e.g. SID1 V1 · L)
 }
 
 export interface SoundFontInstrument {
@@ -51,6 +52,7 @@ export interface SoundEnginesConfig {
   tinySynth: boolean;       // WebAudio TinySynth (GM FM Synthesis)
   syntheticOsc: boolean;    // Hardware Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3)
   spessaSynthCore: boolean; // spressasynth_core (SoundFont Core, PCM Voice Resolver & MOD/XM/S3M)
+  tinyRSid: boolean;        // TinyRSid / WebSID (WASM C64 MOS6581/MOS8580 multi-SID emulator)
 }
 
 export type SoundFontInterpolationMode =
@@ -88,6 +90,7 @@ export const CHIPS = [
   'YM2612 (Sega FM)',
   'YMF262 (OPL3 FM)',
   'MOS6581 (C64 SID)',
+  'MOS8580 (C64 SID)',
   'PAULA (Amiga PCM)',
   'RP2A03 (NES APU)',
   'DMG-01 (Game Boy)',

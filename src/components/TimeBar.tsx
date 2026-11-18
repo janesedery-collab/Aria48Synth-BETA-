@@ -49,9 +49,8 @@ export default function TimeBar({
   const rowsPerPattern = 64;
   const totalRows = totalPatterns * rowsPerPattern;
   const currentRowGlobal = Math.max(0, Math.min(totalRows - 1, currentPatternIndex * rowsPerPattern + Math.min(63, activeRow)));
-  const progressRatio = totalRows > 1 ? currentRowGlobal / (totalRows - 1) : 0;
 
-  // Calculate timestamps in seconds (favoring actual audio/MIDI duration scaled by live BPM)
+  // Calculate timestamps in seconds (favoring actual audio/MIDI/SID duration scaled by live BPM)
   const secondsPerRow = 60 / Math.max(30, bpm) / 4;
   const totalSeconds =
     actualTotalSeconds && actualTotalSeconds > 0
@@ -59,10 +58,13 @@ export default function TimeBar({
       : loadedAudioBuffer
         ? loadedAudioBuffer.duration
         : totalRows * secondsPerRow;
-  const elapsedSeconds =
-    actualElapsedSeconds !== undefined && actualElapsedSeconds !== null
-      ? Math.max(0, Math.min(totalSeconds, actualElapsedSeconds))
-      : progressRatio * totalSeconds;
+  const hasRealElapsed = actualElapsedSeconds !== undefined && actualElapsedSeconds !== null;
+  const elapsedSeconds = hasRealElapsed
+    ? Math.max(0, Math.min(totalSeconds, actualElapsedSeconds))
+    : (totalRows > 1 ? currentRowGlobal / (totalRows - 1) : 0) * totalSeconds;
+  const progressRatio = hasRealElapsed && totalSeconds > 0
+    ? Math.max(0, Math.min(1, elapsedSeconds / totalSeconds))
+    : (totalRows > 1 ? currentRowGlobal / (totalRows - 1) : 0);
 
   const formatTime = (secs: number) => {
     const safe = Math.max(0, Number.isFinite(secs) ? secs : 0);

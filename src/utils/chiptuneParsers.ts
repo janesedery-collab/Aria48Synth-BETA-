@@ -2,6 +2,13 @@ import { INITIAL_PATTERNS } from '../initialPatterns';
 import { getAudioContext, loadSoundFontIntoCoreAndLib } from '../components/AudioEngine';
 import { isSoundFontFileName } from '../engines/spressasynthCore';
 import { LoadedSequenceMetadata, WorkletSynthBridge } from '../engines/workletSynthBridge';
+import {
+  SidHeaderMetadata,
+  formatHexAddr,
+  formatTimeMsPrecise,
+  lookupHvscForSid,
+  parseSidHeader
+} from './hvscManager';
 
 // Exact ProTracker Period Table (Octaves 2 through 6)
 const AMIGA_PERIOD_TABLE: { p: number; n: string }[] = [
@@ -59,6 +66,8 @@ export interface ChiptuneImportResult {
   channelsCount?: number;
   audioBuffer?: AudioBuffer;
   rawMidiBuffer?: ArrayBuffer;
+  rawSidBuffer?: ArrayBuffer;
+  sidMetadata?: SidHeaderMetadata;
   channelSoundFonts?: { [channelId: number]: string };
   sequenceMetadata?: LoadedSequenceMetadata;
 }
@@ -165,8 +174,8 @@ export function parseChiptuneFile(
     result = parseBasicMidiSequence(fileName, arrayBuffer, logs);
   } else if (extension === '.it') {
     result = parseIT(arrayBuffer, logs);
-  } else if (extension === '.sid') {
-    result = parseSID(arrayBuffer, logs);
+  } else if (extension === '.sid' || extension === '.mus' || extension === '.str') {
+    result = parseSID(arrayBuffer, logs, fileName);
   } else if (extension === '.nsf' || extension === '.nsfe') {
     result = parseNSF(arrayBuffer, logs);
   } else if (extension === '.ftm') {
@@ -530,38 +539,36 @@ function parseIT(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult
 }
 
 /**
- * 6. COMMODORE 64 SID (.sid) PARSER
+ * 6. COMMODORE 64 SID (.sid) PARSER — PSID/RSID v1-v4 + HVSC Songlengths/STIL
  */
-function parseSID(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
-  const u8 = new Uint8Array(arrayBuffer);
-  
-  let title = "SID Retro Melody";
-  let author = "Rob Hubbard";
-  let speedBpm = 125;
-  
-  if (u8.length >= 0x7C) {
-    let t = "";
-    for (let i = 0x16; i < 0x16 + 32; i++) {
-      if (u8[i] === 0) break;
-      t += String.fromCharCode(u8[i]);
-    }
-    if (t.trim()) title = t.trim();
-    
-    let a = "";
-    for (let i = 0x36; i < 0x36 + 32; i++) {
-      if (u8[i] === 0) break;
-      a += String.fromCharCode(u8[i]);
-    }
-    if (a.trim()) author = a.trim();
-    
-    const flagsByte = u8[0x71];
-    const isNTSC = (flagsByte & 0x0C) === 0x08;
-    speedBpm = isNTSC ? 144 : 125;
+function parseSID(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'tune.sid'): ChiptuneImportResult {
+  const sidMeta = parseSidHeader(arrayBuffer, fileName);
+  const hvsc = lookupHvscForSid(sidMeta, sidMeta.startSong);
+
+  const speedBpm = sidMeta.isNtscDefault ? 144 : 125;
+  const chipLabel = sidMeta.defaultIs6581 ? 'MOS6581 (C64 SID)' : 'MOS8580 (C64 SID)';
+  const channelsCount = sidMeta.chipCount * 3; // 3 (1SID), 6 (2SID), or 9 (3SID)
+  const durationSec = hvsc.activeSubtuneDurationSec ?? 135;
+  const durationStr = formatDuration(durationSec);
+
+  logs.push(
+    `[C64 SID] ${sidMeta.magic} v${sidMeta.version} · "${sidMeta.title}" | Author: ${sidMeta.author} (${sidMeta.released})`
+  );
+  logs.push(
+    `[C64 HW] ${sidMeta.chipCountLabel} · ${sidMeta.chipModel} · ${sidMeta.clock} · LOAD ${formatHexAddr(sidMeta.loadAddress)} INIT ${formatHexAddr(sidMeta.initAddress)} PLAY ${formatHexAddr(sidMeta.playAddress)}`
+  );
+  if (sidMeta.secondSIDAddress) {
+    logs.push(
+      `[C64 MULTI-SID] 2nd SID @ ${formatHexAddr(sidMeta.secondSIDAddress)} (${sidMeta.sid2Model})${
+        sidMeta.thirdSIDAddress ? ` · 3rd SID @ ${formatHexAddr(sidMeta.thirdSIDAddress)} (${sidMeta.sid3Model})` : ''
+      }`
+    );
   }
+  logs.push(
+    `[HVSC MD5] ${sidMeta.md5}${hvsc.songlength ? ` · Subtune ${sidMeta.startSong}/${sidMeta.songs} Length: ${formatTimeMsPrecise(durationSec)}` : ` · Default duration ${durationStr} (Subtune ${sidMeta.startSong}/${sidMeta.songs})`}`
+  );
 
-  logs.push(`[C64 SID] Title: "${title}" | Composer: ${author}`);
-
-  // Create 4 structured chronological SID patterns (Intro, Theme A, Theme B, Resolution)
+  // Create structured SID pattern visualization grid proportional to duration & active SID voices
   const progressions = [
     { base: "C-2", arp: ["C-4", "E-4", "G-4", "C-5"] },
     { base: "G-2", arp: ["G-4", "B-4", "D-5", "G-5"] },
@@ -569,22 +576,34 @@ function parseSID(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
     { base: "F-2", arp: ["F-4", "A-4", "C-5", "F-5"] }
   ];
 
+  const patternCount = Math.max(4, Math.min(32, Math.round(durationSec / 12)));
   const allPats: any[][] = [];
-  for (let p = 0; p < 4; p++) {
-    const pat = createEmptyPattern(8);
-    const prog = progressions[p];
+  for (let p = 0; p < patternCount; p++) {
+    const pat = createEmptyPattern(Math.max(9, channelsCount));
+    const prog = progressions[p % progressions.length];
 
     for (let r = 0; r < 64; r++) {
-      // Voice 1: Bass
+      // SID #1 (CH 01-03)
       if (r % 4 === 0) pat[r][1] = { note: prog.base, inst: "01", vol: "85", delay: "000" };
-      // Voice 2: SID 16th Arpeggiator
       if (r % 2 === 0) {
         const arpNote = prog.arp[(r / 2) % prog.arp.length];
         pat[r][2] = { note: arpNote, inst: "02", vol: "70", delay: "000" };
       }
-      // Voice 3: Drums
       if (r % 8 === 0) pat[r][3] = { note: "C-1", inst: "04", vol: "90", delay: "000" };
       else if (r % 8 === 4) pat[r][3] = { note: "G-4", inst: "03", vol: "75", delay: "000" };
+
+      // SID #2 (CH 04-06) if 2SID or 3SID
+      if (channelsCount >= 6) {
+        if (r % 8 === 2) pat[r][4] = { note: prog.arp[1], inst: "05", vol: "65", delay: "000" };
+        if (r % 4 === 2) pat[r][5] = { note: prog.arp[2], inst: "06", vol: "60", delay: "000" };
+        if (r % 16 === 0) pat[r][6] = { note: prog.base, inst: "07", vol: "75", delay: "000" };
+      }
+      // SID #3 (CH 07-09) if 3SID
+      if (channelsCount >= 9) {
+        if (r % 4 === 1) pat[r][7] = { note: prog.arp[3], inst: "08", vol: "60", delay: "000" };
+        if (r % 8 === 6) pat[r][8] = { note: prog.arp[0], inst: "09", vol: "58", delay: "000" };
+        if (r % 16 === 8) pat[r][9] = { note: prog.base, inst: "0A", vol: "68", delay: "000" };
+      }
     }
     allPats.push(pat);
   }
@@ -593,13 +612,16 @@ function parseSID(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
     patterns: allPats[0],
     allPatterns: allPats,
     bpm: speedBpm,
-    chipType: "MOS6581 (C64 SID)",
-    title,
-    duration: "2:15",
-    channelsCount: 3,
+    chipType: `${chipLabel} · ${sidMeta.chipCountLabel}`,
+    title: sidMeta.title,
+    fileName: sidMeta.fileName,
+    duration: durationStr,
+    channelsCount,
+    rawSidBuffer: arrayBuffer.slice(0),
+    sidMetadata: sidMeta,
     log: [
-      ...logs, 
-      `[SUCCESS] Commodore 64 MOS6581 SID tri-voice sequence parsed into 4 full patterns!`
+      ...logs,
+      `[SUCCESS] TinyRSid WebSID (${sidMeta.chipCountLabel}, ${channelsCount} voices) ready for real C64 playback!`
     ]
   };
 }

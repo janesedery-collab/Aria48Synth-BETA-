@@ -12,12 +12,14 @@ import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import {
+  TinyRsidBridge,
   deleteSavedSoundFont,
   getDefaultSoundFontId,
   loadSoundFontIntoCoreAndLib,
   onDefaultSoundFontChange,
   setDefaultSoundFontId,
-  setMidiChannelMuted
+  setMidiChannelMuted,
+  syncChannelMuteSolo
 } from './AudioEngine';
 import { getSavedSoundFontsFromCookies, saveAmplifier, SavedSoundFontCookieEntry } from '../utils/cookieStorage';
 
@@ -277,6 +279,7 @@ export default function MixerEQ({
   const [workletChannelStates, setWorkletChannelStates] = useState<WorkletChannelMixerState[]>(() =>
     WorkletSynthBridge.getChannelStates(16)
   );
+  const [sidState, setSidState] = useState(() => TinyRsidBridge.getState());
 
   const sfUploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -295,11 +298,15 @@ export default function MixerEQ({
     const unsubWorklet = WorkletSynthBridge.subscribe(() => {
       setWorkletChannelStates(WorkletSynthBridge.getChannelStates(16));
     });
+    const unsubSid = TinyRsidBridge.subscribe((nextSid) => {
+      setSidState(nextSid);
+    });
     return () => {
       unsubSf();
       unsubDefault();
       unsubCh();
       unsubWorklet();
+      unsubSid();
     };
   }, []);
 
@@ -322,15 +329,23 @@ export default function MixerEQ({
   };
 
   const handleToggleOscilloscopeChannelMute = (channelIndex: number) => {
+    const trackerCh = channels.find(c => c.id === channelIndex + 1);
     const currentlyMuted = Boolean(
+      (sidState.hasSidLoaded && channelIndex < 9 ? sidState.voiceMutes[channelIndex] : false) ||
       midiChannelStates[channelIndex]?.isMuted ||
-      channels.find(c => c.id === channelIndex + 1)?.mute
+      trackerCh?.mute
     );
     const nextMuted = !currentlyMuted;
     setMidiChannelMuted(channelIndex, nextMuted);
     if (setChannels) {
-      setChannels(prev =>
-        prev.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c))
+      setChannels(prev => {
+        const next = prev.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c));
+        syncChannelMuteSolo(next);
+        return next;
+      });
+    } else {
+      TinyRsidBridge.syncChannelStates(
+        channels.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c))
       );
     }
     setMidiChannelStates([...SpessaSynth.getChannelStates()]);
@@ -341,17 +356,23 @@ export default function MixerEQ({
       setMidiChannelMuted(i, false);
     }
     if (setChannels) {
-      setChannels(prev =>
-        prev.map(c => (c.id >= 1 && c.id <= 16 ? { ...c, mute: false } : c))
-      );
+      setChannels(prev => {
+        const next = prev.map(c => (c.id >= 1 && c.id <= 16 ? { ...c, mute: false, solo: false } : c));
+        syncChannelMuteSolo(next);
+        return next;
+      });
     }
     setMidiChannelStates([...SpessaSynth.getChannelStates()]);
   };
 
+  const anyChannelSolo = channels.some(c => c.enabled && c.solo);
   const mutedChannelsCount = SIXTEEN_CHANNEL_ROLES.reduce((count, role, idx) => {
+    const trCh = channels.find(c => c.id === role.id);
     const isMuted = Boolean(
+      (sidState.hasSidLoaded && idx < 9 ? sidState.voiceMutes[idx] : false) ||
       midiChannelStates[idx]?.isMuted ||
-      channels.find(c => c.id === role.id)?.mute
+      trCh?.mute ||
+      (anyChannelSolo && trCh?.enabled && !trCh.solo)
     );
     return count + (isMuted ? 1 : 0);
   }, 0);
@@ -828,19 +849,31 @@ export default function MixerEQ({
             const midiState = midiChannelStates[idx];
             const workletState = workletChannelStates[idx];
             const trackerCh = channels.find(c => c.id === role.id);
-            const isMuted = Boolean(workletState?.isMuted || midiState?.isMuted || trackerCh?.mute);
-            const syncedName =
-              workletState?.patchName ||
-              midiState?.programName ||
-              (trackerCh?.soundFontPreset
-                ? trackerCh.soundFontPreset.replace(/^gm_/, '').replace(/_/g, ' ').toUpperCase()
-                : undefined) ||
-              role.name;
+            const isSidVoice = sidState.hasSidLoaded && idx < sidState.activeChipsCount * 3;
+            const isMuted = isSidVoice
+              ? Boolean(sidState.voiceMutes[idx] || trackerCh?.mute || (anyChannelSolo && !trackerCh?.solo))
+              : Boolean(workletState?.isMuted || midiState?.isMuted || trackerCh?.mute || (anyChannelSolo && trackerCh?.enabled && !trackerCh?.solo));
+            const sidChipModelLabel = sidState.activeChipModel.replace('MOS ', '');
+            const syncedName = isSidVoice
+              ? (trackerCh?.label || `SID${Math.floor(idx / 3) + 1} Voice ${(idx % 3) + 1} · ${sidChipModelLabel}`)
+              : workletState?.patchName ||
+                midiState?.programName ||
+                (trackerCh?.soundFontPreset
+                  ? trackerCh.soundFontPreset.replace(/^gm_/, '').replace(/_/g, ' ').toUpperCase()
+                  : undefined) ||
+                role.name;
+            const roleForCard = isSidVoice
+              ? {
+                  ...role,
+                  category: sidChipModelLabel,
+                  defaultFreq: `SID${Math.floor(idx / 3) + 1} V${(idx % 3) + 1}`
+                }
+              : role;
             return (
               <WebScopeCRT
                 key={role.id}
                 channelIndex={idx}
-                role={role}
+                role={roleForCard}
                 isPlaying={isPlaying}
                 oscConfig={oscConfig}
                 pitch={channelPitches[role.id]}

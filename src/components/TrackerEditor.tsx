@@ -12,8 +12,13 @@ import {
   getDefaultSoundFontId,
   setDefaultSoundFontId,
   onDefaultSoundFontChange,
-  deleteSavedSoundFont
+  deleteSavedSoundFont,
+  TinyRsidBridge,
+  syncChannelMuteSolo,
+  getAudioContext
 } from './AudioEngine';
+import { SidChipOverride, SidClockOverride } from '../engines/tinyRsidBridge';
+import { SidHeaderMetadata, formatTimeMsPrecise } from '../utils/hvscManager';
 import { SpessaSynth, SpessaSoundFont } from '../engines/spressasynthLib';
 import {
   INTERPOLATION_MODES,
@@ -50,6 +55,7 @@ interface TrackerEditorProps {
   trackTitle?: string | null;
   onSwitchChiptuneMode?: (mode: string) => void;
   currentChiptuneMode?: string;
+  onSelectSidSubtune?: (subtune1Based: number) => void;
   onImportTrack?: (
     duration?: string, 
     title?: string, 
@@ -61,7 +67,9 @@ interface TrackerEditorProps {
     audioBuffer?: AudioBuffer, 
     channelSoundFonts?: { [channelId: number]: string },
     rawMidiBuffer?: ArrayBuffer,
-    fileName?: string
+    fileName?: string,
+    rawSidBuffer?: ArrayBuffer,
+    sidMetadata?: SidHeaderMetadata
   ) => void;
 }
 
@@ -88,6 +96,7 @@ export default function TrackerEditor({
   trackTitle,
   onSwitchChiptuneMode,
   currentChiptuneMode = 'mod',
+  onSelectSidSubtune,
   onImportTrack 
 }: TrackerEditorProps) {
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number; field: 'note' | 'inst' | 'vol' } | null>(null);
@@ -102,6 +111,7 @@ export default function TrackerEditor({
   const fileInputRef2 = useRef<HTMLInputElement>(null);
 
   const [enginesConfig, setEnginesConfig] = useState<SoundEnginesConfig>(getSoundEnginesConfig());
+  const [sidState, setSidState] = useState(() => TinyRsidBridge.getState());
   const [interpolationMode, setInterpolationModeState] = useState<SoundFontInterpolationMode>(getInterpolationMode());
   const [loadedSoundFonts, setLoadedSoundFonts] = useState<SpessaSoundFont[]>(() => SpessaSynth.getLoadedSoundFonts());
   const [activeSoundFontId, setActiveSoundFontId] = useState<string>(() => SpessaSynth.getActiveSoundFont()?.id || 'spessa-default-gm');
@@ -132,11 +142,15 @@ export default function TrackerEditor({
     const unsubDefSf = onDefaultSoundFontChange((id) => {
       setDefaultSoundFontState(id);
     });
+    const unsubSid = TinyRsidBridge.subscribe((nextSid) => {
+      setSidState(nextSid);
+    });
     return () => {
       unsubSf();
       unsubEngines();
       unsubInterp();
       unsubDefSf();
+      unsubSid();
     };
   }, []);
 
@@ -151,7 +165,8 @@ export default function TrackerEditor({
       spessaSynth: true,
       tinySynth: true,
       syntheticOsc: true,
-      spessaSynthCore: true
+      spessaSynthCore: true,
+      tinyRSid: true
     });
   };
 
@@ -159,8 +174,27 @@ export default function TrackerEditor({
     enginesConfig.spessaSynth,
     enginesConfig.tinySynth,
     enginesConfig.syntheticOsc,
-    enginesConfig.spessaSynthCore
+    enginesConfig.spessaSynthCore,
+    enginesConfig.tinyRSid
   ].filter(Boolean).length;
+
+  const handleTogglePatternChannelMute = (chId: number) => {
+    if (!setChannels) return;
+    setChannels(prev => {
+      const next = prev.map(c => (c.id === chId ? { ...c, mute: !c.mute } : c));
+      syncChannelMuteSolo(next);
+      return next;
+    });
+  };
+
+  const handleTogglePatternChannelSolo = (chId: number) => {
+    if (!setChannels) return;
+    setChannels(prev => {
+      const next = prev.map(c => (c.id === chId ? { ...c, solo: !c.solo } : c));
+      syncChannelMuteSolo(next);
+      return next;
+    });
+  };
 
   const totalPatterns = songPatterns?.length || 1;
   const currentPatternRows = (songPatterns && songPatterns[currentPatternIndex]) ? songPatterns[currentPatternIndex] : patterns;
@@ -271,7 +305,9 @@ export default function TrackerEditor({
               result.audioBuffer,
               result.channelSoundFonts,
               result.rawMidiBuffer,
-              result.fileName || selected.name
+              result.fileName || selected.name,
+              result.rawSidBuffer,
+              result.sidMetadata
             );
           }
           addRecentSong({
@@ -806,6 +842,126 @@ export default function TrackerEditor({
             <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.spessaSynthCore ? 'bg-fuchsia-400 shadow-[0_0_6px_rgba(232,121,249,0.8)]' : 'bg-zinc-600'}`} />
             <span>spressasynth_core</span>
           </button>
+
+          {/* TinyRSid (WebSID Commodore 64 Multi-SID Emulator) */}
+          <button
+            id="engine-toggle-tinyrsid"
+            onClick={() => handleToggleEngine('tinyRSid')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.tinyRSid
+                ? 'bg-sky-950/75 border-sky-500/70 text-sky-300 shadow-[0_0_8px_rgba(56,189,248,0.28)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={enginesConfig.tinyRSid ? 'TinyRSid (WebSID WASM Commodore 64 1SID/2SID/3SID Emulator): ACTIVE. Click to mute.' : 'TinyRSid (SID): MUTED. Click to enable.'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.tinyRSid ? 'bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.9)]' : 'bg-zinc-600'}`} />
+            <span>TinyRSid (SID)</span>
+          </button>
+
+          {/* INLINE TINYRSSID CONTROLS WHENEVER A .SID FILE IS LOADED OR TINYRSSID IS ACTIVE */}
+          {(sidState.hasSidLoaded || enginesConfig.tinyRSid) && (
+            <div className="flex flex-wrap items-center gap-1.5 pl-1 border-l border-zinc-800">
+              {/* Dual Chip Emulation Toggle (AUTO | MOS 6581 | MOS 8580) */}
+              <div
+                id="sid-chip-model-pills"
+                className="flex items-center bg-zinc-900 border border-zinc-800 rounded p-0.5 text-[9px] font-bold"
+                title={sidState.metadata ? `Header SID Model: ${sidState.metadata.chipModel}` : 'Live SID chip filter emulation'}
+              >
+                {([
+                  { id: 'auto', label: 'AUTO' },
+                  { id: '6581', label: 'MOS 6581' },
+                  { id: '8580', label: 'MOS 8580' }
+                ] as { id: SidChipOverride; label: string }[]).map((opt) => {
+                  const active = sidState.chipModelOverride === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      id={`sid-chip-pill-${opt.id}`}
+                      type="button"
+                      onClick={() => TinyRsidBridge.setChipModelOverride(opt.id)}
+                      className={`px-1.5 py-0.5 rounded transition cursor-pointer ${
+                        active
+                          ? 'bg-sky-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {opt.id === 'auto' && sidState.hasSidLoaded
+                        ? `AUTO (${sidState.activeChipModel.replace('MOS ', '')})`
+                        : opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Clock Speed & Region Toggle (AUTO | PAL 50Hz | NTSC 60Hz) */}
+              <div
+                id="sid-clock-pills"
+                className="flex items-center bg-zinc-900 border border-zinc-800 rounded p-0.5 text-[9px] font-bold"
+                title={sidState.metadata ? `Header Clock: ${sidState.metadata.clock}` : 'PAL 50Hz / NTSC 60Hz speed override'}
+              >
+                {([
+                  { id: 'auto', label: 'AUTO' },
+                  { id: 'pal', label: 'PAL 50Hz' },
+                  { id: 'ntsc', label: 'NTSC 60Hz' }
+                ] as { id: SidClockOverride; label: string }[]).map((opt) => {
+                  const active = sidState.clockOverride === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      id={`sid-clock-pill-${opt.id}`}
+                      type="button"
+                      onClick={() => {
+                        TinyRsidBridge.setClockOverride(opt.id);
+                        if (sidState.hasSidLoaded && setBpm) {
+                          const nextState = TinyRsidBridge.getState();
+                          setBpm(nextState.activeClock === 'NTSC 60Hz' ? 144 : 125);
+                        }
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition cursor-pointer ${
+                        active
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {opt.id === 'auto' && sidState.hasSidLoaded
+                        ? `AUTO (${sidState.activeClock === 'NTSC 60Hz' ? 'NTSC' : 'PAL'})`
+                        : opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Subtune Selector Dropdown (Subtune 1 / N) */}
+              {sidState.hasSidLoaded && (
+                <select
+                  id="sid-subtune-select"
+                  value={sidState.currentSubtune}
+                  onChange={(e) => {
+                    const sub = parseInt(e.target.value, 10) || 1;
+                    if (onSelectSidSubtune) {
+                      onSelectSidSubtune(sub);
+                    } else {
+                      const ctx = getAudioContext();
+                      void TinyRsidBridge.setSubtune(sub, ctx || undefined);
+                    }
+                  }}
+                  className="bg-black border border-sky-700/60 rounded px-2 py-0.5 text-[9.5px] font-bold text-sky-300 focus:outline-none cursor-pointer"
+                  title="Select subtune in multi-song .SID file"
+                >
+                  {Array.from({ length: Math.max(1, sidState.totalSubtunes) }, (_, idx) => {
+                    const subNum = idx + 1;
+                    const sec = sidState.hvsc?.subtuneDurationsSec?.[idx];
+                    const lenLabel = sec ? ` · ${formatTimeMsPrecise(sec)}` : '';
+                    return (
+                      <option key={subNum} value={subNum} className="bg-zinc-950 text-zinc-200">
+                        Subtune {subNum} / {sidState.totalSubtunes}{lenLabel}
+                      </option>
+                    );
+                  })}
+                </select>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 text-[9.5px]">
@@ -818,7 +974,7 @@ export default function TrackerEditor({
           </button>
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-500 font-sans">
-            <strong className="text-zinc-300">{activeEnginesCount}</strong>/4 Active
+            <strong className="text-zinc-300">{activeEnginesCount}</strong>/5 Active
           </span>
         </div>
       </div>
@@ -1041,27 +1197,71 @@ export default function TrackerEditor({
             <div className="w-12 flex-shrink-0 bg-zinc-950 border-r border-zinc-800 flex items-center justify-center font-bold text-[9px] text-zinc-500">
               ROW
             </div>
-            {visibleChannels.map(ch => (
-              <div 
-                key={ch.id} 
-                className="w-44 flex-shrink-0 border-r border-zinc-800 p-2 text-center bg-zinc-900/95"
-              >
-                <div className="text-[10px] text-zinc-200 font-bold flex items-center justify-center gap-1">
-                  <Music2 size={10} className="text-cyan-400" />
-                  <span>CH {ch.id.toString().padStart(2, '0')}</span>
-                  {ch.soundFontPreset && (
-                    <span className="text-[8px] px-1 py-0.2 bg-emerald-950/60 border border-emerald-800/40 text-emerald-400 rounded">
-                      SF
-                    </span>
-                  )}
+            {visibleChannels.map(ch => {
+              const anySolo = channels.some(c => c.enabled && c.solo);
+              const isMutedEff = ch.mute || (anySolo && !ch.solo);
+              return (
+                <div 
+                  key={ch.id} 
+                  className={`w-44 flex-shrink-0 border-r border-zinc-800 p-1.5 text-center transition-colors ${
+                    ch.solo
+                      ? 'bg-amber-950/35'
+                      : isMutedEff
+                        ? 'bg-red-950/20 opacity-65'
+                        : 'bg-zinc-900/95'
+                  }`}
+                >
+                  <div className="text-[10px] text-zinc-200 font-bold flex items-center justify-between gap-1 px-1">
+                    <div className="flex items-center gap-1 min-w-0">
+                      <Music2 size={10} className="text-cyan-400 shrink-0" />
+                      <span>CH {ch.id.toString().padStart(2, '0')}</span>
+                      {ch.soundFontPreset && (
+                        <span className="text-[8px] px-1 py-0.2 bg-emerald-950/60 border border-emerald-800/40 text-emerald-400 rounded">
+                          SF
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Compact [M] Mute and [S] Solo buttons wired to WebSID & Synth engines */}
+                    <div className="flex items-center gap-0.5 shrink-0">
+                      <button
+                        id={`tracker-header-mute-${ch.id}`}
+                        type="button"
+                        onClick={() => handleTogglePatternChannelMute(ch.id)}
+                        className={`px-1 py-0.2 rounded text-[8.5px] font-black border transition cursor-pointer leading-tight ${
+                          ch.mute
+                            ? 'bg-red-600 text-white border-red-400'
+                            : 'bg-zinc-950 text-zinc-500 border-zinc-800 hover:text-red-300 hover:border-red-700/60'
+                        }`}
+                        title={`Mute CH ${ch.id.toString().padStart(2, '0')}`}
+                      >
+                        M
+                      </button>
+                      <button
+                        id={`tracker-header-solo-${ch.id}`}
+                        type="button"
+                        onClick={() => handleTogglePatternChannelSolo(ch.id)}
+                        className={`px-1 py-0.2 rounded text-[8.5px] font-black border transition cursor-pointer leading-tight ${
+                          ch.solo
+                            ? 'bg-amber-500 text-black border-amber-300'
+                            : 'bg-zinc-950 text-zinc-500 border-zinc-800 hover:text-amber-300 hover:border-amber-600/60'
+                        }`}
+                        title={`Solo CH ${ch.id.toString().padStart(2, '0')}`}
+                      >
+                        S
+                      </button>
+                    </div>
+                  </div>
+                  <div className="text-[8.5px] text-cyan-400 truncate uppercase mt-0.5 tracking-wider font-semibold px-1" title={ch.label || ch.chip}>
+                    {ch.label
+                      ? ch.label
+                      : ch.soundFontPreset
+                        ? (soundFontInstruments.find(i => i.id === ch.soundFontPreset)?.name.replace(/^\d+:\s*/, '') || ch.chip)
+                        : ch.chip}
+                  </div>
                 </div>
-                <div className="text-[8.5px] text-cyan-400 truncate uppercase mt-0.5 tracking-wider font-semibold" title={ch.chip}>
-                  {ch.soundFontPreset
-                    ? (soundFontInstruments.find(i => i.id === ch.soundFontPreset)?.name.replace(/^\d+:\s*/, '') || ch.chip)
-                    : ch.chip}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* ROWS MATRIX */}

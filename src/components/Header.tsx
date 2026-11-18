@@ -13,6 +13,7 @@ import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import { loadSoundFontIntoCoreAndLib, SOUNDFONT_ACCEPT_ATTR } from './AudioEngine';
 import { onAuthUserChanged, User } from '../utils/cloudSongsService';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
+import { SidHeaderMetadata } from '../utils/hvscManager';
 
 interface HeaderProps {
   isPlaying: boolean;
@@ -38,7 +39,9 @@ interface HeaderProps {
     audioBuffer?: AudioBuffer,
     channelSoundFonts?: { [channelId: number]: string },
     rawMidiBuffer?: ArrayBuffer,
-    fileName?: string
+    fileName?: string,
+    rawSidBuffer?: ArrayBuffer,
+    sidMetadata?: SidHeaderMetadata
   ) => void;
   onLoadTrack?: (tracksJson: string, bpm: number) => void;
   trackTitle?: string | null;
@@ -429,7 +432,9 @@ export default function Header({
                            result.audioBuffer,
                            result.channelSoundFonts,
                            result.rawMidiBuffer,
-                           result.fileName || file.name
+                           result.fileName || file.name,
+                           result.rawSidBuffer,
+                           result.sidMetadata
                          );
                          setIsPlaying(true);
                          addRecentSong({

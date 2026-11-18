@@ -7,6 +7,7 @@
 
 import { SpessaSynth } from './spressasynthLib';
 import { WorkletSynthBridge } from './workletSynthBridge';
+import { TinyRsidBridge } from './tinyRsidBridge';
 
 export const WEBSCOPE_ENGINE_ID = "webscope-oscilloscope-master.zip";
 
@@ -81,6 +82,7 @@ class WebScopeEngine {
   private workletScratchBuffer = new Float32Array(1024);
   private spessaScratchBuffer = new Float32Array(1024);
   private directAudioScratchBuffer = new Float32Array(1024);
+  private sidScratchBuffer = new Float32Array(1024);
   private directAudioAnalysers: AnalyserNode[] = [];
   private directAudioPlaying = false;
 
@@ -209,23 +211,40 @@ class WebScopeEngine {
     };
 
     if (isPlaying) {
-      const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
-      const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
-      const directRes = readAnalyser(this.getDirectAudioAnalyser(channelIndex), this.directAudioScratchBuffer);
+      const sidState = TinyRsidBridge.getState();
+      const useSidTrace =
+        sidState.hasSidLoaded &&
+        sidState.isPlaying &&
+        channelIndex >= 0 &&
+        channelIndex < sidState.activeChipsCount * 3;
 
-      let best = workletRes;
-      if (spessaRes && (!best || spessaRes.peak > best.peak)) {
-        best = spessaRes;
-      }
-      if (directRes && (!best || this.directAudioPlaying || directRes.peak > best.peak)) {
-        best = directRes;
-      }
+      if (useSidTrace) {
+        const sidRes = TinyRsidBridge.getVoiceScopeSamples(channelIndex, this.sidScratchBuffer);
+        if (sidRes.hasData) {
+          this.timeDomainBuffer.set(this.sidScratchBuffer);
+          peakLevel = sidRes.peak;
+          sumSquares = sidRes.sumSq;
+          hasSignal = true;
+        }
+      } else {
+        const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
+        const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
+        const directRes = readAnalyser(this.getDirectAudioAnalyser(channelIndex), this.directAudioScratchBuffer);
 
-      if (best) {
-        this.timeDomainBuffer.set(best.buf);
-        peakLevel = best.peak;
-        sumSquares = best.sumSq;
-        hasSignal = peakLevel > 0.0005;
+        let best = workletRes;
+        if (spessaRes && (!best || spessaRes.peak > best.peak)) {
+          best = spessaRes;
+        }
+        if (directRes && (!best || this.directAudioPlaying || directRes.peak > best.peak)) {
+          best = directRes;
+        }
+
+        if (best) {
+          this.timeDomainBuffer.set(best.buf);
+          peakLevel = best.peak;
+          sumSquares = best.sumSq;
+          hasSignal = peakLevel > 0.0005;
+        }
       }
     }
 

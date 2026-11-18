@@ -25,6 +25,12 @@ import {
   stopMidiPlayback,
   seekMidiPlayback,
   getMidiPlaybackProgress,
+  playSidBuffer,
+  pauseSidPlayback,
+  seekSidPlayback,
+  getSidPlaybackProgress,
+  TinyRsidBridge,
+  syncChannelMuteSolo,
   stopAllChannelsSound,
   getAudioContext,
   setAudioPlaybackRate,
@@ -40,7 +46,8 @@ import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
 import { VideoRecorder } from './utils/videoRecorder';
 import { WorkletSynthBridge } from './engines/workletSynthBridge';
-import { parseChiptuneFile } from './utils/chiptuneParsers';
+import { formatDuration, parseChiptuneFile } from './utils/chiptuneParsers';
+import { SidHeaderMetadata } from './utils/hvscManager';
 
 function parseDurationStringSec(dur?: string | null): number | null {
   if (!dur) return null;
@@ -120,6 +127,9 @@ export default function App() {
   const [loadedAudioBuffer, setLoadedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [loadedMidiBuffer, setLoadedMidiBuffer] = useState<ArrayBuffer | null>(null);
   const [loadedMidiFileName, setLoadedMidiFileName] = useState<string>('sequence.mid');
+  const [loadedSidBuffer, setLoadedSidBuffer] = useState<ArrayBuffer | null>(null);
+  const [loadedSidFileName, setLoadedSidFileName] = useState<string>('tune.sid');
+  const [sidRuntime, setSidRuntime] = useState(() => TinyRsidBridge.getState());
 
   // Loaded Track Metadata for exact duration and song length tracking
   const [trackTitle, setTrackTitle] = useState<string | null>(null);
@@ -276,6 +286,17 @@ export default function App() {
     return () => unsub();
   }, []);
 
+  // Keep TinyRSid runtime & HVSC duration synchronized cleanly
+  useEffect(() => {
+    const unsubSid = TinyRsidBridge.subscribe((nextSid) => {
+      setSidRuntime(nextSid);
+      if (nextSid.hasSidLoaded && nextSid.durationSeconds > 0) {
+        setTrackDuration(formatDuration(nextSid.durationSeconds));
+      }
+    });
+    return () => unsubSid();
+  }, []);
+
   // Sync real tracker state + offline snapshot buffers into internal VideoRecorder
   useEffect(() => {
     VideoRecorder.setLiveTrackerState({
@@ -297,7 +318,22 @@ export default function App() {
   // Synchronous Audio Playback Lifecycle (only triggers on play/pause or buffer swap)
   useEffect(() => {
     if (isPlaying) {
-      if (loadedMidiBuffer) {
+      if (loadedSidBuffer) {
+        const sidStateSnap = TinyRsidBridge.getState();
+        const seekSec = pendingSeekRatioRef.current * (sidStateSnap.durationSeconds || 135);
+        void playSidBuffer(loadedSidBuffer, loadedSidFileName, {
+          subtune1Based: sidStateSnap.currentSubtune,
+          seekSeconds: seekSec,
+          channels,
+          onSongEnded: () => {
+            pendingSeekRatioRef.current = 0;
+            setLiveElapsedSec(0);
+            setCurrentPatternIndex(0);
+            setActiveRow(0);
+            setIsPlaying(false);
+          }
+        });
+      } else if (loadedMidiBuffer) {
         playMidiBuffer(
           loadedMidiBuffer,
           () => {
@@ -330,11 +366,12 @@ export default function App() {
         setAudioPlaybackRate(rate);
       }
     } else {
+      pauseSidPlayback();
       stopDirectAudio();
       stopMidiPlayback();
       stopAllChannelsSound();
     }
-  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
+  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer]);
 
   // Dynamic Audio Playback Rate / Tempo Scaling on BPM changes (does NOT restart the song!)
   useEffect(() => {
@@ -349,18 +386,22 @@ export default function App() {
     }
   }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
 
-  // Clock-Locked Tracker Row & Pattern Synchronization (MIDI / AudioBuffer / Pattern Sequencer)
+  // Clock-Locked Tracker Row & Pattern Synchronization (SID / MIDI / AudioBuffer / Pattern Sequencer)
   useEffect(() => {
     if (!isPlaying) return;
 
-    if (loadedMidiBuffer || loadedAudioBuffer) {
+    if (loadedSidBuffer || loadedMidiBuffer || loadedAudioBuffer) {
       const syncTimer = setInterval(() => {
         const pats = songPatterns;
         const totalRows = Math.max(1, pats.length * 64);
 
         let ratio = 0;
         let elapsed = 0;
-        if (loadedMidiBuffer) {
+        if (loadedSidBuffer) {
+          const prog = getSidPlaybackProgress();
+          ratio = prog.ratio;
+          elapsed = prog.elapsedSeconds;
+        } else if (loadedMidiBuffer) {
           const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
           ratio = prog.ratio;
           elapsed = prog.elapsedSeconds;
@@ -391,7 +432,7 @@ export default function App() {
       return () => clearInterval(syncTimer);
     }
 
-    // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI)
+    // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI / SID)
     const msPerRow = Math.max(15, (60 / Math.max(30, bpm) / 4) * 1000);
     const timer = setInterval(() => {
       setActiveRow((prevRow) => {
@@ -414,19 +455,20 @@ export default function App() {
     return () => {
       clearInterval(timer);
     };
-  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer]);
+  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer, loadedSidBuffer]);
 
-  // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer is used
+  // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer / MIDI / SID is used
   useEffect(() => {
-    if (isPlaying && !loadedAudioBuffer && !loadedMidiBuffer) {
+    if (isPlaying && !loadedAudioBuffer && !loadedMidiBuffer && !loadedSidBuffer) {
       const activePat = (songPatterns && songPatterns[currentPatternIndex]) || patterns;
       const rowData = activePat?.[activeRow];
       if (rowData) {
         const stepSec = Math.max(0.05, 60 / Math.max(30, bpm) / 4);
+        const anySolo = channels.some(c => c.enabled && c.solo);
         for (let chId = 1; chId <= MAX_CHANNELS; chId++) {
           const cell = rowData[chId];
           const ch = channels.find(c => c.id === chId);
-          if (ch && ch.enabled && !ch.mute && cell && cell.note && cell.note !== '---') {
+          if (ch && ch.enabled && !ch.mute && (!anySolo || ch.solo) && cell && cell.note && cell.note !== '---') {
             if (cell.note === '===' || cell.note === 'OFF') {
               stopChannelSound(chId);
             } else {
@@ -444,7 +486,7 @@ export default function App() {
         }
       }
     }
-  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, currentPatternIndex, songPatterns, patterns, channels, bpm]);
+  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, currentPatternIndex, songPatterns, patterns, channels, bpm]);
 
   const handleLoadTrack = (tracksJson: string, trackBpm: number) => {
     try {
@@ -486,10 +528,12 @@ export default function App() {
     audioBuffer?: AudioBuffer,
     channelSoundFonts?: { [channelId: number]: string },
     rawMidiBuffer?: ArrayBuffer,
-    fileName?: string
+    fileName?: string,
+    rawSidBuffer?: ArrayBuffer,
+    sidMetadata?: SidHeaderMetadata
   ) => {
     const finalAllPatterns = (allPatterns && allPatterns.length > 0) ? allPatterns : [importedPatterns];
-    const resolvedName = fileName || (title ? `${title}.mid` : 'sequence.mid');
+    const resolvedName = fileName || (title ? `${title}.${rawSidBuffer ? 'sid' : 'mid'}` : 'sequence.mid');
     pendingSeekRatioRef.current = 0;
     setMidiLiveTotalSec(null);
     setLiveElapsedSec(0);
@@ -497,19 +541,29 @@ export default function App() {
     setSongPatterns(finalAllPatterns);
     setPatterns(importedPatterns || finalAllPatterns[0]);
     setCurrentPatternIndex(0);
-    setLoadedAudioBuffer(audioBuffer || null);
-    setLoadedMidiBuffer(rawMidiBuffer || null);
-    if (rawMidiBuffer) {
-      setLoadedMidiFileName(resolvedName);
-      WorkletSynthBridge.registerLoadedSequence(
-        rawMidiBuffer,
-        resolvedName,
-        finalAllPatterns.length,
-        finalAllPatterns.length * 64
-      );
-      syncInitialMidiInstruments(rawMidiBuffer, resolvedName);
-    } else {
+    setLoadedAudioBuffer(rawSidBuffer ? null : (audioBuffer || null));
+    setLoadedMidiBuffer(rawSidBuffer ? null : (rawMidiBuffer || null));
+    setLoadedSidBuffer(rawSidBuffer || null);
+
+    if (rawSidBuffer) {
+      setLoadedSidFileName(resolvedName);
       WorkletSynthBridge.clearCurrentSequence();
+      const registered = TinyRsidBridge.registerSidFile(rawSidBuffer, resolvedName, sidMetadata?.startSong);
+      setSidRuntime(registered);
+    } else {
+      TinyRsidBridge.clearLoadedSid();
+      if (rawMidiBuffer) {
+        setLoadedMidiFileName(resolvedName);
+        WorkletSynthBridge.registerLoadedSequence(
+          rawMidiBuffer,
+          resolvedName,
+          finalAllPatterns.length,
+          finalAllPatterns.length * 64
+        );
+        syncInitialMidiInstruments(rawMidiBuffer, resolvedName);
+      } else {
+        WorkletSynthBridge.clearCurrentSequence();
+      }
     }
 
     if (importedBpm) {
@@ -521,52 +575,95 @@ export default function App() {
     if (chipType) setTrackChipType(chipType);
     if (octaveRange) setTrackOctaveRange(octaveRange);
 
-    const targetChCount = channelsCount || 8;
+    const targetChCount = rawSidBuffer
+      ? ((sidMetadata?.chipCount || 1) * 3)
+      : (channelsCount || 8);
     setTrackChannelsCount(targetChCount);
 
-    setChannels(prev => prev.map((ch, idx) => {
-      const isEnabled = idx < targetChCount;
-      let assignedChip = ch.chip;
-      let assignedPreset = ch.soundFontPreset;
+    setChannels(prev => {
+      const next = prev.map((ch, idx) => {
+        const isEnabled = idx < targetChCount;
+        let assignedChip = ch.chip;
+        let assignedPreset = ch.soundFontPreset;
+        let assignedPan = ch.pan;
+        let assignedLabel: string | undefined = undefined;
 
-      if (channelSoundFonts && channelSoundFonts[ch.id]) {
-        assignedPreset = channelSoundFonts[ch.id];
-        assignedChip = 'General MIDI (SoundFont)';
-      } else if (chipType) {
-        if (chipType.includes('SID') || chipType.includes('MOS6581')) {
-          assignedChip = 'MOS6581 (C64 SID)';
+        if (rawSidBuffer) {
+          const chipCount = sidMetadata?.chipCount || 1;
+          const sidChipIdx = Math.floor(idx / 3);
+          const voiceNum = (idx % 3) + 1;
+          const sidModelForChip =
+            sidChipIdx === 0
+              ? sidMetadata?.chipModel
+              : sidChipIdx === 1
+                ? sidMetadata?.sid2Model
+                : sidMetadata?.sid3Model;
+          const is8580 = sidModelForChip === 'MOS 8580' || (!sidModelForChip && !sidMetadata?.defaultIs6581);
+          assignedChip = is8580 ? 'MOS8580 (C64 SID)' : 'MOS6581 (C64 SID)';
           assignedPreset = undefined;
-        } else if (chipType.includes('Amiga') || chipType.includes('PAULA')) {
-          assignedChip = 'PAULA (Amiga PCM)';
-          assignedPreset = `mod_inst_01`;
-        } else if (chipType.includes('NES') || chipType.includes('RP2A03')) {
-          assignedChip = 'RP2A03 (NES APU)';
-          assignedPreset = undefined;
-        } else if (chipType.includes('Game Boy') || chipType.includes('DMG')) {
-          assignedChip = 'DMG-01 (Game Boy)';
-          assignedPreset = undefined;
-        } else if (chipType.includes('SPC') || chipType.includes('SNES')) {
-          assignedChip = 'SPC700 (SNES DSP)';
-          assignedPreset = undefined;
-        } else if (chipType.includes('MIDI') || chipType.includes('SoundFont')) {
+
+          if (isEnabled) {
+            let panTag = 'C';
+            if (chipCount === 1) {
+              assignedPan = [50, 35, 65][idx % 3];
+              panTag = assignedPan < 45 ? 'L' : assignedPan > 55 ? 'R' : 'C';
+            } else if (chipCount === 2) {
+              assignedPan = sidChipIdx === 0 ? 25 : 75;
+              panTag = sidChipIdx === 0 ? 'L' : 'R';
+            } else {
+              assignedPan = sidChipIdx === 0 ? 18 : sidChipIdx === 1 ? 50 : 82;
+              panTag = sidChipIdx === 0 ? 'L' : sidChipIdx === 1 ? 'C' : 'R';
+            }
+            assignedLabel = `SID${sidChipIdx + 1} V${voiceNum} · ${panTag}`;
+          }
+        } else if (channelSoundFonts && channelSoundFonts[ch.id]) {
+          assignedPreset = channelSoundFonts[ch.id];
           assignedChip = 'General MIDI (SoundFont)';
-          assignedPreset = idx === 9 ? 'gm_drums' : idx === 0 ? 'gm_piano' : idx === 1 ? 'gm_epiano' : 'gm_strings';
-        } else if (chipType.includes('OPL3') || chipType.includes('YMF262')) {
-          assignedChip = 'YMF262 (OPL3 FM)';
-          assignedPreset = undefined;
-        } else {
-          assignedChip = 'YM2612 (Sega FM)';
-          assignedPreset = undefined;
+        } else if (chipType) {
+          if (chipType.includes('MOS8580')) {
+            assignedChip = 'MOS8580 (C64 SID)';
+            assignedPreset = undefined;
+          } else if (chipType.includes('SID') || chipType.includes('MOS6581')) {
+            assignedChip = 'MOS6581 (C64 SID)';
+            assignedPreset = undefined;
+          } else if (chipType.includes('Amiga') || chipType.includes('PAULA')) {
+            assignedChip = 'PAULA (Amiga PCM)';
+            assignedPreset = `mod_inst_01`;
+          } else if (chipType.includes('NES') || chipType.includes('RP2A03')) {
+            assignedChip = 'RP2A03 (NES APU)';
+            assignedPreset = undefined;
+          } else if (chipType.includes('Game Boy') || chipType.includes('DMG')) {
+            assignedChip = 'DMG-01 (Game Boy)';
+            assignedPreset = undefined;
+          } else if (chipType.includes('SPC') || chipType.includes('SNES')) {
+            assignedChip = 'SPC700 (SNES DSP)';
+            assignedPreset = undefined;
+          } else if (chipType.includes('MIDI') || chipType.includes('SoundFont')) {
+            assignedChip = 'General MIDI (SoundFont)';
+            assignedPreset = idx === 9 ? 'gm_drums' : idx === 0 ? 'gm_piano' : idx === 1 ? 'gm_epiano' : 'gm_strings';
+          } else if (chipType.includes('OPL3') || chipType.includes('YMF262')) {
+            assignedChip = 'YMF262 (OPL3 FM)';
+            assignedPreset = undefined;
+          } else {
+            assignedChip = 'YM2612 (Sega FM)';
+            assignedPreset = undefined;
+          }
         }
-      }
 
-      return {
-        ...ch,
-        enabled: isEnabled,
-        chip: assignedChip,
-        soundFontPreset: assignedPreset
-      };
-    }));
+        return {
+          ...ch,
+          enabled: isEnabled,
+          chip: assignedChip,
+          pan: assignedPan,
+          soundFontPreset: assignedPreset,
+          label: assignedLabel,
+          mute: false,
+          solo: false
+        };
+      });
+      syncChannelMuteSolo(next);
+      return next;
+    });
 
     setActiveTab('tracker');
     try {
@@ -610,7 +707,9 @@ export default function App() {
           res.audioBuffer,
           res.channelSoundFonts,
           res.rawMidiBuffer,
-          res.fileName || dropped.name
+          res.fileName || dropped.name,
+          res.rawSidBuffer,
+          res.sidMetadata
         );
       } catch (err) {
         console.warn('Global song drop parse error:', err);
@@ -671,6 +770,9 @@ export default function App() {
         trackTitle={trackTitle}
         loadedAudioBuffer={loadedAudioBuffer}
         actualTotalSeconds={(() => {
+          if (loadedSidBuffer) {
+            return Math.max(1, sidRuntime.durationSeconds || 135);
+          }
           const rate = Math.max(0.25, Math.min(4.0, bpm / (baseSongBpm || 125)));
           if (loadedAudioBuffer) {
             return loadedAudioBuffer.duration / rate;
@@ -682,11 +784,13 @@ export default function App() {
           }
           return null;
         })()}
-        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer ? liveElapsedSec : null}
+        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer || loadedSidBuffer ? liveElapsedSec : null}
         onSeekPosition={(targetSeconds, ratio) => {
           pendingSeekRatioRef.current = ratio;
           setLiveElapsedSec(targetSeconds);
-          if (loadedMidiBuffer) {
+          if (loadedSidBuffer) {
+            void seekSidPlayback(targetSeconds);
+          } else if (loadedMidiBuffer) {
             if (isPlaying) {
               seekMidiPlayback(ratio, bpm, baseSongBpm);
             } else {
@@ -824,7 +928,18 @@ export default function App() {
                   trackTitle={trackTitle}
                   onSwitchChiptuneMode={handleSwitchChiptuneMode}
                   currentChiptuneMode={chiptuneMode}
-                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName) => {
+                  onSelectSidSubtune={async (sub) => {
+                    pendingSeekRatioRef.current = 0;
+                    setLiveElapsedSec(0);
+                    setActiveRow(0);
+                    setCurrentPatternIndex(0);
+                    const ctx = getAudioContext();
+                    await TinyRsidBridge.setSubtune(sub, ctx || undefined);
+                    const updated = TinyRsidBridge.getState();
+                    setSidRuntime(updated);
+                    setTrackDuration(formatDuration(updated.durationSeconds));
+                  }}
+                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName, rawSidBuffer, sidMetadata) => {
                     handleImportMasterSequence(
                       allPatterns?.[0] || patterns,
                       importedBpm,
@@ -837,7 +952,9 @@ export default function App() {
                       audioBuffer,
                       channelSoundFonts,
                       rawMidiBuffer,
-                      fileName
+                      fileName,
+                      rawSidBuffer,
+                      sidMetadata
                     );
                   }}
                 />

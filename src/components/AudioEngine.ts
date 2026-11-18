@@ -3,6 +3,7 @@ import WebAudioTinySynth from 'webaudio-tinysynth';
 import { Channel, SoundEnginesConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
+import { TinyRsidBridge, TINYRSID_ENGINE_ID } from '../engines/tinyRsidBridge';
 import { onInterpolationModeChange } from '../engines/soundFontInterpolation';
 import { BasicMIDI } from 'spessasynth_core';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
@@ -20,6 +21,7 @@ import {
 
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
 export { WorkletSynthBridge };
+export { TinyRsidBridge, TINYRSID_ENGINE_ID };
 export {
   SpessaSynthCore,
   SPRESSASYNTH_CORE_ENGINE_ID,
@@ -333,6 +335,7 @@ export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
   tinySynth: true,
   syntheticOsc: true,
   spessaSynthCore: true,
+  tinyRSid: true,
 };
 
 let activeEnginesConfig: SoundEnginesConfig = (() => {
@@ -345,11 +348,16 @@ let activeEnginesConfig: SoundEnginesConfig = (() => {
         tinySynth: typeof parsed.tinySynth === 'boolean' ? parsed.tinySynth : DEFAULT_SOUND_ENGINES.tinySynth,
         syntheticOsc: typeof parsed.syntheticOsc === 'boolean' ? parsed.syntheticOsc : DEFAULT_SOUND_ENGINES.syntheticOsc,
         spessaSynthCore: typeof parsed.spessaSynthCore === 'boolean' ? parsed.spessaSynthCore : DEFAULT_SOUND_ENGINES.spessaSynthCore,
+        tinyRSid: typeof parsed.tinyRSid === 'boolean' ? parsed.tinyRSid : DEFAULT_SOUND_ENGINES.tinyRSid,
       };
     }
   } catch (e) {}
   return { ...DEFAULT_SOUND_ENGINES };
 })();
+
+if (typeof window !== 'undefined') {
+  TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
+}
 
 const engineChangeListeners: ((config: SoundEnginesConfig) => void)[] = [];
 
@@ -363,6 +371,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
     tinySynth: config.tinySynth ?? activeEnginesConfig.tinySynth,
     syntheticOsc: config.syntheticOsc ?? activeEnginesConfig.syntheticOsc,
     spessaSynthCore: config.spessaSynthCore ?? activeEnginesConfig.spessaSynthCore,
+    tinyRSid: config.tinyRSid ?? activeEnginesConfig.tinyRSid,
   };
   
   if (tinySynthMasterGain && audioCtx) {
@@ -376,6 +385,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
     spessaMaster.gain.setValueAtTime(activeEnginesConfig.spessaSynthCore ? 0.7 : 0, audioCtx.currentTime);
   }
   WorkletSynthBridge.setMasterVolumeGain(activeEnginesConfig.spessaSynth ? 0.85 : 0);
+  TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
 
   if (!activeEnginesConfig.syntheticOsc) {
     activeSyntheticVoices.forEach(v => { try { v.stop(); } catch(e) {} });
@@ -514,6 +524,20 @@ export function toggleMidiChannelMute(channelIndex: number): boolean {
   const ch = Math.max(0, Math.min(15, Math.floor(channelIndex)));
   const nextMuted = !(SpessaSynth.isChannelMuted(ch) || WorkletSynthBridge.isChannelMuted(ch));
   return setMidiChannelMuted(ch, nextMuted);
+}
+
+/**
+ * Synchronize Aria48 channel mute, solo, enable, and panning states across
+ * TinyRSid (WebSID), WorkletSynthesizer, and SpessaSynth.
+ */
+export function syncChannelMuteSolo(channels: Channel[]) {
+  const anySolo = channels.some((c) => c.enabled && c.solo);
+  for (let i = 0; i < Math.min(16, channels.length); i++) {
+    const ch = channels[i];
+    const effectiveMute = !ch.enabled || ch.mute || (anySolo && !ch.solo);
+    setMidiChannelMuted(i, effectiveMute);
+  }
+  TinyRsidBridge.syncChannelStates(channels);
 }
 
 /**
@@ -962,6 +986,7 @@ export function playMidiBuffer(
   fileName?: string
 ) {
   try {
+    TinyRsidBridge.stop();
     stopMidiPlayback();
     stopDirectAudio();
 
@@ -1392,7 +1417,56 @@ export function stopChannelSound(channelId: number) {
 export function stopAllChannelsSound() {
   stopDirectAudio();
   stopMidiPlayback();
+  TinyRsidBridge.pause();
   cancelAllScheduledNotesAndSilence();
+}
+
+/**
+ * TinyRSid / WebSID C64 SID WASM Emulator Playback Controls
+ */
+export async function playSidBuffer(
+  arrayBuffer: ArrayBuffer,
+  fileName: string,
+  options?: {
+    subtune1Based?: number;
+    seekSeconds?: number;
+    channels?: Channel[];
+    onSongEnded?: () => void;
+  }
+): Promise<boolean> {
+  try {
+    stopDirectAudio();
+    stopMidiPlayback();
+    cancelAllScheduledNotesAndSilence();
+
+    const ctx = getAudioContext();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch {}
+    }
+
+    return await TinyRsidBridge.playSid(ctx, arrayBuffer, fileName, options);
+  } catch (err) {
+    console.warn('TinyRSid playback error:', err);
+    return false;
+  }
+}
+
+export function pauseSidPlayback() {
+  TinyRsidBridge.pause();
+}
+
+export function stopSidPlayback() {
+  TinyRsidBridge.stop();
+}
+
+export async function seekSidPlayback(targetSeconds: number): Promise<void> {
+  const ctx = getAudioContext();
+  await TinyRsidBridge.seekSeconds(targetSeconds, ctx || undefined);
+}
+
+export function getSidPlaybackProgress() {
+  return TinyRsidBridge.getProgress();
 }
 
 /**
@@ -1405,6 +1479,7 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
+    TinyRsidBridge.stop();
     stopDirectAudio();
 
     const safeOffset = Math.max(0, Math.min(Math.max(0, buffer.duration - 0.05), startOffset));
