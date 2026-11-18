@@ -3,6 +3,7 @@ import {
   Play, Square, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, 
   Clock, Hash, Layers, Sliders, SkipBack, SkipForward, Repeat
 } from 'lucide-react';
+import { unlockAudioContextSync } from './AudioEngine';
 
 interface TimeBarProps {
   isPlaying: boolean;
@@ -93,6 +94,7 @@ export default function TimeBar({
   }, [totalRows, rowsPerPattern, setCurrentPatternIndex, setActiveRow, setPatterns, songPatterns, totalSeconds, onSeekAudio, onSeekPosition]);
 
   const handleScrubberMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    unlockAudioContextSync();
     setIsScrubbing(true);
     updateScrubPosition(e.clientX);
   };
@@ -169,7 +171,10 @@ export default function TimeBar({
         <div className="flex items-center gap-1.5 flex-wrap">
           <button
             id="timebar-play-toggle-btn"
-            onClick={() => setIsPlaying(!isPlaying)}
+            onClick={() => {
+              unlockAudioContextSync();
+              setIsPlaying(!isPlaying);
+            }}
             className={`p-1.5 px-2.5 rounded-lg border font-bold text-[10px] uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 shadow-sm ${
               isPlaying 
                 ? 'bg-cyan-600 border-cyan-400 text-white shadow-[0_0_12px_rgba(6,182,212,0.4)]' 

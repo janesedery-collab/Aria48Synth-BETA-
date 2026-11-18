@@ -839,3 +839,7 @@ class VoiceDisplay {
 		this._ctx.restore();
 	}
 };
+if (typeof window !== 'undefined') {
+	window.ChannelStreamer = ChannelStreamer;
+	window.VoiceDisplay = VoiceDisplay;
+}

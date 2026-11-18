@@ -17,7 +17,8 @@ import {
   loadSoundFontIntoCoreAndLib,
   onDefaultSoundFontChange,
   setDefaultSoundFontId,
-  SOUNDFONT_ACCEPT_ATTR
+  SOUNDFONT_ACCEPT_ATTR,
+  unlockAudioContextSync
 } from './AudioEngine';
 import {
   HvscCacheStats,
@@ -610,7 +611,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
             <div 
               onDragOver={handleDragOver}
               onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                unlockAudioContextSync();
+                fileInputRef.current?.click();
+              }}
               className="border-2 border-dashed border-zinc-800 bg-zinc-950/60 rounded-xl p-6 flex flex-col items-center justify-center gap-2.5 text-zinc-400 hover:border-cyan-500/50 hover:bg-zinc-900/20 cursor-pointer transition-all h-48 text-center"
             >
               <input 
@@ -924,9 +928,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
 
              {/* Direct Load Button for SID or Dynamic Download Banner */}
              {parsedSidMetadata && parsedPatterns && onImportSequence && !convertedFileUrl && (
-               <button
+                 <button
                  id="sid-load-workstation-btn"
                  onClick={() => {
+                   unlockAudioContextSync();
                    onImportSequence(
                      parsedPatterns,
                      parsedBpm,
@@ -973,6 +978,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                   {parsedPatterns && onImportSequence && (
                     <button
                       onClick={() => {
+                        unlockAudioContextSync();
                         onImportSequence(
                           parsedPatterns, 
                           parsedBpm, 

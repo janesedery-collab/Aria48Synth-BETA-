@@ -15,7 +15,8 @@ import {
   deleteSavedSoundFont,
   TinyRsidBridge,
   syncChannelMuteSolo,
-  getAudioContext
+  getAudioContext,
+  unlockAudioContextSync
 } from './AudioEngine';
 import { SidChipOverride, SidClockOverride } from '../engines/tinyRsidBridge';
 import { SidHeaderMetadata, formatTimeMsPrecise } from '../utils/hvscManager';
@@ -702,7 +703,10 @@ export default function TrackerEditor({
           </div>
 
           <button 
-            onClick={() => setIsImportModalOpen(true)}
+            onClick={() => {
+              unlockAudioContextSync();
+              setIsImportModalOpen(true);
+            }}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-950/50 text-cyan-400 border border-cyan-800/40 hover:bg-cyan-900/60 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm"
             title="Import MIDI (.mid/.rmi/.kar/.xmf), MOD, XM, S3M, IT, SID, NSF, SF2 into tracking matrix"
           >
@@ -937,6 +941,7 @@ export default function TrackerEditor({
                   id="sid-subtune-select"
                   value={sidState.currentSubtune}
                   onChange={(e) => {
+                    unlockAudioContextSync();
                     const sub = parseInt(e.target.value, 10) || 1;
                     if (onSelectSidSubtune) {
                       onSelectSidSubtune(sub);

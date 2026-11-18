@@ -757,6 +757,7 @@ export function getAudioContext(): AudioContext | null {
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     if (AudioContextClass) {
       audioCtx = new AudioContextClass();
+      (window as any)._gPlayerAudioCtx = audioCtx;
       SpessaSynth.init(audioCtx);
       void WorkletSynthBridge.init(audioCtx);
       initTinySynth(audioCtx);
@@ -764,6 +765,28 @@ export function getAudioContext(): AudioContext | null {
     }
   }
   return audioCtx;
+}
+
+export function unlockAudioContextSync(): AudioContext | null {
+  const ctx = getAudioContext();
+  if (ctx && ctx.state === 'suspended') {
+    try {
+      void ctx.resume();
+    } catch {}
+  }
+  return ctx;
+}
+
+if (typeof window !== 'undefined') {
+  const resumeSuspendedAudio = () => {
+    if (audioCtx && audioCtx.state === 'suspended') {
+      try {
+        void audioCtx.resume();
+      } catch {}
+    }
+  };
+  window.addEventListener('pointerdown', resumeSuspendedAudio, { passive: true });
+  window.addEventListener('keydown', resumeSuspendedAudio, { passive: true });
 }
 
 export function getTinySynth(): any {
@@ -1439,13 +1462,17 @@ export async function playSidBuffer(
     stopMidiPlayback();
     cancelAllScheduledNotesAndSilence();
 
-    const ctx = getAudioContext();
+    const ctx = unlockAudioContextSync();
     if (!ctx) return false;
     if (ctx.state === 'suspended') {
       try { await ctx.resume(); } catch {}
     }
 
-    return await TinyRsidBridge.playSid(ctx, arrayBuffer, fileName, options);
+    const ok = await TinyRsidBridge.playSid(ctx, arrayBuffer, fileName, options);
+    if (!ok) {
+      console.warn('TinyRSid playback did not start for:', fileName);
+    }
+    return ok;
   } catch (err) {
     console.warn('TinyRSid playback error:', err);
     return false;

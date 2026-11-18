@@ -10,7 +10,7 @@ import ShareApkModal from './ShareApkModal';
 import CloudSongsModal from './CloudSongsModal';
 import { addRecentSong, RecentSong, saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
-import { loadSoundFontIntoCoreAndLib, SOUNDFONT_ACCEPT_ATTR } from './AudioEngine';
+import { loadSoundFontIntoCoreAndLib, SOUNDFONT_ACCEPT_ATTR, unlockAudioContextSync } from './AudioEngine';
 import { onAuthUserChanged, User } from '../utils/cloudSongsService';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { SidHeaderMetadata } from '../utils/hvscManager';
@@ -288,7 +288,10 @@ export default function Header({
         <div className="flex items-center gap-4 bg-zinc-950 p-1 rounded-lg border border-zinc-800 shadow-inner">
           <button 
             id="play-stop-btn"
-            onClick={() => setIsPlaying(!isPlaying)} 
+            onClick={() => {
+              unlockAudioContextSync();
+              setIsPlaying(!isPlaying);
+            }} 
             className={`p-2 rounded transition-all cursor-pointer ${isPlaying ? 'bg-cyan-600 text-white shadow-[0_0_10px_rgba(8,145,178,0.4)]' : 'hover:bg-zinc-800 text-cyan-400'}`}
           >
             {isPlaying ? <Square size={14} /> : <Play size={14} fill="currentColor" />}
@@ -375,6 +378,7 @@ export default function Header({
              <button
                id="player-import-btn"
                onClick={() => {
+                 unlockAudioContextSync();
                  const fileInput = document.getElementById('player-tracker-file-file-btn');
                  if (fileInput) fileInput.click();
                }}

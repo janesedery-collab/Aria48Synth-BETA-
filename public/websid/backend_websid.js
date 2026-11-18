@@ -586,3 +586,6 @@ class SIDBackendAdapter extends EmsHEAP16BackendAdapter {
 		console.log(text);
 	}
 };
+if (typeof window !== 'undefined') {
+	window.SIDBackendAdapter = SIDBackendAdapter;
+}

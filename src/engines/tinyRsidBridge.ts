@@ -62,6 +62,17 @@ declare global {
   }
 }
 
+function resolveGlobalSymbol(name: string): any {
+  if (typeof window === 'undefined') return undefined;
+  const direct = (window as any)[name];
+  if (direct) return direct;
+  try {
+    return (0, eval)(`typeof ${name} !== "undefined" ? ${name} : undefined`);
+  } catch {
+    return undefined;
+  }
+}
+
 function loadClassicScript(src: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const existing = document.querySelector(`script[data-aria-websid-src="${src}"]`) as HTMLScriptElement | null;
@@ -70,9 +81,13 @@ function loadClassicScript(src: string): Promise<void> {
         resolve();
         return;
       }
-      existing.addEventListener('load', () => resolve(), { once: true });
-      existing.addEventListener('error', () => reject(new Error(`Failed loading ${src}`)), { once: true });
-      return;
+      if ((existing as any).__failed) {
+        existing.remove();
+      } else {
+        existing.addEventListener('load', () => resolve(), { once: true });
+        existing.addEventListener('error', () => reject(new Error(`Failed loading ${src}`)), { once: true });
+        return;
+      }
     }
 
     const script = document.createElement('script');
@@ -83,7 +98,11 @@ function loadClassicScript(src: string): Promise<void> {
       (script as any).__loaded = true;
       resolve();
     };
-    script.onerror = () => reject(new Error(`Failed loading script ${src}`));
+    script.onerror = () => {
+      (script as any).__failed = true;
+      script.remove();
+      reject(new Error(`Failed loading script ${src}`));
+    };
     document.head.appendChild(script);
   });
 }
@@ -95,6 +114,10 @@ class TinyRsidBridgeClass {
   private playerReady = false;
   private playerInitPromise: Promise<void> | null = null;
   private currentBuffer: ArrayBuffer | null = null;
+  private loadedBufferSignature: string | null = null;
+  private loadedSubtune: number | null = null;
+  private pendingSeekReload = false;
+  private playGeneration = 0;
   private virtualSongIndex = 0;
   private seekBaseSeconds = 0;
   private playPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -164,10 +187,15 @@ class TinyRsidBridgeClass {
   private async ensureScriptsLoaded(): Promise<void> {
     if (this.scriptsLoadPromise) return this.scriptsLoadPromise;
     this.scriptsLoadPromise = (async () => {
-      window.WASM_SEARCH_PATH = '/websid/';
-      await loadClassicScript('/websid/webaudio-player.js');
-      await loadClassicScript('/websid/channelstreamer.js');
-      await loadClassicScript('/websid/backend_websid.js');
+      try {
+        window.WASM_SEARCH_PATH = '/websid/';
+        await loadClassicScript('/websid/webaudio-player.js');
+        await loadClassicScript('/websid/channelstreamer.js');
+        await loadClassicScript('/websid/backend_websid.js');
+      } catch (err) {
+        this.scriptsLoadPromise = null;
+        throw err;
+      }
     })();
     return this.scriptsLoadPromise;
   }
@@ -176,7 +204,7 @@ class TinyRsidBridgeClass {
     if (typeof window === 'undefined') return;
     window._gPlayerAudioCtx = ctx;
 
-    if (this.playerReady && this.backend) {
+    if (this.playerReady && this.backend && window.ScriptNodePlayer?.getInstance?.()) {
       return;
     }
     if (this.playerInitPromise) {
@@ -184,37 +212,50 @@ class TinyRsidBridgeClass {
     }
 
     this.playerInitPromise = (async () => {
-      await this.ensureScriptsLoaded();
-      window._gPlayerAudioCtx = ctx;
+      try {
+        await this.ensureScriptsLoaded();
+        window._gPlayerAudioCtx = ctx;
 
-      if (!window.SIDBackendAdapter || !window.ScriptNodePlayer || !window.ChannelStreamer) {
-        throw new Error('WebSID scripts loaded without expected constructors');
+        const SIDAdapterCtor = resolveGlobalSymbol('SIDBackendAdapter');
+        const ScriptPlayer = resolveGlobalSymbol('ScriptNodePlayer');
+        const ChannelStreamerCtor = resolveGlobalSymbol('ChannelStreamer');
+
+        if (!SIDAdapterCtor || !ScriptPlayer || !ChannelStreamerCtor) {
+          throw new Error('WebSID scripts loaded without expected constructors');
+        }
+
+        if (!window.SIDBackendAdapter) window.SIDBackendAdapter = SIDAdapterCtor;
+        if (!window.ScriptNodePlayer) window.ScriptNodePlayer = ScriptPlayer;
+        if (!window.ChannelStreamer) window.ChannelStreamer = ChannelStreamerCtor;
+
+        this.backend = new SIDAdapterCtor(
+          C64_BASIC_ROM_B64,
+          C64_CHAR_ROM_B64,
+          C64_KERNAL_ROM_B64,
+          undefined,
+          true
+        );
+        this.backend.setProcessorBufSize(4096 << 1);
+        this.streamer = new ChannelStreamerCtor(3, true);
+
+        await ScriptPlayer.initialize(
+          this.backend,
+          () => this.handleNaturalTrackEnd(),
+          [],
+          false,
+          this.streamer
+        );
+
+        const player = ScriptPlayer.getInstance();
+        if (player) {
+          player.setVolume(this.state.engineEnabled ? 0.9 : 0.001);
+        }
+        this.playerReady = true;
+      } catch (err) {
+        this.playerInitPromise = null;
+        this.playerReady = false;
+        throw err;
       }
-
-      this.backend = new window.SIDBackendAdapter(
-        C64_BASIC_ROM_B64,
-        C64_CHAR_ROM_B64,
-        C64_KERNAL_ROM_B64,
-        undefined,
-        true
-      );
-      this.backend.setProcessorBufSize(4096 << 1);
-      this.backend.setStereoLevel(24576);
-      this.streamer = new window.ChannelStreamer(3, true);
-
-      await window.ScriptNodePlayer.initialize(
-        this.backend,
-        () => this.handleNaturalTrackEnd(),
-        [],
-        false,
-        this.streamer
-      );
-
-      const player = window.ScriptNodePlayer.getInstance();
-      if (player) {
-        player.setVolume(this.state.engineEnabled ? 0.9 : 0.001);
-      }
-      this.playerReady = true;
     })();
 
     return this.playerInitPromise;
@@ -224,9 +265,18 @@ class TinyRsidBridgeClass {
    * Registers parsed SID metadata without necessarily starting audio yet (e.g. on import/convert preview).
    */
   public registerSidFile(arrayBuffer: ArrayBuffer, fileName: string, subtune1Based?: number): SidRuntimeState {
-    this.currentBuffer = arrayBuffer.slice(0);
-    const meta = parseSidHeader(this.currentBuffer, fileName);
-    const sub = Math.max(1, Math.min(meta.songs, subtune1Based || meta.startSong || 1));
+    const incomingSlice = arrayBuffer.slice(0);
+    const meta = parseSidHeader(incomingSlice, fileName);
+    const isSameTune =
+      this.state.hasSidLoaded &&
+      this.state.metadata?.md5 === meta.md5 &&
+      this.state.fileName === fileName;
+
+    this.currentBuffer = incomingSlice;
+    const sub = Math.max(
+      1,
+      Math.min(meta.songs, subtune1Based || (isSameTune ? this.state.currentSubtune : meta.startSong) || 1)
+    );
     const hvsc = lookupHvscForSid(meta, sub);
     const durationSec = hvsc.activeSubtuneDurationSec ?? DEFAULT_FALLBACK_SID_DURATION_SEC;
 
@@ -234,7 +284,20 @@ class TinyRsidBridgeClass {
     if (meta.secondSIDAddress) addrs.push(meta.secondSIDAddress);
     if (meta.thirdSIDAddress) addrs.push(meta.thirdSIDAddress);
 
-    this.seekBaseSeconds = 0;
+    const chipOverride = isSameTune ? this.state.chipModelOverride : 'auto';
+    const clockOverride = isSameTune ? this.state.clockOverride : 'auto';
+    const use6581 =
+      chipOverride === '6581' ? true : chipOverride === '8580' ? false : meta.defaultIs6581;
+    const useNtsc =
+      clockOverride === 'ntsc' ? true : clockOverride === 'pal' ? false : meta.isNtscDefault;
+
+    if (!isSameTune) {
+      this.seekBaseSeconds = 0;
+      this.loadedBufferSignature = null;
+      this.loadedSubtune = null;
+      this.pendingSeekReload = true;
+    }
+
     this.state = {
       ...this.state,
       hasSidLoaded: true,
@@ -243,13 +306,13 @@ class TinyRsidBridgeClass {
       hvsc,
       currentSubtune: sub,
       totalSubtunes: meta.songs,
-      chipModelOverride: 'auto',
-      clockOverride: 'auto',
-      activeChipModel: meta.defaultIs6581 ? 'MOS 6581' : 'MOS 8580',
-      activeClock: meta.isNtscDefault ? 'NTSC 60Hz' : 'PAL 50Hz',
+      chipModelOverride: chipOverride,
+      clockOverride: clockOverride,
+      activeChipModel: use6581 ? 'MOS 6581' : 'MOS 8580',
+      activeClock: useNtsc ? 'NTSC 60Hz' : 'PAL 50Hz',
       activeChipsCount: meta.chipCount,
       activeSidBaseAddresses: addrs,
-      elapsedSeconds: 0,
+      elapsedSeconds: isSameTune ? this.state.elapsedSeconds : 0,
       durationSeconds: durationSec
     };
     this.notify();
@@ -257,8 +320,12 @@ class TinyRsidBridgeClass {
   }
 
   public clearLoadedSid() {
+    this.playGeneration++;
     this.stop();
     this.currentBuffer = null;
+    this.loadedBufferSignature = null;
+    this.loadedSubtune = null;
+    this.pendingSeekReload = false;
     this.seekBaseSeconds = 0;
     this.state = {
       ...this.state,
@@ -292,6 +359,8 @@ class TinyRsidBridgeClass {
       onSongEnded?: () => void;
     }
   ): Promise<boolean> {
+    const gen = ++this.playGeneration;
+
     if (options?.onSongEnded) {
       this.onSongEndedCallback = options.onSongEnded;
     }
@@ -303,8 +372,14 @@ class TinyRsidBridgeClass {
     const nameToUse = fileName || this.state.fileName || 'tune.sid';
     if (!bufToUse) return false;
 
-    const needsReload = Boolean(arrayBuffer) || !this.state.metadata || this.state.fileName !== nameToUse;
-    if (needsReload) {
+    const incomingMeta = parseSidHeader(bufToUse, nameToUse);
+    const incomingSig = `${incomingMeta.md5}:${bufToUse.byteLength}:${nameToUse}`;
+    const isNewFile =
+      !this.state.metadata ||
+      this.state.metadata.md5 !== incomingMeta.md5 ||
+      this.state.fileName !== nameToUse;
+
+    if (isNewFile) {
       this.registerSidFile(bufToUse, nameToUse, options?.subtune1Based);
     } else if (options?.subtune1Based && options.subtune1Based !== this.state.currentSubtune) {
       return this.setSubtune(options.subtune1Based, ctx);
@@ -315,13 +390,49 @@ class TinyRsidBridgeClass {
     }
 
     await this.ensurePlayerInitialized(ctx);
-    const player = window.ScriptNodePlayer?.getInstance();
+    if (gen !== this.playGeneration) return false;
+
+    const ScriptPlayer = window.ScriptNodePlayer;
+    const player = ScriptPlayer?.getInstance?.();
     if (!player || !this.backend) return false;
 
     this.endedLock = false;
     const meta = this.state.metadata!;
     const targetSub = Math.max(1, Math.min(meta.songs, options?.subtune1Based || this.state.currentSubtune || meta.startSong));
-    const targetSeek = Math.max(0, options?.seekSeconds ?? this.seekBaseSeconds ?? 0);
+    const currentPausedElapsed = this.state.elapsedSeconds || this.seekBaseSeconds || 0;
+    const targetSeek = Math.max(0, options?.seekSeconds ?? currentPausedElapsed);
+
+    // Fast-path clean resume when the exact same SID file + subtune is already loaded and paused (without explicit seek jump)
+    const canResumeInPlace =
+      this.loadedBufferSignature === incomingSig &&
+      this.loadedSubtune === targetSub &&
+      !this.pendingSeekReload &&
+      Math.abs(targetSeek - currentPausedElapsed) < 0.35 &&
+      Boolean(player.getSongInfo?.());
+
+    if (canResumeInPlace) {
+      this.applyChipAndClockSettings();
+      if (this.lastChannelsSnapshot.length > 0) {
+        this.syncChannelStates(this.lastChannelsSnapshot);
+      } else {
+        this.applyVoiceMutesToBackend();
+      }
+      player.setVolume(this.state.engineEnabled ? 0.9 : 0.001);
+      try {
+        player.resume();
+        if (player.isPaused?.()) {
+          player.play();
+        }
+      } catch {}
+
+      this.state = {
+        ...this.state,
+        isPlaying: true
+      };
+      this.startProgressPoll();
+      this.notify();
+      return true;
+    }
 
     // Pause first cleanly before loading new track
     try { player.pause(); } catch {}
@@ -329,23 +440,55 @@ class TinyRsidBridgeClass {
     const safeFileName = nameToUse.split(/[/\\]/).pop() || 'tune.sid';
     const virtualPath = `/tmp/aria_${++this.virtualSongIndex}_${safeFileName}`;
 
-    await window.ScriptNodePlayer.loadFileData([
+    await ScriptPlayer.loadFileData([
       { xname: virtualPath, fileBuffer: bufToUse.slice(0) }
     ]);
+    if (gen !== this.playGeneration) return false;
 
     const hvsc = lookupHvscForSid(meta, targetSub);
     const durSec = hvsc.activeSubtuneDurationSec ?? DEFAULT_FALLBACK_SID_DURATION_SEC;
 
-    await window.ScriptNodePlayer.loadMusicFromURL(
-      virtualPath,
-      {
-        track: targetSub - 1, // WebSID emu_set_subsong uses 0-based index
-        traceSID: true
-      },
-      (err: any) => {
-        console.warn('WebSID load warning:', err);
-      }
-    );
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`WebSID load timed out for ${safeFileName}`));
+        }
+      }, 10000);
+
+      ScriptPlayer.loadMusicFromURL(
+        virtualPath,
+        {
+          track: targetSub - 1, // WebSID emu_set_subsong uses 0-based index
+          traceSID: true
+        },
+        (err: any) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error(typeof err === 'string' ? err : `WebSID failed loading ${safeFileName}`));
+          }
+        }
+      ).then(() => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      }, (err: any) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+    });
+
+    if (gen !== this.playGeneration) {
+      try { player.pause(); } catch {}
+      return false;
+    }
 
     // Query detected SID count & base addresses from emulator
     const emuChips = Math.max(1, Math.min(3, this.backend.countSIDs?.() || meta.chipCount)) as 1 | 2 | 3;
@@ -380,6 +523,10 @@ class TinyRsidBridgeClass {
       this.applyVoiceMutesToBackend();
     }
 
+    this.loadedBufferSignature = incomingSig;
+    this.loadedSubtune = targetSub;
+    this.pendingSeekReload = false;
+
     player.setVolume(this.state.engineEnabled ? 0.9 : 0.001);
     player.play();
 
@@ -399,12 +546,14 @@ class TinyRsidBridgeClass {
   }
 
   public pause() {
+    this.playGeneration++;
+    let nextElapsed = this.state.elapsedSeconds;
     try {
       const player = window.ScriptNodePlayer?.getInstance();
       if (player) {
         const curPlaytime = Number(player.getCurrentPlaytime?.() || 0);
-        if (this.state.isPlaying && isFinite(curPlaytime) && curPlaytime > 0) {
-          this.seekBaseSeconds = Math.min(this.state.durationSeconds, this.seekBaseSeconds + curPlaytime);
+        if (this.state.isPlaying && isFinite(curPlaytime) && curPlaytime >= 0) {
+          nextElapsed = Math.min(this.state.durationSeconds, this.seekBaseSeconds + curPlaytime);
         }
         player.pause();
       }
@@ -414,7 +563,7 @@ class TinyRsidBridgeClass {
       this.state = {
         ...this.state,
         isPlaying: false,
-        elapsedSeconds: this.seekBaseSeconds
+        elapsedSeconds: nextElapsed
       };
       this.notify();
     }
@@ -424,12 +573,13 @@ class TinyRsidBridgeClass {
     if (!this.currentBuffer) return;
     await this.playSid(ctx, undefined, this.state.fileName, {
       subtune1Based: this.state.currentSubtune,
-      seekSeconds: this.seekBaseSeconds,
+      seekSeconds: this.pendingSeekReload ? this.seekBaseSeconds : undefined,
       channels: this.lastChannelsSnapshot
     });
   }
 
   public stop() {
+    this.playGeneration++;
     try {
       const player = window.ScriptNodePlayer?.getInstance();
       if (player) {
@@ -438,6 +588,7 @@ class TinyRsidBridgeClass {
     } catch {}
     this.stopProgressPoll();
     this.seekBaseSeconds = 0;
+    this.pendingSeekReload = true;
     if (this.state.isPlaying || this.state.elapsedSeconds !== 0) {
       this.state = {
         ...this.state,
@@ -451,6 +602,7 @@ class TinyRsidBridgeClass {
   public async seekSeconds(targetSeconds: number, ctx?: AudioContext): Promise<void> {
     const clamped = Math.max(0, Math.min(Math.max(1, this.state.durationSeconds - 0.1), targetSeconds));
     this.seekBaseSeconds = clamped;
+    this.pendingSeekReload = true;
     this.state = { ...this.state, elapsedSeconds: clamped };
     this.notify();
 
@@ -470,6 +622,8 @@ class TinyRsidBridgeClass {
     const durSec = hvsc.activeSubtuneDurationSec ?? DEFAULT_FALLBACK_SID_DURATION_SEC;
 
     this.seekBaseSeconds = 0;
+    this.pendingSeekReload = true;
+    this.loadedSubtune = null;
     this.state = {
       ...this.state,
       currentSubtune: clamped,
