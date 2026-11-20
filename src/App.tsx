@@ -29,7 +29,13 @@ import {
   pauseSidPlayback,
   seekSidPlayback,
   getSidPlaybackProgress,
+  playSunVoxBuffer,
+  pauseSunVoxPlayback,
+  seekSunVoxPlayback,
+  getSunVoxPlaybackProgress,
+  SunVoxBridge,
   TinyRsidBridge,
+  setSoundEnginesConfig,
   syncChannelMuteSolo,
   stopAllChannelsSound,
   getAudioContext,
@@ -130,6 +136,9 @@ export default function App() {
   const [loadedSidBuffer, setLoadedSidBuffer] = useState<ArrayBuffer | null>(null);
   const [loadedSidFileName, setLoadedSidFileName] = useState<string>('tune.sid');
   const [sidRuntime, setSidRuntime] = useState(() => TinyRsidBridge.getState());
+  const [loadedSunVoxBuffer, setLoadedSunVoxBuffer] = useState<ArrayBuffer | null>(null);
+  const [loadedSunVoxFileName, setLoadedSunVoxFileName] = useState<string>('project.sunvox');
+  const [sunvoxRuntime, setSunvoxRuntime] = useState(() => SunVoxBridge.getState());
 
   // Loaded Track Metadata for exact duration and song length tracking
   const [trackTitle, setTrackTitle] = useState<string | null>(null);
@@ -297,6 +306,22 @@ export default function App() {
     return () => unsubSid();
   }, []);
 
+  // Keep SunVox WASM runtime metadata (real song name, BPM, duration) synchronized cleanly
+  useEffect(() => {
+    const unsubSv = SunVoxBridge.subscribe((nextSv) => {
+      setSunvoxRuntime(nextSv);
+      if (nextSv.hasSunVoxLoaded && nextSv.isReady) {
+        if (nextSv.songName) setTrackTitle(nextSv.songName);
+        if (nextSv.durationSeconds > 0) setTrackDuration(formatDuration(nextSv.durationSeconds));
+        if (nextSv.bpm >= 30 && nextSv.bpm <= 320) {
+          setBpm(nextSv.bpm);
+          setBaseSongBpm(nextSv.bpm);
+        }
+      }
+    });
+    return () => unsubSv();
+  }, []);
+
   // Sync real tracker state + offline snapshot buffers into internal VideoRecorder
   useEffect(() => {
     VideoRecorder.setLiveTrackerState({
@@ -325,6 +350,17 @@ export default function App() {
           subtune1Based: sidStateSnap.currentSubtune,
           seekSeconds: seekSec,
           channels,
+          onSongEnded: () => {
+            pendingSeekRatioRef.current = 0;
+            setLiveElapsedSec(0);
+            setCurrentPatternIndex(0);
+            setActiveRow(0);
+            setIsPlaying(false);
+          }
+        });
+      } else if (loadedSunVoxBuffer) {
+        void playSunVoxBuffer(loadedSunVoxBuffer, loadedSunVoxFileName, {
+          seekRatio: pendingSeekRatioRef.current,
           onSongEnded: () => {
             pendingSeekRatioRef.current = 0;
             setLiveElapsedSec(0);
@@ -367,11 +403,12 @@ export default function App() {
       }
     } else {
       pauseSidPlayback();
+      pauseSunVoxPlayback();
       stopDirectAudio();
       stopMidiPlayback();
       stopAllChannelsSound();
     }
-  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer]);
+  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, loadedSunVoxBuffer]);
 
   // Dynamic Audio Playback Rate / Tempo Scaling on BPM changes (does NOT restart the song!)
   useEffect(() => {
@@ -386,11 +423,11 @@ export default function App() {
     }
   }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
 
-  // Clock-Locked Tracker Row & Pattern Synchronization (SID / MIDI / AudioBuffer / Pattern Sequencer)
+  // Clock-Locked Tracker Row & Pattern Synchronization (SID / SunVox / MIDI / AudioBuffer / Pattern Sequencer)
   useEffect(() => {
     if (!isPlaying) return;
 
-    if (loadedSidBuffer || loadedMidiBuffer || loadedAudioBuffer) {
+    if (loadedSidBuffer || loadedSunVoxBuffer || loadedMidiBuffer || loadedAudioBuffer) {
       const syncTimer = setInterval(() => {
         const pats = songPatterns;
         const totalRows = Math.max(1, pats.length * 64);
@@ -399,6 +436,10 @@ export default function App() {
         let elapsed = 0;
         if (loadedSidBuffer) {
           const prog = getSidPlaybackProgress();
+          ratio = prog.ratio;
+          elapsed = prog.elapsedSeconds;
+        } else if (loadedSunVoxBuffer) {
+          const prog = getSunVoxPlaybackProgress();
           ratio = prog.ratio;
           elapsed = prog.elapsedSeconds;
         } else if (loadedMidiBuffer) {
@@ -432,7 +473,7 @@ export default function App() {
       return () => clearInterval(syncTimer);
     }
 
-    // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI / SID)
+    // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI / SID / SunVox)
     const msPerRow = Math.max(15, (60 / Math.max(30, bpm) / 4) * 1000);
     const timer = setInterval(() => {
       setActiveRow((prevRow) => {
@@ -455,11 +496,11 @@ export default function App() {
     return () => {
       clearInterval(timer);
     };
-  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer, loadedSidBuffer]);
+  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer, loadedSidBuffer, loadedSunVoxBuffer]);
 
-  // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer / MIDI / SID is used
+  // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer / MIDI / SID / SunVox is used
   useEffect(() => {
-    if (isPlaying && !loadedAudioBuffer && !loadedMidiBuffer && !loadedSidBuffer) {
+    if (isPlaying && !loadedAudioBuffer && !loadedMidiBuffer && !loadedSidBuffer && !loadedSunVoxBuffer) {
       const activePat = (songPatterns && songPatterns[currentPatternIndex]) || patterns;
       const rowData = activePat?.[activeRow];
       if (rowData) {
@@ -486,7 +527,7 @@ export default function App() {
         }
       }
     }
-  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, currentPatternIndex, songPatterns, patterns, channels, bpm]);
+  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, loadedSunVoxBuffer, currentPatternIndex, songPatterns, patterns, channels, bpm]);
 
   const handleLoadTrack = (tracksJson: string, trackBpm: number) => {
     try {
@@ -530,10 +571,11 @@ export default function App() {
     rawMidiBuffer?: ArrayBuffer,
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
-    sidMetadata?: SidHeaderMetadata
+    sidMetadata?: SidHeaderMetadata,
+    rawSunVoxBuffer?: ArrayBuffer
   ) => {
     const finalAllPatterns = (allPatterns && allPatterns.length > 0) ? allPatterns : [importedPatterns];
-    const resolvedName = fileName || (title ? `${title}.${rawSidBuffer ? 'sid' : 'mid'}` : 'sequence.mid');
+    const resolvedName = fileName || (title ? `${title}.${rawSidBuffer ? 'sid' : rawSunVoxBuffer ? 'sunvox' : 'mid'}` : 'sequence.mid');
     pendingSeekRatioRef.current = 0;
     setMidiLiveTotalSec(null);
     setLiveElapsedSec(0);
@@ -541,16 +583,26 @@ export default function App() {
     setSongPatterns(finalAllPatterns);
     setPatterns(importedPatterns || finalAllPatterns[0]);
     setCurrentPatternIndex(0);
-    setLoadedAudioBuffer(rawSidBuffer ? null : (audioBuffer || null));
-    setLoadedMidiBuffer(rawSidBuffer ? null : (rawMidiBuffer || null));
+    setLoadedAudioBuffer((rawSidBuffer || rawSunVoxBuffer) ? null : (audioBuffer || null));
+    setLoadedMidiBuffer((rawSidBuffer || rawSunVoxBuffer) ? null : (rawMidiBuffer || null));
     setLoadedSidBuffer(rawSidBuffer || null);
+    setLoadedSunVoxBuffer(rawSunVoxBuffer || null);
 
-    if (rawSidBuffer) {
+    if (rawSunVoxBuffer) {
+      setLoadedSunVoxFileName(resolvedName);
+      TinyRsidBridge.clearLoadedSid();
+      WorkletSynthBridge.clearCurrentSequence();
+      setSoundEnginesConfig({ sunvox: true });
+      const registeredSv = SunVoxBridge.registerSunVoxFile(rawSunVoxBuffer, resolvedName);
+      setSunvoxRuntime(registeredSv);
+    } else if (rawSidBuffer) {
+      SunVoxBridge.clearLoadedSunVox();
       setLoadedSidFileName(resolvedName);
       WorkletSynthBridge.clearCurrentSequence();
       const registered = TinyRsidBridge.registerSidFile(rawSidBuffer, resolvedName, sidMetadata?.startSong);
       setSidRuntime(registered);
     } else {
+      SunVoxBridge.clearLoadedSunVox();
       TinyRsidBridge.clearLoadedSid();
       if (rawMidiBuffer) {
         setLoadedMidiFileName(resolvedName);
@@ -709,7 +761,8 @@ export default function App() {
           res.rawMidiBuffer,
           res.fileName || dropped.name,
           res.rawSidBuffer,
-          res.sidMetadata
+          res.sidMetadata,
+          res.rawSunVoxBuffer
         );
       } catch (err) {
         console.warn('Global song drop parse error:', err);
@@ -773,6 +826,9 @@ export default function App() {
           if (loadedSidBuffer) {
             return Math.max(1, sidRuntime.durationSeconds || 135);
           }
+          if (loadedSunVoxBuffer) {
+            return Math.max(1, sunvoxRuntime.durationSeconds || 180);
+          }
           const rate = Math.max(0.25, Math.min(4.0, bpm / (baseSongBpm || 125)));
           if (loadedAudioBuffer) {
             return loadedAudioBuffer.duration / rate;
@@ -784,12 +840,14 @@ export default function App() {
           }
           return null;
         })()}
-        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer || loadedSidBuffer ? liveElapsedSec : null}
+        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer || loadedSidBuffer || loadedSunVoxBuffer ? liveElapsedSec : null}
         onSeekPosition={(targetSeconds, ratio) => {
           pendingSeekRatioRef.current = ratio;
           setLiveElapsedSec(targetSeconds);
           if (loadedSidBuffer) {
             void seekSidPlayback(targetSeconds);
+          } else if (loadedSunVoxBuffer) {
+            seekSunVoxPlayback(targetSeconds);
           } else if (loadedMidiBuffer) {
             if (isPlaying) {
               seekMidiPlayback(ratio, bpm, baseSongBpm);
@@ -939,7 +997,7 @@ export default function App() {
                     setSidRuntime(updated);
                     setTrackDuration(formatDuration(updated.durationSeconds));
                   }}
-                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName, rawSidBuffer, sidMetadata) => {
+                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName, rawSidBuffer, sidMetadata, rawSunVoxBuffer) => {
                     handleImportMasterSequence(
                       allPatterns?.[0] || patterns,
                       importedBpm,
@@ -954,7 +1012,8 @@ export default function App() {
                       rawMidiBuffer,
                       fileName,
                       rawSidBuffer,
-                      sidMetadata
+                      sidMetadata,
+                      rawSunVoxBuffer
                     );
                   }}
                 />

@@ -6,13 +6,14 @@
  * Directly linked to spressasynth_lib-master.zip for 16-channel synthesis.
  */
 
+import { SoundBankLoader } from 'spessasynth_core';
 import { clearCustomSoundFontInstruments, registerCustomInstrument } from '../utils/soundFontEngine';
 import type { SoundFontInstrument, SoundFontBankInfo } from '../types';
 
 export const SPRESSASYNTH_CORE_ENGINE_ID = "spressasynth_core-master.zip";
 
 export const SUPPORTED_SOUNDFONT_EXTENSIONS = [
-  '.sf2', '.sf3', '.sf4', '.sfbk', '.sbk', '.dls', '.sfz',
+  '.sf2', '.sf3', '.dls', '.sfe', '.sf4', '.sfbk', '.sbk', '.sfz',
   '.gig', '.sfpack', '.sfark', '.exs', '.nki', '.pat',
   '.xi', '.iti', '.s3i', '.bnk', '.ins', '.wopl', '.wopn', '.fxb', '.fxp'
 ] as const;
@@ -216,17 +217,27 @@ class SpessaSynthCoreEngine {
       result = this.parseRiffSfbk(arrayBuffer, u8, audioCtx, fileName, ext, logs);
     } else if (riff === 'RIFF' && form === 'DLS ') {
       result = this.parseRiffDls(arrayBuffer, u8, audioCtx, fileName, logs);
+    } else if (
+      ext === '.sfe' ||
+      ((riff === 'RIFF' || riff === 'RIFS') && (form === 'sfen' || form === 'sfpk'))
+    ) {
+      result = this.parseSpessaCoreSoundBank(arrayBuffer, u8, audioCtx, fileName, ext, logs);
     } else if (ext === '.sfz' || this.looksLikeSfzText(u8)) {
       result = this.parseSfzText(u8, audioCtx, fileName, logs);
     } else if (readAscii(u8, 0, 12).startsWith('GF1PATCH')) {
       result = this.parseGusPatch(arrayBuffer, u8, audioCtx, fileName, logs);
     } else {
-      // Check if an embedded RIFF/sfbk or RIFF/DLS bank exists inside container wrappers (.sfpack, .sfark, .gig, etc.)
+      // Check if an embedded RIFF/sfbk, RIFF/sfen (.sfe), or RIFF/DLS bank exists inside container wrappers
       const embeddedSfbkOffset = findMagicSequence(u8, 'RIFF', 'sfbk');
+      const embeddedSfenOffset = embeddedSfbkOffset >= 0 ? -1 : findMagicSequence(u8, 'RIFF', 'sfen');
       if (embeddedSfbkOffset > 0) {
         logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] Located embedded RIFF/sfbk SoundFont stream at offset 0x${embeddedSfbkOffset.toString(16)}.`);
         const subBuf = arrayBuffer.slice(embeddedSfbkOffset);
         result = this.parseRiffSfbk(subBuf, new Uint8Array(subBuf), audioCtx, fileName, ext, logs);
+      } else if (embeddedSfenOffset > 0) {
+        logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] Located embedded SFe (.sfe) SoundBank stream at offset 0x${embeddedSfenOffset.toString(16)}.`);
+        const subBuf = arrayBuffer.slice(embeddedSfenOffset);
+        result = this.parseSpessaCoreSoundBank(subBuf, new Uint8Array(subBuf), audioCtx, fileName, '.sfe', logs);
       } else {
         const embeddedDlsOffset = findMagicSequence(u8, 'RIFF', 'DLS ');
         if (embeddedDlsOffset > 0) {
@@ -1266,6 +1277,178 @@ class SpessaSynthCoreEngine {
       }],
       logs
     };
+  }
+
+  /**
+   * Native SFe (.sfe) / spessasynth_core SoundBankLoader decoder
+   * Extracts authentic preset headers, sample names, and sample AudioBuffers via SoundBankLoader.fromArrayBuffer
+   */
+  private parseSpessaCoreSoundBank(
+    arrayBuffer: ArrayBuffer,
+    u8: Uint8Array,
+    audioCtx: AudioContext | undefined,
+    fileName: string,
+    ext: string,
+    logs: string[]
+  ): SpessaCoreParseResult {
+    try {
+      const bank = SoundBankLoader.fromArrayBuffer(arrayBuffer.slice(0));
+      const info: any = bank.soundBankInfo || {};
+      const bankName = (info.name && String(info.name).trim()) || fileName.replace(/\.[^/.]+$/, '');
+      const verObj = info.version || { major: 4, minor: 0 };
+      const version = `${verObj.major ?? 4}.${String(verObj.minor ?? 0).padStart(2, '0')}`;
+      const formatLabel = ext === '.sfe' || String(info.soundEngine || '').toLowerCase().includes('sfe')
+        ? 'SFe (SpessaSynth Bank)'
+        : `${String(info.soundEngine || ext.toUpperCase().replace('.', '') || 'SFe')}`;
+      const author = String(info.soundEngineer || info.copyright || info.software || 'SpessaSynth SFe').trim();
+
+      const sampleHeaders: SpessaCoreSampleHeader[] = [];
+      const sampleIndexMap = new Map<any, number>();
+
+      (bank.samples || []).forEach((s: any, idx: number) => {
+        sampleIndexMap.set(s, idx);
+        let decodedAudio: AudioBuffer | undefined;
+        let sampleLen = 0;
+        if (audioCtx && sampleHeaders.length < 192) {
+          try {
+            const floatData = typeof s.getAudioData === 'function' ? s.getAudioData() : null;
+            if (floatData && floatData.length > 0) {
+              sampleLen = floatData.length;
+              const sr = Math.max(8000, Math.min(96000, Number(s.sampleRate) || 44100));
+              decodedAudio = audioCtx.createBuffer(1, floatData.length, sr);
+              decodedAudio.getChannelData(0).set(floatData);
+            }
+          } catch {}
+        }
+        sampleHeaders.push({
+          name: String(s.name || `Sample ${idx + 1}`),
+          start: 0,
+          end: sampleLen || Number(s.sampleLength) || 0,
+          startLoop: Number(s.loopStart) || 0,
+          endLoop: Number(s.loopEnd) || 0,
+          sampleRate: Number(s.sampleRate) || 44100,
+          originalPitch: Math.max(0, Math.min(127, Number(s.originalKey ?? 60))),
+          pitchCorrection: Number(s.pitchCorrection || 0),
+          sampleType: Number(s.sampleType || 1),
+          audioBuffer: decodedAudio
+        });
+      });
+
+      const presetHeaders: SpessaCorePresetHeader[] = [];
+      const zones: SpessaCoreZone[] = [];
+      const instruments: SoundFontInstrument[] = [];
+
+      const rawPresets = (bank.presets || []).slice().sort((a: any, b: any) => {
+        const ba = a.isDrum ? 128 : (Number(a.bankMSB) || 0);
+        const bb = b.isDrum ? 128 : (Number(b.bankMSB) || 0);
+        if (ba !== bb) return ba - bb;
+        return (Number(a.program) || 0) - (Number(b.program) || 0);
+      });
+
+      rawPresets.forEach((p: any, pIdx: number) => {
+        const bankNum = p.isDrum ? 128 : (Number(p.bankMSB) || 0);
+        const progNum = Number(p.program) || 0;
+        const pName = String(p.name || `Preset ${progNum}`).trim();
+        presetHeaders.push({
+          name: pName,
+          program: progNum,
+          bank: bankNum,
+          presetBagNdx: pIdx
+        });
+
+        let linkedSampleIdx = -1;
+        let zoneRootKey = 60;
+        if (Array.isArray(p.zones)) {
+          for (const pz of p.zones) {
+            const instZones = pz?.instrument?.zones;
+            if (Array.isArray(instZones) && instZones.length > 0 && instZones[0]?.sample) {
+              const sIdx = sampleIndexMap.get(instZones[0].sample);
+              if (typeof sIdx === 'number') {
+                linkedSampleIdx = sIdx;
+                zoneRootKey = sampleHeaders[sIdx]?.originalPitch || 60;
+                break;
+              }
+            }
+          }
+        }
+        if (linkedSampleIdx < 0 && sampleHeaders.length > 0) {
+          linkedSampleIdx = pIdx % sampleHeaders.length;
+        }
+        if (linkedSampleIdx >= 0) {
+          zones.push({
+            bank: bankNum,
+            program: progNum,
+            keyLow: 0,
+            keyHigh: 127,
+            velLow: 0,
+            velHigh: 127,
+            rootKey: zoneRootKey,
+            sampleIndex: linkedSampleIdx,
+            loopMode: (sampleHeaders[linkedSampleIdx]?.endLoop || 0) > (sampleHeaders[linkedSampleIdx]?.startLoop || 0) ? 1 : 0,
+            attenuationGain: 1.0
+          });
+        }
+
+        const cleanSlug = pName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+        instruments.push({
+          id: `core_sf_${bankNum}_${progNum}_${cleanSlug}`,
+          name: `${progNum.toString().padStart(3, '0')}: ${pName}`,
+          bank: bankNum,
+          program: progNum,
+          category: bankNum === 128 ? `${bankName} · Drums` : `SFe: ${bankName}`,
+          isCustom: true,
+          rootKey: zoneRootKey,
+          sampleRate: sampleHeaders[Math.max(0, linkedSampleIdx)]?.sampleRate || 44100
+        });
+      });
+
+      logs.push(
+        `[${SPRESSASYNTH_CORE_ENGINE_ID}] Decoded ${formatLabel} "${bankName}" v${version}: ${presetHeaders.length} presets, ${sampleHeaders.length} samples.`
+      );
+
+      const soundFont: SpessaCoreSoundFont = {
+        id: `spessa-sfe-${Date.now()}`,
+        name: bankName,
+        format: formatLabel,
+        version,
+        instrumentCount: presetHeaders.length,
+        presets: presetHeaders.map(p => `${p.program.toString().padStart(3, '0')}: ${p.name}`),
+        isCustom: true,
+        sampleHeaders,
+        presetHeaders,
+        zones,
+        metadata: {
+          engineId: SPRESSASYNTH_CORE_ENGINE_ID,
+          bankName,
+          format: formatLabel,
+          version,
+          author,
+          tools: String(info.software || 'spessasynth_core SFe'),
+          comment: String(info.comment || ''),
+          instrumentCount: presetHeaders.length,
+          sampleCount: sampleHeaders.length,
+          totalSampleSizeKB: Math.round(u8.length / 1024),
+          isLoaded: true,
+          loadedAt: Date.now()
+        }
+      };
+
+      return {
+        soundFont,
+        bankInfo: {
+          name: bankName,
+          version,
+          instrumentCount: presetHeaders.length,
+          author,
+          isLoaded: true
+        },
+        instruments,
+        logs
+      };
+    } catch (err: any) {
+      logs.push(`[${SPRESSASYNTH_CORE_ENGINE_ID}] SFe SoundBankLoader fallback (${err?.message || 'unknown error'}).`);
+      return this.parseUniversalSoundFontFallback(arrayBuffer, u8, audioCtx, fileName, ext, logs);
+    }
   }
 
   /**

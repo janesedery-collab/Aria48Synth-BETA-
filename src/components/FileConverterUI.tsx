@@ -9,6 +9,7 @@ import {
 } from '../utils/chiptuneExporters';
 import { getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import {
+  SunVoxBridge,
   TinyRsidBridge,
   deleteSavedSoundFont,
   getAudioContext,
@@ -54,7 +55,8 @@ interface FileConverterUIProps {
     rawMidiBuffer?: ArrayBuffer,
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
-    sidMetadata?: SidHeaderMetadata
+    sidMetadata?: SidHeaderMetadata,
+    rawSunVoxBuffer?: ArrayBuffer
   ) => void;
 }
 
@@ -71,6 +73,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   const [parsedAudioBuffer, setParsedAudioBuffer] = useState<AudioBuffer | null>(null);
   const [parsedRawMidiBuffer, setParsedRawMidiBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedRawSidBuffer, setParsedRawSidBuffer] = useState<ArrayBuffer | null>(null);
+  const [parsedRawSunVoxBuffer, setParsedRawSunVoxBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedSidMetadata, setParsedSidMetadata] = useState<SidHeaderMetadata | null>(null);
   const [parsedHvscLookup, setParsedHvscLookup] = useState<HvscLookupResult | null>(null);
   const [parsedChannelSoundFonts, setParsedChannelSoundFonts] = useState<{ [ch: number]: string } | null>(null);
@@ -200,6 +203,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         setParsedAudioBuffer(result.audioBuffer || null);
         setParsedRawMidiBuffer(result.rawMidiBuffer || null);
         setParsedRawSidBuffer(result.rawSidBuffer || null);
+        setParsedRawSunVoxBuffer(result.rawSunVoxBuffer || null);
         setParsedSidMetadata(result.sidMetadata || null);
         if (result.sidMetadata) {
           setParsedHvscLookup(lookupHvscForSid(result.sidMetadata, result.sidMetadata.startSong));
@@ -374,8 +378,32 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         `[SYSTEM] Loaded C64 SID binary: '${incomingName}'`,
         ...res.log
       ]);
+      setParsedRawSunVoxBuffer(null);
+    } else if (lower.endsWith('.sunvox') || lower.endsWith('.sunsynth')) {
+      setParsedRawSidBuffer(null);
+      setParsedSidMetadata(null);
+      setParsedHvscLookup(null);
+      SunVoxBridge.registerSunVoxFile(buf, incomingName);
+      const res = parseChiptuneFile(incomingName, buf);
+      setParsedPatterns(res.patterns);
+      setParsedAllPatterns(res.allPatterns || [res.patterns]);
+      setParsedAudioBuffer(null);
+      setParsedRawMidiBuffer(null);
+      setParsedRawSunVoxBuffer(res.rawSunVoxBuffer || buf.slice(0));
+      setParsedChannelSoundFonts(null);
+      setParsedBpm(res.bpm);
+      setParsedDuration(res.duration || '3:00');
+      setParsedTitle(res.title || incomingName);
+      setParsedChipType(res.chipType);
+      setParsedChannelsCount(res.channelsCount || 8);
+      setParsedOctaveRange(res.octaveRange || 'C-2 - G-5');
+      setConversionLog([
+        `[SYSTEM] Loaded SunVox WASM project: '${incomingName}'`,
+        ...res.log
+      ]);
     } else {
       setParsedRawSidBuffer(null);
+      setParsedRawSunVoxBuffer(null);
       setParsedSidMetadata(null);
       setParsedHvscLookup(null);
       setConversionLog([`[SYSTEM] Loaded document: '${incomingName}'`]);
@@ -434,7 +462,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
            Universal Music & SoundFont Station
          </h2>
          <p className="text-zinc-400 text-[11px] mt-1 font-sans">
-           Translate and play Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2/.sf3), and Audio files.
+           Translate and play Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), SunVox (.sunvox, .sunsynth), Amiga ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .sfe, .dls), and Audio files.
          </p>
        </div>
 
@@ -450,7 +478,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                </span>
              </div>
              <div className="text-[9.5px] text-zinc-500 font-sans mt-0.5">
-               Engine: SF2/SF3 PCM Sampler · Version {bankInfo.version} · Author: {bankInfo.author || "General MIDI"}
+               Engine: SF2/SF3/SFe/DLS PCM Sampler · Version {bankInfo.version} · Author: {bankInfo.author || "General MIDI"}
              </div>
            </div>
          </div>
@@ -480,13 +508,14 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
            <input 
              type="file"
              ref={sfInputRef}
+             accept={SOUNDFONT_ACCEPT_ATTR}
              onChange={handleSoundFontUpload}
              className="hidden"
            />
            <button
              onClick={() => sfInputRef.current?.click()}
              className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded text-[10.5px] font-bold flex items-center gap-1.5 transition cursor-pointer"
-             title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, or any format) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
+             title="Load SoundFont / Sound Bank (.sf2, .sf3, .sfe, .dls) into SpessaSynth"
            >
              <Upload size={11} />
              <span>Load SoundFont</span>
@@ -620,7 +649,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
               <input 
                 type="file" 
                 ref={fileInputRef} 
-                accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                 onChange={handleFileSelect} 
                 className="hidden" 
               />
@@ -642,7 +671,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                      Browse Files
                   </div>
                   <div className="text-[8.5px] text-zinc-500 mt-1.5 font-sans leading-relaxed max-w-xs">
-                     Accepts MIDI (.mid, .rmi, .kar, .xmf), MOD, XM, S3M, IT, C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM, SNES SPC, SoundFonts (.sf2/.sf3), WAV, MP3
+                     Accepts MIDI (.mid, .rmi, .kar, .xmf), MOD, XM, S3M, IT, C64 (.sid), SunVox (.sunvox), NES (.nsf), Game Boy (.gbs), Sega VGM, SNES SPC, SoundFonts (.sf2/.sf3/.dls/.sfe), WAV, MP3
                   </div>
                 </div>
               )}
@@ -926,7 +955,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                 )}
              </div>
 
-             {/* Direct Load Button for SID or Dynamic Download Banner */}
+             {/* Direct Load Button for SID or SunVox */}
              {parsedSidMetadata && parsedPatterns && onImportSequence && !convertedFileUrl && (
                  <button
                  id="sid-load-workstation-btn"
@@ -946,12 +975,42 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                      parsedRawMidiBuffer || undefined,
                      file?.name,
                      parsedRawSidBuffer || undefined,
-                     parsedSidMetadata || undefined
+                     parsedSidMetadata || undefined,
+                     undefined
                    );
                  }}
                  className="w-full py-2.5 bg-sky-950/70 hover:bg-sky-900/80 text-sky-300 border border-sky-600/50 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(56,189,248,0.18)] font-mono"
                >
                  <span>▶ PLAY IN TINYRSSID / TRACKER WORKSTATION</span>
+               </button>
+             )}
+
+             {parsedRawSunVoxBuffer && parsedPatterns && onImportSequence && !convertedFileUrl && (
+               <button
+                 id="sunvox-load-workstation-btn"
+                 onClick={() => {
+                   unlockAudioContextSync();
+                   onImportSequence(
+                     parsedPatterns,
+                     parsedBpm,
+                     parsedDuration,
+                     parsedTitle,
+                     parsedChipType,
+                     parsedOctaveRange,
+                     parsedChannelsCount,
+                     parsedAllPatterns || undefined,
+                     parsedAudioBuffer || undefined,
+                     parsedChannelSoundFonts || undefined,
+                     parsedRawMidiBuffer || undefined,
+                     file?.name,
+                     undefined,
+                     undefined,
+                     parsedRawSunVoxBuffer
+                   );
+                 }}
+                 className="w-full py-2.5 bg-violet-950/70 hover:bg-violet-900/80 text-violet-300 border border-violet-500/50 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(139,92,246,0.2)] font-mono"
+               >
+                 <span>▶ PLAY IN SUNVOX WASM ENGINE / WORKSTATION</span>
                </button>
              )}
 
@@ -993,7 +1052,8 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                           parsedRawMidiBuffer || undefined,
                           file?.name,
                           parsedRawSidBuffer || undefined,
-                          parsedSidMetadata || undefined
+                          parsedSidMetadata || undefined,
+                          parsedRawSunVoxBuffer || undefined
                         );
                       }}
                       className="w-full py-3 bg-cyan-950/60 hover:bg-cyan-900/70 text-cyan-400 border border-cyan-800/40 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(34,211,238,0.1)] font-mono duration-300"

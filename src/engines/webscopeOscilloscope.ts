@@ -8,6 +8,7 @@
 import { SpessaSynth } from './spressasynthLib';
 import { WorkletSynthBridge } from './workletSynthBridge';
 import { TinyRsidBridge } from './tinyRsidBridge';
+import { SunVoxBridge } from './sunvoxBridge';
 
 export const WEBSCOPE_ENGINE_ID = "webscope-oscilloscope-master.zip";
 
@@ -83,6 +84,7 @@ class WebScopeEngine {
   private spessaScratchBuffer = new Float32Array(1024);
   private directAudioScratchBuffer = new Float32Array(1024);
   private sidScratchBuffer = new Float32Array(1024);
+  private sunvoxScratchBuffer = new Float32Array(1024);
   private directAudioAnalysers: AnalyserNode[] = [];
   private directAudioPlaying = false;
 
@@ -212,11 +214,17 @@ class WebScopeEngine {
 
     if (isPlaying) {
       const sidState = TinyRsidBridge.getState();
+      const sunvoxState = SunVoxBridge.getState();
       const useSidTrace =
         sidState.hasSidLoaded &&
         sidState.isPlaying &&
         channelIndex >= 0 &&
         channelIndex < sidState.activeChipsCount * 3;
+      const useSunVoxTrace =
+        !useSidTrace &&
+        sunvoxState.hasSunVoxLoaded &&
+        sunvoxState.isPlaying &&
+        sunvoxState.engineEnabled;
 
       if (useSidTrace) {
         const sidRes = TinyRsidBridge.getVoiceScopeSamples(channelIndex, this.sidScratchBuffer);
@@ -224,6 +232,14 @@ class WebScopeEngine {
           this.timeDomainBuffer.set(this.sidScratchBuffer);
           peakLevel = sidRes.peak;
           sumSquares = sidRes.sumSq;
+          hasSignal = true;
+        }
+      } else if (useSunVoxTrace) {
+        const svRes = SunVoxBridge.getModuleScopeSamples(channelIndex, this.sunvoxScratchBuffer);
+        if (svRes.hasData) {
+          this.timeDomainBuffer.set(this.sunvoxScratchBuffer);
+          peakLevel = svRes.peak;
+          sumSquares = svRes.sumSq;
           hasSignal = true;
         }
       } else {

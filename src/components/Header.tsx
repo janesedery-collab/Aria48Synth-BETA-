@@ -41,7 +41,8 @@ interface HeaderProps {
     rawMidiBuffer?: ArrayBuffer,
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
-    sidMetadata?: SidHeaderMetadata
+    sidMetadata?: SidHeaderMetadata,
+    rawSunVoxBuffer?: ArrayBuffer
   ) => void;
   onLoadTrack?: (tracksJson: string, bpm: number) => void;
   trackTitle?: string | null;
@@ -383,7 +384,7 @@ export default function Header({
                  if (fileInput) fileInput.click();
                }}
                className="p-1 px-2.5 bg-zinc-900 border border-zinc-800 hover:border-cyan-500/50 text-cyan-400 hover:text-white hover:bg-cyan-950/30 rounded font-bold text-[9.5px] uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5"
-               title="Import tracking or MIDI sequence (.mid, .midi, .mod, .xm, .s3m, .rmi, .kar, .xmf, .it, .sid, .nsf, .sf2)"
+               title="Import tracking, MIDI, SID, or SunVox sequence (.mid, .mod, .xm, .s3m, .rmi, .kar, .xmf, .it, .sid, .sunvox, .nsf, .sf2, .sfe)"
              >
                <Upload size={11} className="text-cyan-400" />
                <span>Import Song</span>
@@ -397,7 +398,7 @@ export default function Header({
                  if (sfInput) sfInput.click();
                }}
                className="p-1 px-2.5 bg-emerald-950/40 border border-emerald-600/50 hover:border-emerald-400 text-emerald-300 hover:text-white hover:bg-emerald-900/50 rounded font-bold text-[9.5px] uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ml-2"
-               title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, or any format) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
+               title="Feed any SoundFont (.sf2, .sf3, .dls, .sfe, .sfz, .sbk, .gig, .pat, .sfpack) into spressasynth_core -> spressasynth_lib"
              >
                <Disc3 size={11} className="text-emerald-400 animate-pulse" />
                <span>+ SoundFont</span>
@@ -405,6 +406,7 @@ export default function Header({
              <input
                id="header-soundfont-file-input"
                type="file"
+               accept={SOUNDFONT_ACCEPT_ATTR}
                className="hidden"
                onChange={handleHeaderSoundFontUpload}
              />
@@ -413,7 +415,7 @@ export default function Header({
                id="player-tracker-file-file-btn"
                type="file" 
                className="hidden"
-               accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
+               accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.sunvox,.sunsynth,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
                onChange={(e) => {
                  const inputEl = e.target;
                  const file = inputEl.files?.[0];
@@ -438,7 +440,8 @@ export default function Header({
                            result.rawMidiBuffer,
                            result.fileName || file.name,
                            result.rawSidBuffer,
-                           result.sidMetadata
+                           result.sidMetadata,
+                           result.rawSunVoxBuffer
                          );
                          setIsPlaying(true);
                          addRecentSong({

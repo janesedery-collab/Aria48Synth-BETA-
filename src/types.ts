@@ -48,11 +48,12 @@ export interface OscilloscopeConfig {
 }
 
 export interface SoundEnginesConfig {
-  spessaSynth: boolean;     // SpessaSynth (WorkletSynthesizer SF2/SF3 & 16-channel MIDI)
+  spessaSynth: boolean;     // SpessaSynth (WorkletSynthesizer SF2/SF3/DLS/SFe & 16-channel MIDI)
   tinySynth: boolean;       // WebAudio TinySynth (GM FM Synthesis)
   syntheticOsc: boolean;    // Hardware Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3)
   spessaSynthCore: boolean; // spressasynth_core (SoundFont Core, PCM Voice Resolver & MOD/XM/S3M)
   tinyRSid: boolean;        // TinyRSid / WebSID (WASM C64 MOS6581/MOS8580 multi-SID emulator)
+  sunvox: boolean;          // SunVox WASM (Modular tracker engine via jsDelivr CDN for .sunvox)
 }
 
 export type SoundFontInterpolationMode =

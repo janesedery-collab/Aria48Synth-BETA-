@@ -67,6 +67,7 @@ export interface ChiptuneImportResult {
   audioBuffer?: AudioBuffer;
   rawMidiBuffer?: ArrayBuffer;
   rawSidBuffer?: ArrayBuffer;
+  rawSunVoxBuffer?: ArrayBuffer;
   sidMetadata?: SidHeaderMetadata;
   channelSoundFonts?: { [channelId: number]: string };
   sequenceMetadata?: LoadedSequenceMetadata;
@@ -187,7 +188,7 @@ export function parseChiptuneFile(
   } else if (extension === '.spc') {
     result = parseSPC(arrayBuffer, logs);
   } else if (extension === '.sunvox' || extension === '.sunsynth') {
-    result = parseSunVox(arrayBuffer, logs);
+    result = parseSunVox(arrayBuffer, logs, fileName);
   } else if (extension === '.wav' || extension === '.mp3' || extension === '.ogg' || extension === '.flac') {
     result = parseAudioStream(fileName, arrayBuffer, logs);
   } else if (isSoundFontFileName(fileName)) {
@@ -228,7 +229,7 @@ export function parseChiptuneFile(
         log: [...logs, `[SUCCESS] Loaded sequence JSON mapping file.`]
       };
     } catch {
-      throw new Error(`Unsupported file format '${extension}'. Accepts MIDI (.mid/.rmi/.kar/.xmf), MOD, XM, S3M, IT, SID, NSF, GBS, VGM, SPC, FTM, SF2, SF3, WAV, MP3.`);
+      throw new Error(`Unsupported file format '${extension}'. Accepts MIDI (.mid/.rmi/.kar/.xmf), MOD, XM, S3M, IT, SID, SunVox (.sunvox), NSF, GBS, VGM, SPC, FTM, SoundFonts (.sf2/.sf3/.dls/.sfe), WAV, MP3.`);
     }
   }
 
@@ -836,7 +837,8 @@ function parseSPC(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
 /**
  * 11. SUNVOX MODULAR (.sunvox / .sunsynth) PARSER
  */
-function parseSunVox(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
+function parseSunVox(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'project.sunvox'): ChiptuneImportResult {
+  const cleanTitle = fileName.replace(/\.[^/.]+$/, '') || 'SunVox Modular Session';
   const allPats: any[][] = [];
   for (let p = 0; p < 2; p++) {
     const pat = createEmptyPattern(8);
@@ -853,12 +855,13 @@ function parseSunVox(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportRe
   return {
     patterns: allPats[0],
     allPatterns: allPats,
-    bpm: 112,
-    chipType: "Virtual DAC",
-    title: "SunVox Modular Session",
-    duration: "3:24",
+    bpm: 125,
+    chipType: "Virtual DAC (SunVox WASM)",
+    title: cleanTitle,
+    duration: "3:00",
     channelsCount: 8,
-    log: [...logs, `[SUCCESS] SunVox modular DSP graph linked!`]
+    rawSunVoxBuffer: arrayBuffer.slice(0),
+    log: [...logs, `[SUCCESS] SunVox WASM modular project "${cleanTitle}" ready for jsDelivr SunVox engine!`]
   };
 }
 

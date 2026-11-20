@@ -210,12 +210,50 @@ function channelToGSPart(ch: number): number {
 }
 
 const PRIMARY_WORKLET_BANK_ID = 'aria-active-bank';
+export const SPESSASYNTH_PROCESSOR_CDN_URL =
+  'https://cdn.jsdelivr.net/npm/spessasynth_lib@4.4.10/dist/spessasynth_processor.min.js';
+const SPESSASYNTH_PROCESSOR_FALLBACK_CDN_URL =
+  'https://cdn.jsdelivr.net/npm/spessasynth_lib@4.4.9/dist/spessasynth_processor.min.js';
 
-function isRiffSoundBank(buf: ArrayBuffer): boolean {
+function isWorkletSupportedSoundBank(buf: ArrayBuffer, idOrName = ''): boolean {
   if (!buf || buf.byteLength < 12) return false;
   const u8 = new Uint8Array(buf, 0, 12);
-  // RIFF....sfbk or RIFF....DLS 
-  return u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46;
+  // RIFF (SF2, SF3, DLS, SFe RIFF....sfen) or RIFS (64-bit SFe / SF2)
+  const isRiff = u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46;
+  const isRifs = u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x53;
+  if (isRiff || isRifs) return true;
+  const lower = idOrName.toLowerCase();
+  if (lower.endsWith('.sfe') || lower.endsWith('.sf2') || lower.endsWith('.sf3') || lower.endsWith('.dls')) {
+    return true;
+  }
+  try {
+    const parsed = SoundBankLoader.fromArrayBuffer(buf.slice(0));
+    return Boolean(parsed && parsed.presets && parsed.presets.length > 0);
+  } catch {
+    return false;
+  }
+}
+
+async function addWorkletModuleWithCdnFallback(ctx: AudioContext): Promise<void> {
+  const candidates = [SPESSASYNTH_PROCESSOR_CDN_URL, SPESSASYNTH_PROCESSOR_FALLBACK_CDN_URL];
+  for (const url of candidates) {
+    try {
+      const resp = await fetch(url, { mode: 'cors' });
+      if (!resp.ok) continue;
+      const code = await resp.text();
+      if (!code || code.length < 1024) continue;
+      const blobUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+      try {
+        await ctx.audioWorklet.addModule(blobUrl);
+        return;
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+  await ctx.audioWorklet.addModule('/spessasynth_processor.min.js');
 }
 
 class WorkletSynthController {
@@ -442,7 +480,7 @@ class WorkletSynthController {
     this.initPromise = (async () => {
       try {
         if (!this.registeredContexts.has(ctx)) {
-          await ctx.audioWorklet.addModule('/spessasynth_processor.min.js');
+          await addWorkletModuleWithCdnFallback(ctx);
           this.registeredContexts.add(ctx);
         }
 
@@ -756,8 +794,8 @@ class WorkletSynthController {
 
   public async loadSoundBank(arrayBuffer: ArrayBuffer, id: string, makePrimary = true): Promise<boolean> {
     const lower = id.toLowerCase();
-    // Only native RIFF SF2/SF3/DLS soundbanks go to WorkletSynthesizer's single active slot
-    if (!isRiffSoundBank(arrayBuffer)) {
+    // Native SF2, SF3, DLS, and SFe sound banks load directly into WorkletSynthesizer's single active slot
+    if (!isWorkletSupportedSoundBank(arrayBuffer, lower)) {
       if (makePrimary) {
         this.activeBankId = id;
         this.activeBankSupportedByWorklet = false;

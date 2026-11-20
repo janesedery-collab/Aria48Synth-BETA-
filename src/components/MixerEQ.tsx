@@ -13,12 +13,14 @@ import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import {
   TinyRsidBridge,
+  SOUNDFONT_ACCEPT_ATTR,
   deleteSavedSoundFont,
   getDefaultSoundFontId,
   loadSoundFontIntoCoreAndLib,
   onDefaultSoundFontChange,
   setDefaultSoundFontId,
   setMidiChannelMuted,
+  setSunVoxMasterVolume,
   syncChannelMuteSolo
 } from './AudioEngine';
 import { getSavedSoundFontsFromCookies, saveAmplifier, SavedSoundFontCookieEntry } from '../utils/cookieStorage';
@@ -469,6 +471,7 @@ export default function MixerEQ({
           <input 
             type="file" 
             ref={sfUploadInputRef} 
+            accept={SOUNDFONT_ACCEPT_ATTR}
             onChange={handleSoundFontUpload} 
             className="hidden" 
           />
@@ -515,7 +518,7 @@ export default function MixerEQ({
           <button
             onClick={() => sfUploadInputRef.current?.click()}
             className="px-2.5 py-1 bg-zinc-850 hover:bg-zinc-750 text-zinc-200 border border-zinc-700 rounded-lg text-[10px] font-bold flex items-center gap-1 transition cursor-pointer"
-            title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, etc.) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
+            title="Load any SoundBank (.sf2, .sf3, .dls, .sfe, .sfz, .sbk, .gig, .pat) into spressasynth_core -> WorkletSynthesizer"
           >
             <Upload size={11} />
             <span>Load SoundFont</span>
@@ -899,7 +902,12 @@ export default function MixerEQ({
             min="0" 
             max="100" 
             value={masterVol}
-            onChange={(e) => setMasterVol(Number(e.target.value))}
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              setMasterVol(val);
+              setSunVoxMasterVolume(val);
+              WorkletSynthBridge.setMasterVolumeGain((val / 100) * 0.85);
+            }}
             className="w-full h-1.5 bg-zinc-900 rounded accent-cyan-500 cursor-pointer"
           />
         </div>

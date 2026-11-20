@@ -13,6 +13,7 @@ import {
   setDefaultSoundFontId,
   onDefaultSoundFontChange,
   deleteSavedSoundFont,
+  SunVoxBridge,
   TinyRsidBridge,
   syncChannelMuteSolo,
   getAudioContext,
@@ -70,7 +71,8 @@ interface TrackerEditorProps {
     rawMidiBuffer?: ArrayBuffer,
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
-    sidMetadata?: SidHeaderMetadata
+    sidMetadata?: SidHeaderMetadata,
+    rawSunVoxBuffer?: ArrayBuffer
   ) => void;
 }
 
@@ -121,6 +123,8 @@ export default function TrackerEditor({
   const [showMidiMixer, setShowMidiMixer] = useState<boolean>(false);
   const [trackerBpmText, setTrackerBpmText] = useState((bpm || 125).toString());
 
+  const [sunvoxState, setSunvoxState] = useState(() => SunVoxBridge.getState());
+
   useEffect(() => {
     setTrackerBpmText((bpm || 125).toString());
   }, [bpm]);
@@ -146,12 +150,16 @@ export default function TrackerEditor({
     const unsubSid = TinyRsidBridge.subscribe((nextSid) => {
       setSidState(nextSid);
     });
+    const unsubSunVox = SunVoxBridge.subscribe((nextSv) => {
+      setSunvoxState(nextSv);
+    });
     return () => {
       unsubSf();
       unsubEngines();
       unsubInterp();
       unsubDefSf();
       unsubSid();
+      unsubSunVox();
     };
   }, []);
 
@@ -167,7 +175,8 @@ export default function TrackerEditor({
       tinySynth: true,
       syntheticOsc: true,
       spessaSynthCore: true,
-      tinyRSid: true
+      tinyRSid: true,
+      sunvox: true
     });
   };
 
@@ -176,7 +185,8 @@ export default function TrackerEditor({
     enginesConfig.tinySynth,
     enginesConfig.syntheticOsc,
     enginesConfig.spessaSynthCore,
-    enginesConfig.tinyRSid
+    enginesConfig.tinyRSid,
+    enginesConfig.sunvox
   ].filter(Boolean).length;
 
   const handleTogglePatternChannelMute = (chId: number) => {
@@ -308,7 +318,8 @@ export default function TrackerEditor({
               result.rawMidiBuffer,
               result.fileName || selected.name,
               result.rawSidBuffer,
-              result.sidMetadata
+              result.sidMetadata,
+              result.rawSunVoxBuffer
             );
           }
           addRecentSong({
@@ -729,7 +740,7 @@ export default function TrackerEditor({
             id="tracker-add-soundfont-btn"
             onClick={() => sfDirectInputRef.current?.click()}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-950/50 text-emerald-300 border border-emerald-600/50 hover:bg-emerald-900/60 rounded-lg text-[10.5px] font-bold uppercase transition tracking-wider cursor-pointer shadow-sm"
-            title="Feed any SoundFont (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat, .sfpack, or any format) into spressasynth_core-master.zip -> spressasynth_lib-master.zip"
+            title="Load any SoundBank (.sf2, .sf3, .dls, .sfe, .sfz, .sbk, .gig, .pat, .sfpack) into spressasynth_core -> spressasynth_lib"
           >
             <Disc3 size={12} className="text-emerald-400 animate-pulse" />
             <span>+ SoundFont</span>
@@ -769,6 +780,7 @@ export default function TrackerEditor({
           <input
             type="file"
             ref={sfDirectInputRef}
+            accept={SOUNDFONT_ACCEPT_ATTR}
             className="hidden"
             onChange={handleDirectSoundFontUpload}
           />
@@ -861,6 +873,37 @@ export default function TrackerEditor({
             <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.tinyRSid ? 'bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.9)]' : 'bg-zinc-600'}`} />
             <span>TinyRSid (SID)</span>
           </button>
+
+          {/* SunVox Modular WASM Engine */}
+          <button
+            id="engine-toggle-sunvox"
+            onClick={() => handleToggleEngine('sunvox')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.sunvox
+                ? 'bg-violet-950/75 border-violet-500/70 text-violet-300 shadow-[0_0_8px_rgba(139,92,246,0.28)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={enginesConfig.sunvox ? 'SunVox WASM Modular Engine (.sunvox via jsDelivr CDN): ACTIVE. Click to mute.' : 'SunVox WASM: MUTED. Click to enable.'}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.sunvox ? 'bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.9)]' : 'bg-zinc-600'}`} />
+            <span>SunVox (WASM)</span>
+          </button>
+
+          {sunvoxState.hasSunVoxLoaded && (
+            <div
+              id="sunvox-status-badge"
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-violet-950/60 border border-violet-600/50 text-[9px] font-mono text-violet-200"
+              title={`SunVox WASM Project: ${sunvoxState.songName} (${sunvoxState.moduleCount} modules, ${sunvoxState.totalLines} lines)`}
+            >
+              <span className="font-bold text-violet-300 truncate max-w-[140px]">{sunvoxState.songName}</span>
+              <span className="text-zinc-500">·</span>
+              <span>{sunvoxState.bpm} BPM</span>
+              <span className="text-zinc-500">·</span>
+              <span>Line {sunvoxState.currentLine}/{sunvoxState.totalLines}</span>
+              <span className="text-zinc-500">·</span>
+              <span>{sunvoxState.moduleCount} Mods</span>
+            </div>
+          )}
 
           {/* INLINE TINYRSSID CONTROLS WHENEVER A .SID FILE IS LOADED OR TINYRSSID IS ACTIVE */}
           {(sidState.hasSidLoaded || enginesConfig.tinyRSid) && (
@@ -979,7 +1022,7 @@ export default function TrackerEditor({
           </button>
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-500 font-sans">
-            <strong className="text-zinc-300">{activeEnginesCount}</strong>/5 Active
+            <strong className="text-zinc-300">{activeEnginesCount}</strong>/6 Active
           </span>
         </div>
       </div>
@@ -1468,7 +1511,7 @@ export default function TrackerEditor({
                   type="file"
                   ref={fileInputRef2}
                   onChange={handleFileImport}
-                  accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                  accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                   className="hidden"
                 />
                 <Disc3 size={28} className="text-cyan-400 animate-spin-slow" />
@@ -1476,7 +1519,7 @@ export default function TrackerEditor({
                   Choose Music or SoundFont File
                 </span>
                 <span className="text-[9px] text-zinc-500 font-sans max-w-sm leading-normal">
-                  Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .dls, .sfz, .sbk, .gig, .pat), WAV, MP3, and JSON.
+                  Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), SunVox (.sunvox), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .dls, .sfe, .sfz, .sbk, .gig, .pat), WAV, MP3, and JSON.
                 </span>
               </div>
 

@@ -4,6 +4,7 @@ import { Channel, SoundEnginesConfig } from '../types';
 import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { TinyRsidBridge, TINYRSID_ENGINE_ID } from '../engines/tinyRsidBridge';
+import { SunVoxBridge, SUNVOX_ENGINE_ID } from '../engines/sunvoxBridge';
 import { onInterpolationModeChange } from '../engines/soundFontInterpolation';
 import { BasicMIDI } from 'spessasynth_core';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
@@ -22,6 +23,7 @@ import {
 export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
 export { WorkletSynthBridge };
 export { TinyRsidBridge, TINYRSID_ENGINE_ID };
+export { SunVoxBridge, SUNVOX_ENGINE_ID };
 export {
   SpessaSynthCore,
   SPRESSASYNTH_CORE_ENGINE_ID,
@@ -336,6 +338,7 @@ export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
   syntheticOsc: true,
   spessaSynthCore: true,
   tinyRSid: true,
+  sunvox: true,
 };
 
 let activeEnginesConfig: SoundEnginesConfig = (() => {
@@ -349,6 +352,7 @@ let activeEnginesConfig: SoundEnginesConfig = (() => {
         syntheticOsc: typeof parsed.syntheticOsc === 'boolean' ? parsed.syntheticOsc : DEFAULT_SOUND_ENGINES.syntheticOsc,
         spessaSynthCore: typeof parsed.spessaSynthCore === 'boolean' ? parsed.spessaSynthCore : DEFAULT_SOUND_ENGINES.spessaSynthCore,
         tinyRSid: typeof parsed.tinyRSid === 'boolean' ? parsed.tinyRSid : DEFAULT_SOUND_ENGINES.tinyRSid,
+        sunvox: typeof parsed.sunvox === 'boolean' ? parsed.sunvox : DEFAULT_SOUND_ENGINES.sunvox,
       };
     }
   } catch (e) {}
@@ -357,6 +361,7 @@ let activeEnginesConfig: SoundEnginesConfig = (() => {
 
 if (typeof window !== 'undefined') {
   TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
+  SunVoxBridge.setEngineEnabled(activeEnginesConfig.sunvox);
 }
 
 const engineChangeListeners: ((config: SoundEnginesConfig) => void)[] = [];
@@ -372,6 +377,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
     syntheticOsc: config.syntheticOsc ?? activeEnginesConfig.syntheticOsc,
     spessaSynthCore: config.spessaSynthCore ?? activeEnginesConfig.spessaSynthCore,
     tinyRSid: config.tinyRSid ?? activeEnginesConfig.tinyRSid,
+    sunvox: config.sunvox ?? activeEnginesConfig.sunvox,
   };
   
   if (tinySynthMasterGain && audioCtx) {
@@ -386,6 +392,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
   }
   WorkletSynthBridge.setMasterVolumeGain(activeEnginesConfig.spessaSynth ? 0.85 : 0);
   TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
+  SunVoxBridge.setEngineEnabled(activeEnginesConfig.sunvox);
 
   if (!activeEnginesConfig.syntheticOsc) {
     activeSyntheticVoices.forEach(v => { try { v.stop(); } catch(e) {} });
@@ -1009,6 +1016,7 @@ export function playMidiBuffer(
   fileName?: string
 ) {
   try {
+    SunVoxBridge.stop();
     TinyRsidBridge.stop();
     stopMidiPlayback();
     stopDirectAudio();
@@ -1441,6 +1449,7 @@ export function stopAllChannelsSound() {
   stopDirectAudio();
   stopMidiPlayback();
   TinyRsidBridge.pause();
+  SunVoxBridge.pause();
   cancelAllScheduledNotesAndSilence();
 }
 
@@ -1458,6 +1467,7 @@ export async function playSidBuffer(
   }
 ): Promise<boolean> {
   try {
+    SunVoxBridge.stop();
     stopDirectAudio();
     stopMidiPlayback();
     cancelAllScheduledNotesAndSilence();
@@ -1497,6 +1507,49 @@ export function getSidPlaybackProgress() {
 }
 
 /**
+ * SunVox WASM Modular Music Engine Playback Controls
+ */
+export async function playSunVoxBuffer(
+  arrayBuffer: ArrayBuffer,
+  fileName: string,
+  options?: {
+    seekRatio?: number;
+    onSongEnded?: () => void;
+  }
+): Promise<boolean> {
+  try {
+    TinyRsidBridge.stop();
+    stopDirectAudio();
+    stopMidiPlayback();
+    cancelAllScheduledNotesAndSilence();
+    return await SunVoxBridge.playSunVox(arrayBuffer, fileName, options);
+  } catch (err) {
+    console.warn('SunVox playback error:', err);
+    return false;
+  }
+}
+
+export function pauseSunVoxPlayback() {
+  SunVoxBridge.pause();
+}
+
+export function stopSunVoxPlayback() {
+  SunVoxBridge.stop();
+}
+
+export function seekSunVoxPlayback(targetSeconds: number) {
+  SunVoxBridge.seekSeconds(targetSeconds);
+}
+
+export function setSunVoxMasterVolume(volumePct: number) {
+  SunVoxBridge.setMasterVolume(volumePct);
+}
+
+export function getSunVoxPlaybackProgress() {
+  return SunVoxBridge.getProgress();
+}
+
+/**
  * Play decoded direct audio stream (WAV, MP3, OGG)
  * Routes through native Web Audio master gain and feeds the 16-channel WebScope visualizer
  */
@@ -1506,6 +1559,7 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
+    SunVoxBridge.stop();
     TinyRsidBridge.stop();
     stopDirectAudio();
 
