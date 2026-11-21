@@ -15,7 +15,9 @@ import {
   signOut, 
   onAuthStateChanged, 
   db, 
-  User 
+  User,
+  handleFirestoreError,
+  OperationType
 } from '../lib/firebase';
 import { Channel } from '../types';
 
@@ -83,6 +85,7 @@ export async function saveSongToCloud(
   }
 
   const songId = `song_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const path = `users/${user.uid}/cloud_songs/${songId}`;
   const songsCol = collection(db, 'users', user.uid, 'cloud_songs');
   const songDocRef = doc(songsCol, songId);
 
@@ -103,7 +106,7 @@ export async function saveSongToCloud(
     authorName: user.displayName || user.email || "Aria48 Producer",
     title: title.trim() || `Untitled Song ${new Date().toLocaleDateString()}`,
     chipType: chipType || 'General MIDI (SoundFont)',
-    bpm: Math.max(30, Math.min(320, bpm)),
+    bpm: Math.round(Math.max(30, Math.min(320, bpm))),
     duration: songDuration,
     channelsCount: activeChannels,
     patterns: patterns,
@@ -114,7 +117,11 @@ export async function saveSongToCloud(
     updatedAt: serverTimestamp()
   };
 
-  await setDoc(songDocRef, songData);
+  try {
+    await setDoc(songDocRef, songData);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
 
   return {
     ...songData,
@@ -129,6 +136,7 @@ export async function getUserCloudSongs(): Promise<CloudSong[]> {
   const user = getCurrentUser();
   if (!user) return [];
 
+  const path = `users/${user.uid}/cloud_songs`;
   try {
     const songsCol = collection(db, 'users', user.uid, 'cloud_songs');
     const q = query(songsCol);
@@ -159,8 +167,7 @@ export async function getUserCloudSongs(): Promise<CloudSong[]> {
     songs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return songs;
   } catch (err: any) {
-    console.error("Error fetching cloud songs:", err);
-    return [];
+    handleFirestoreError(err, OperationType.LIST, path);
   }
 }
 
@@ -171,6 +178,11 @@ export async function deleteUserCloudSong(songId: string): Promise<void> {
   const user = getCurrentUser();
   if (!user) throw new Error("Must be signed in to delete songs.");
 
+  const path = `users/${user.uid}/cloud_songs/${songId}`;
   const songDocRef = doc(db, 'users', user.uid, 'cloud_songs', songId);
-  await deleteDoc(songDocRef);
+  try {
+    await deleteDoc(songDocRef);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
 }

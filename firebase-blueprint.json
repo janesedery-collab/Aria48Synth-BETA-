@@ -7,15 +7,20 @@
       "properties": {
         "userId": {
           "type": "string",
-          "description": "User ID of the author."
+          "description": "User ID of the author.",
+          "maxLength": 128
         },
         "username": {
           "type": "string",
-          "description": "User profile name of the author."
+          "description": "User profile name of the author.",
+          "minLength": 2,
+          "maxLength": 40
         },
         "text": {
           "type": "string",
-          "description": "Body content of the text message."
+          "description": "Body content of the text message.",
+          "minLength": 1,
+          "maxLength": 1000
         },
         "createdAt": {
           "type": "string",
@@ -29,7 +34,8 @@
         },
         "trackId": {
           "type": "string",
-          "description": "Reference to shared chiptune track document."
+          "description": "Reference to shared chiptune track document.",
+          "maxLength": 128
         }
       },
       "required": ["userId", "username", "text", "createdAt", "type"]
@@ -41,15 +47,20 @@
       "properties": {
         "title": {
           "type": "string",
-          "description": "The name of the custom chiptune creation."
+          "description": "The name of the custom chiptune creation.",
+          "minLength": 2,
+          "maxLength": 100
         },
         "authorId": {
           "type": "string",
-          "description": "User ID of the creator."
+          "description": "User ID of the creator.",
+          "maxLength": 128
         },
         "authorName": {
           "type": "string",
-          "description": "Display name of the creator."
+          "description": "Display name of the creator.",
+          "minLength": 2,
+          "maxLength": 40
         },
         "bpm": {
           "type": "integer",
@@ -57,15 +68,18 @@
         },
         "chipType": {
           "type": "string",
-          "description": "Primary visual synthesizer chip used."
+          "description": "Primary visual synthesizer chip used.",
+          "maxLength": 50
         },
         "tracksJson": {
           "type": "string",
-          "description": "JSON representation of track channels, parameters, and patterns."
+          "description": "JSON representation of track channels, parameters, and patterns.",
+          "maxLength": 200000
         },
         "description": {
           "type": "string",
-          "description": "User-supplied text notes about the track."
+          "description": "User-supplied text notes about the track.",
+          "maxLength": 1000
         },
         "likes": {
           "type": "integer",
@@ -78,6 +92,177 @@
         }
       },
       "required": ["title", "authorId", "authorName", "bpm", "chipType", "tracksJson", "likes", "createdAt"]
+    },
+    "CloudSong": {
+      "title": "Cloud Song",
+      "description": "A user's private saved Aria48 tracker composition stored in Cloud Firestore.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document identifier of the saved cloud song.",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the song owner.",
+          "maxLength": 128
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Display name or email of the song owner.",
+          "maxLength": 120
+        },
+        "title": {
+          "type": "string",
+          "description": "Song title.",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "chipType": {
+          "type": "string",
+          "description": "Active chip engine descriptor.",
+          "maxLength": 100
+        },
+        "bpm": {
+          "type": "integer",
+          "description": "Song tempo in BPM."
+        },
+        "duration": {
+          "type": "string",
+          "description": "Formatted track duration string.",
+          "maxLength": 32
+        },
+        "channelsCount": {
+          "type": "integer",
+          "description": "Count of active channels."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": ["id", "userId", "authorName", "title", "chipType", "bpm", "duration", "channelsCount", "createdAt"]
+    },
+    "CommunityQuestion": {
+      "title": "Community Question",
+      "description": "A technical or musical Q&A thread submitted in the Chiptune Revolutions (CR) community hub.",
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string",
+          "description": "Question headline / subject.",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "details": {
+          "type": "string",
+          "description": "Full question description or troubleshooting notes.",
+          "minLength": 3,
+          "maxLength": 4000
+        },
+        "category": {
+          "type": "string",
+          "enum": ["MIDI", "Amiga .MOD", "Oscilloscope", "General"],
+          "description": "Topic category tag."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Open", "Resolved"],
+          "description": "Resolution status of the question."
+        },
+        "authorId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the question author.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Google display name of the author.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "authorPhoto": {
+          "type": "string",
+          "description": "Google profile photo URL of the author.",
+          "maxLength": 1024
+        },
+        "authorEmail": {
+          "type": "string",
+          "description": "Google account email of the author.",
+          "maxLength": 256
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the question was posted."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest update or status toggle."
+        }
+      },
+      "required": [
+        "subject",
+        "details",
+        "category",
+        "status",
+        "authorId",
+        "authorName",
+        "authorPhoto",
+        "authorEmail",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CommunityReply": {
+      "title": "Community Reply",
+      "description": "A real-time reply posted under a Chiptune Revolutions (CR) community question.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string",
+          "description": "Reply text content.",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "authorId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the reply author.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Google display name of the reply author.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "authorPhoto": {
+          "type": "string",
+          "description": "Google profile photo URL of the reply author.",
+          "maxLength": 1024
+        },
+        "authorEmail": {
+          "type": "string",
+          "description": "Google account email of the reply author.",
+          "maxLength": 256
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the reply was posted."
+        }
+      },
+      "required": ["body", "authorId", "authorName", "authorPhoto", "authorEmail", "createdAt"]
     }
   },
   "firestore": {
@@ -88,6 +273,18 @@
     "/tracks/{trackId}": {
       "schema": "ChiptuneTrack",
       "description": "Public catalog of tracks uploaded by the community."
+    },
+    "/users/{userId}/cloud_songs/{songId}": {
+      "schema": "CloudSong",
+      "description": "Private cloud song storage belonging to a signed-in user."
+    },
+    "/cr_questions/{questionId}": {
+      "schema": "CommunityQuestion",
+      "description": "Chiptune Revolutions (CR) real-time Q&A feed."
+    },
+    "/cr_questions/{questionId}/replies/{replyId}": {
+      "schema": "CommunityReply",
+      "description": "Live replies nested under each CR community question."
     }
   }
 }

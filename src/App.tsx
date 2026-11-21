@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Play, Square, Settings, Cpu, AlertTriangle, 
   Download, Upload, Music, Radio, Monitor, Cable, Activity,
-  Save, FileAudio, Car, Share2
+  Save, FileAudio, Car, Share2, Users
 } from 'lucide-react';
 
 import { Channel, MAX_CHANNELS, OscilloscopeConfig } from './types';
@@ -14,6 +14,7 @@ import ChipConfigurator from './components/ChipConfigurator';
 import MixerEQ from './components/MixerEQ';
 import FileConverterUI from './components/FileConverterUI';
 import HardwareConnectionScript from './components/HardwareConnectionScript';
+import ChiptuneRevolutionsHub from './components/ChiptuneRevolutionsHub';
 import ShareApkModal from './components/ShareApkModal';
 import { 
   playNote, 
@@ -927,6 +928,14 @@ export default function App() {
               label="Hardware" 
               glow={hardwareConnected}
             />
+            <NavBtn 
+              icon={<Users />} 
+              tab="community" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="CR Hub" 
+              disabled={driveMode}
+            />
           </div>
 
           {/* DEDICATED BOTTOM LEFT CORNER SHARE / ANDROID APK SECTION */}
@@ -1050,6 +1059,9 @@ export default function App() {
                   hardwareConnected={hardwareConnected} 
                   setHardwareConnected={setHardwareConnected} 
                 />
+              )}
+              {activeTab === 'community' && (
+                <ChiptuneRevolutionsHub />
               )}
             </>
           )}

@@ -7,13 +7,13 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Helper functions
+    // Hardened Authentication & Validation Helpers
     function isSignedIn() {
-      return true;
+      return request.auth != null && request.auth.token.email_verified == true;
     }
 
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     function incoming() {
@@ -26,21 +26,26 @@ service cloud.firestore {
 
     // Chat Messages validation
     function isValidMessage(msg) {
-      return msg.userId is string 
-        && msg.username is string 
-        && msg.username.size() >= 2 
+      return msg.userId is string
+        && msg.userId.size() > 0
+        && msg.userId.size() <= 128
+        && msg.userId == request.auth.uid
+        && msg.username is string
+        && msg.username.size() >= 2
         && msg.username.size() <= 40
-        && msg.text is string 
-        && msg.text.size() > 0 
+        && msg.text is string
+        && msg.text.size() > 0
         && msg.text.size() <= 1000
         && msg.type is string
         && (msg.type == 'text' || msg.type == 'track_share')
-        && (!('trackId' in msg) || msg.trackId is string);
+        && (!('trackId' in msg) || (msg.trackId is string && msg.trackId.size() <= 128));
     }
 
     // Tracks validation
     function isValidTrack(track) {
       return track.authorId is string
+        && track.authorId.size() > 0
+        && track.authorId.size() <= 128
         && track.authorName is string
         && track.authorName.size() >= 2
         && track.authorName.size() <= 40
@@ -59,40 +64,196 @@ service cloud.firestore {
         && track.likes >= 0;
     }
 
+    // Cloud Songs validation
+    function isValidCloudSong(song, ownerUid) {
+      return song.id is string
+        && song.id.size() > 0
+        && song.id.size() <= 128
+        && song.userId is string
+        && song.userId == ownerUid
+        && song.authorName is string
+        && song.authorName.size() > 0
+        && song.authorName.size() <= 120
+        && song.title is string
+        && song.title.size() > 0
+        && song.title.size() <= 160
+        && song.chipType is string
+        && song.chipType.size() <= 100
+        && song.bpm is int
+        && song.bpm >= 30
+        && song.bpm <= 320
+        && song.duration is string
+        && song.duration.size() <= 32
+        && song.channelsCount is int
+        && song.channelsCount >= 1
+        && song.channelsCount <= 64
+        && song.patterns is list;
+    }
+
+    // Chiptune Revolutions (CR) Community Question validation
+    function isValidCommunityQuestion(q) {
+      return q.subject is string
+        && q.subject.size() >= 3
+        && q.subject.size() <= 160
+        && q.details is string
+        && q.details.size() >= 3
+        && q.details.size() <= 4000
+        && q.category is string
+        && q.category in ['MIDI', 'Amiga .MOD', 'Oscilloscope', 'General']
+        && q.status is string
+        && q.status in ['Open', 'Resolved']
+        && q.authorId is string
+        && q.authorId.size() > 0
+        && q.authorId.size() <= 128
+        && q.authorName is string
+        && q.authorName.size() > 0
+        && q.authorName.size() <= 100
+        && q.authorPhoto is string
+        && q.authorPhoto.size() <= 1024
+        && q.authorEmail is string
+        && q.authorEmail.size() <= 256
+        && q.createdAt is timestamp
+        && q.updatedAt is timestamp;
+    }
+
+    // Chiptune Revolutions (CR) Community Reply validation
+    function isValidCommunityReply(reply) {
+      return reply.body is string
+        && reply.body.size() >= 1
+        && reply.body.size() <= 2000
+        && reply.authorId is string
+        && reply.authorId.size() > 0
+        && reply.authorId.size() <= 128
+        && reply.authorName is string
+        && reply.authorName.size() > 0
+        && reply.authorName.size() <= 100
+        && reply.authorPhoto is string
+        && reply.authorPhoto.size() <= 1024
+        && reply.authorEmail is string
+        && reply.authorEmail.size() <= 256
+        && reply.createdAt is timestamp;
+    }
+
     // Messages Rules
     match /messages/{messageId} {
-      allow read: if true;
-      allow create: if isSignedIn() 
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
         && isValidId(messageId)
+        && incoming().keys().hasAll(['userId', 'username', 'text', 'type', 'createdAt'])
+        && incoming().keys().hasOnly(['userId', 'username', 'text', 'type', 'trackId', 'createdAt'])
         && isValidMessage(incoming())
         && incoming().createdAt == request.time;
-      allow delete: if false;
+      allow update, delete: if false;
     }
 
     // Tracks Rules
     match /tracks/{trackId} {
-      allow read: if true;
+      allow read: if isSignedIn();
       allow create: if isSignedIn()
         && isValidId(trackId)
+        && incoming().keys().hasAll(['title', 'authorId', 'authorName', 'bpm', 'chipType', 'tracksJson', 'likes', 'createdAt'])
+        && incoming().keys().hasOnly(['title', 'authorId', 'authorName', 'bpm', 'chipType', 'tracksJson', 'description', 'likes', 'createdAt'])
         && isValidTrack(incoming())
+        && incoming().authorId == request.auth.uid
+        && incoming().likes == 0
         && incoming().createdAt == request.time;
       allow update: if isSignedIn()
+        && isValidId(trackId)
         && isValidTrack(incoming())
         && incoming().createdAt == existing().createdAt
         && incoming().authorId == existing().authorId
         && (
-          // Action 1: Owner editing metadata
-          (incoming().authorId == existing().authorId && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'bpm', 'chipType', 'tracksJson']))
+          (existing().authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'bpm', 'chipType', 'tracksJson']))
           ||
-          // Action 2: Anyone liking/upvoting (only upvote count increments by 1)
           (incoming().diff(existing()).affectedKeys().hasOnly(['likes']) && incoming().likes == existing().likes + 1)
         );
-      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(trackId) && existing().authorId == request.auth.uid;
     }
 
     // User Private Cloud Songs
     match /users/{userId}/cloud_songs/{songId} {
-      allow read, write, delete: if isSignedIn() && request.auth.uid == userId;
+      allow get, list: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn()
+        && request.auth.uid == userId
+        && isValidId(songId)
+        && isValidCloudSong(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && request.auth.uid == userId
+        && isValidId(songId)
+        && isValidCloudSong(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().userId == existing().userId
+        && incoming().updatedAt == request.time;
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(songId);
+    }
+
+    // Chiptune Revolutions (CR) Questions Engine
+    match /cr_questions/{questionId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn()
+        && isValidId(questionId)
+        && incoming().keys().hasAll([
+          'subject', 'details', 'category', 'status',
+          'authorId', 'authorName', 'authorPhoto', 'authorEmail',
+          'createdAt', 'updatedAt'
+        ])
+        && incoming().keys().hasOnly([
+          'subject', 'details', 'category', 'status',
+          'authorId', 'authorName', 'authorPhoto', 'authorEmail',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidCommunityQuestion(incoming())
+        && incoming().status == 'Open'
+        && incoming().authorId == request.auth.uid
+        && incoming().authorEmail == (request.auth.token.email != null ? request.auth.token.email : '')
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(questionId)
+        && isValidCommunityQuestion(incoming())
+        && incoming().authorId == existing().authorId
+        && incoming().authorName == existing().authorName
+        && incoming().authorPhoto == existing().authorPhoto
+        && incoming().authorEmail == existing().authorEmail
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Author editing question fields or status
+          (existing().authorId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'details', 'category', 'status', 'updatedAt']))
+          ||
+          // Action 2: Any signed-in member toggling Open <-> Resolved status
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+        );
+      allow delete: if isSignedIn()
+        && isValidId(questionId)
+        && existing().authorId == request.auth.uid;
+
+      // Live Replies Subcollection
+      match /replies/{replyId} {
+        allow get, list: if isSignedIn();
+        allow create: if isSignedIn()
+          && isValidId(questionId)
+          && isValidId(replyId)
+          && incoming().keys().hasAll([
+            'body', 'authorId', 'authorName', 'authorPhoto', 'authorEmail', 'createdAt'
+          ])
+          && incoming().keys().hasOnly([
+            'body', 'authorId', 'authorName', 'authorPhoto', 'authorEmail', 'createdAt'
+          ])
+          && isValidCommunityReply(incoming())
+          && incoming().authorId == request.auth.uid
+          && incoming().authorEmail == (request.auth.token.email != null ? request.auth.token.email : '')
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/cr_questions/$(questionId));
+        allow update: if false;
+        allow delete: if isSignedIn()
+          && isValidId(questionId)
+          && isValidId(replyId)
+          && existing().authorId == request.auth.uid;
+      }
     }
   }
 }

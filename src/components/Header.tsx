@@ -14,6 +14,7 @@ import { loadSoundFontIntoCoreAndLib, SOUNDFONT_ACCEPT_ATTR, unlockAudioContextS
 import { onAuthUserChanged, User } from '../utils/cloudSongsService';
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { SidHeaderMetadata } from '../utils/hvscManager';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
   isPlaying: boolean;
@@ -557,6 +558,8 @@ export default function Header({
 
         {/* CONTROLS */}
         <div className="flex items-center gap-2">
+          <PWAInstallButton />
+
           {/* GOOGLE SIGN IN & CLOUD LIBRARY */}
           <button
             id="cloud-songs-header-btn"

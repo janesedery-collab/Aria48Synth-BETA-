@@ -887,12 +887,12 @@ function parseSunVox(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'proje
     patterns: allPats[0],
     allPatterns: allPats,
     bpm: 125,
-    chipType: "Virtual DAC (SunVox WASM)",
+    chipType: "Virtual DAC (SunVox 2.1.4 WASM)",
     title: cleanTitle,
     duration: "3:00",
     channelsCount: 8,
     rawSunVoxBuffer: arrayBuffer.slice(0),
-    log: [...logs, `[SUCCESS] SunVox WASM modular project "${cleanTitle}" ready for jsDelivr SunVox engine!`]
+    log: [...logs, `[SUCCESS] SunVox modular project "${cleanTitle}" ready for SunVox 2.1.4 WASM engine!`]
   };
 }
 

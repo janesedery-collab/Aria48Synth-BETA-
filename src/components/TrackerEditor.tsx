@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Repeat, PlayCircle, Cpu, Activity, Star, Trash2, Check, Sliders } from 'lucide-react';
+import { Monitor, Music2, Edit3, HelpCircle, Volume2, Upload, Download, CheckCircle2, AlertCircle, Layers, Disc3, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Repeat, PlayCircle, Cpu, Activity, Star, Trash2, Check, Sliders, Zap } from 'lucide-react';
 import { Channel, SoundFontInstrument, SoundEnginesConfig, SoundFontInterpolationMode } from '../types';
 import {
   playNote,
@@ -877,10 +877,10 @@ export default function TrackerEditor({
                 ? 'bg-violet-950/75 border-violet-500/70 text-violet-300 shadow-[0_0_8px_rgba(139,92,246,0.28)]'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
             }`}
-            title={enginesConfig.sunvox ? 'SunVox WASM Modular Engine (.sunvox via jsDelivr CDN): ACTIVE. Click to mute.' : 'SunVox WASM: MUTED. Click to enable.'}
+            title={enginesConfig.sunvox ? `SunVox v${sunvoxState.engineVersion || '2.1.4'} WASM Modular Engine (.sunvox / .sunsynth): ACTIVE. Click to mute.` : 'SunVox WASM: MUTED. Click to enable.'}
           >
             <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.sunvox ? 'bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.9)]' : 'bg-zinc-600'}`} />
-            <span>SunVox (WASM)</span>
+            <span>SunVox {sunvoxState.engineVersion || '2.1.4'}</span>
           </button>
 
           {(sunvoxState.hasSunVoxLoaded || sunvoxState.isLoading || sunvoxState.error) && (
@@ -891,12 +891,12 @@ export default function TrackerEditor({
                   ? 'bg-red-950/70 border-red-600/60 text-red-200'
                   : 'bg-violet-950/60 border-violet-600/50 text-violet-200'
               }`}
-              title={sunvoxState.error || `SunVox WASM Project: ${sunvoxState.songName} (${sunvoxState.moduleCount} modules, ${sunvoxState.totalLines} lines)`}
+              title={sunvoxState.error || `SunVox v${sunvoxState.engineVersion} Project: ${sunvoxState.songName} (${sunvoxState.moduleCount} modules, ${sunvoxState.patternCount} patterns, ${sunvoxState.totalLines} lines)`}
             >
               {sunvoxState.error ? (
                 <span className="truncate max-w-[240px]">SunVox Err: {sunvoxState.error}</span>
               ) : sunvoxState.isLoading ? (
-                <span>Initializing SunVox WASM...</span>
+                <span>Initializing SunVox {sunvoxState.engineVersion} WASM...</span>
               ) : (
                 <>
                   <span className="font-bold text-violet-300 truncate max-w-[140px]">{sunvoxState.songName}</span>
@@ -1032,6 +1032,61 @@ export default function TrackerEditor({
           </span>
         </div>
       </div>
+
+      {/* LIVE SUNVOX EFFECTS USAGE & DYNAMIC BRIGHTNESS MATRIX */}
+      {sunvoxState.hasSunVoxLoaded && sunvoxState.effectsActivity.length > 0 && (
+        <div
+          id="sunvox-effects-brightness-rack"
+          className="mb-2 px-3 py-2 bg-zinc-950/90 border border-violet-500/30 rounded-lg text-xs"
+        >
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-violet-300">
+              <Zap size={12} className="text-violet-400" />
+              <span>Active SunVox DSP &amp; Pattern Effects ({sunvoxState.effectsActivity.length})</span>
+            </div>
+            <span className="text-[9px] font-mono text-zinc-500">
+              Brightness intensifies with usage &amp; live signal load
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {sunvoxState.effectsActivity.slice(0, 24).map((fx) => {
+              const b = Math.max(0.18, Math.min(1, fx.brightness));
+              const isPattern = fx.category === 'pattern';
+              const hueRgb = isPattern ? '56, 189, 248' : '167, 139, 250';
+              const pct = Math.round(b * 100);
+              return (
+                <div
+                  key={fx.id}
+                  data-fx-id={fx.id}
+                  title={`${fx.name} (${fx.type}) · Usage: ${fx.hitCount || fx.staticUses} · Brightness: ${pct}%`}
+                  className="px-2 py-1 rounded border text-[9.5px] font-mono transition-all duration-150 flex items-center gap-1.5"
+                  style={{
+                    backgroundColor: `rgba(${hueRgb}, ${(0.06 + b * 0.28).toFixed(3)})`,
+                    borderColor: `rgba(${hueRgb}, ${(0.22 + b * 0.72).toFixed(3)})`,
+                    boxShadow: b > 0.32 ? `0 0 ${Math.round(b * 14)}px rgba(${hueRgb}, ${(b * 0.45).toFixed(3)})` : 'none',
+                    color: `rgba(255, 255, 255, ${(0.52 + b * 0.48).toFixed(3)})`,
+                  }}
+                >
+                  <span
+                    className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                    style={{
+                      backgroundColor: `rgba(${hueRgb}, ${Math.min(1, 0.35 + b * 0.65).toFixed(3)})`,
+                      boxShadow: `0 0 ${Math.round(3 + b * 7)}px rgba(${hueRgb}, ${b.toFixed(3)})`,
+                    }}
+                  />
+                  <span className="font-bold truncate max-w-[115px]">{fx.name}</span>
+                  <span className="text-[8px] opacity-75">{fx.type}</span>
+                  {(fx.hitCount > 0 || fx.staticUses > 1) && (
+                    <span className="text-[8px] px-1 rounded bg-black/40 text-zinc-200 tabular-nums">
+                      {fx.hitCount > 0 ? `${fx.hitCount}x` : `${fx.staticUses}x`}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* SOUNDFONT INTERPOLATION MODES CONFIGURATOR */}
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-zinc-950/85 border border-zinc-850 rounded-lg text-xs">
