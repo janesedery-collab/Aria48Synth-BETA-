@@ -39,6 +39,7 @@ import {
   syncChannelMuteSolo,
   stopAllChannelsSound,
   getAudioContext,
+  unlockAudioContextSync,
   setAudioPlaybackRate,
   setMidiTempoBpm,
   syncInitialMidiInstruments,
@@ -52,7 +53,7 @@ import { getSavedSelectedSoundFont } from './utils/recentSongsManager';
 import { getSavedAmplifier, saveAmplifier, getSavedOscConfig, saveOscConfig } from './utils/cookieStorage';
 import { VideoRecorder } from './utils/videoRecorder';
 import { WorkletSynthBridge } from './engines/workletSynthBridge';
-import { formatDuration, parseChiptuneFile } from './utils/chiptuneParsers';
+import { formatDuration, parseChiptuneFileAsync } from './utils/chiptuneParsers';
 import { SidHeaderMetadata } from './utils/hvscManager';
 
 function parseDurationStringSec(dur?: string | null): number | null {
@@ -322,6 +323,11 @@ export default function App() {
     return () => unsubSv();
   }, []);
 
+  // Sync channel mute/solo/enable state post-render (avoids cross-component setState during render)
+  useEffect(() => {
+    syncChannelMuteSolo(channels);
+  }, [channels]);
+
   // Sync real tracker state + offline snapshot buffers into internal VideoRecorder
   useEffect(() => {
     VideoRecorder.setLiveTrackerState({
@@ -589,6 +595,8 @@ export default function App() {
     setLoadedSunVoxBuffer(rawSunVoxBuffer || null);
 
     if (rawSunVoxBuffer) {
+      const ctx = unlockAudioContextSync();
+      if (ctx) SunVoxBridge.setHostAudioContext(ctx);
       setLoadedSunVoxFileName(resolvedName);
       TinyRsidBridge.clearLoadedSid();
       WorkletSynthBridge.clearCurrentSequence();
@@ -713,17 +721,11 @@ export default function App() {
           solo: false
         };
       });
-      syncChannelMuteSolo(next);
       return next;
     });
 
     setActiveTab('tracker');
-    try {
-      const ctx = getAudioContext();
-      if (ctx && ctx.state === 'suspended') {
-        ctx.resume();
-      }
-    } catch (e) {}
+    unlockAudioContextSync();
     setIsPlaying(true);
   };
 
@@ -733,6 +735,7 @@ export default function App() {
     const dropped = e.dataTransfer?.files?.[0];
     if (!dropped) return;
     e.preventDefault();
+    unlockAudioContextSync();
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const buf = ev.target?.result;
@@ -746,7 +749,7 @@ export default function App() {
         return;
       }
       try {
-        const res = parseChiptuneFile(dropped.name, buf);
+        const res = await parseChiptuneFileAsync(dropped.name, buf);
         handleImportMasterSequence(
           res.patterns,
           res.bpm,

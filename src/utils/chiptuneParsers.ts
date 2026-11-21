@@ -249,6 +249,37 @@ export function parseChiptuneFile(
   return result;
 }
 
+export async function parseChiptuneFileAsync(
+  fileName: string,
+  arrayBuffer: ArrayBuffer
+): Promise<ChiptuneImportResult> {
+  const result = parseChiptuneFile(fileName, arrayBuffer);
+  const dotIdx = fileName.lastIndexOf('.');
+  const extension = dotIdx >= 0 ? fileName.substring(dotIdx).toLowerCase() : '';
+
+  if (
+    (extension === '.wav' || extension === '.mp3' || extension === '.ogg' || extension === '.flac') &&
+    !result.audioBuffer
+  ) {
+    const ctx = getAudioContext();
+    if (ctx) {
+      try {
+        if (ctx.state === 'suspended') {
+          await ctx.resume().catch(() => {});
+        }
+        const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        result.audioBuffer = decoded;
+        result.duration = formatDuration(decoded.duration);
+        result.log.push(`[AUDIO] Decoded ${decoded.numberOfChannels}ch, ${decoded.duration.toFixed(1)}s, ${decoded.sampleRate}Hz`);
+      } catch (err: any) {
+        result.log.push(`[AUDIO] Audio decode error: ${err?.message || 'Unsupported codec or corrupt file'}`);
+      }
+    }
+  }
+
+  return result;
+}
+
 /**
  * 1. UNIFIED SPESSASYNTH BasicMIDI PARSER (.mid, .midi, .rmi, .kar, .xmf, .mod, .xm, .s3m)
  * Uses BasicMIDI.fromArrayBuffer(arrayBuffer, fileName) from spessasynth_core directly

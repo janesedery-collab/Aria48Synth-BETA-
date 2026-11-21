@@ -1665,11 +1665,31 @@ class ScriptNodeBackendAdapter extends AudioBackendAdapterBase {
 		return this._processorBufSize;
 	}
 
+	_ensureSilentKeepAlive(audioCtx)
+	{
+		if (!audioCtx._ariaSilentKeepAlive) {
+			try {
+				const osc = audioCtx.createOscillator();
+				const silentGain = audioCtx.createGain();
+				silentGain.gain.value = 0;
+				osc.connect(silentGain);
+				osc.start();
+				audioCtx._ariaSilentKeepAlive = silentGain;
+			} catch (e) {
+				return null;
+			}
+		}
+		return audioCtx._ariaSilentKeepAlive;
+	}
+
 	_createProducerNode(audioCtx)
 	{
 		let bufSize = this.getProcessorBufSize();
-
-		let scriptNode = audioCtx.createScriptProcessor(bufSize, 0, this.getChannels());
+		const keepAlive = this._ensureSilentKeepAlive(audioCtx);
+		let scriptNode = audioCtx.createScriptProcessor(bufSize, keepAlive ? 1 : 0, this.getChannels());
+		if (keepAlive) {
+			try { keepAlive.connect(scriptNode); } catch (e) {}
+		}
 		
 		let fetchSamples = function(e)
 		{
@@ -1696,7 +1716,11 @@ class ScriptNodeBackendAdapter extends AudioBackendAdapterBase {
 			// this script processor does not actually produce any audible output.. it just provides a callback
 			// that is synchronized with the actual music playback.. (the alternative would be to manually try and
 			// keep track of the playback progress..)
-			tickerScriptNode = ctx.createScriptProcessor(256, 0, 1);
+			const keepAlive = this._ensureSilentKeepAlive(ctx);
+			tickerScriptNode = ctx.createScriptProcessor(256, keepAlive ? 1 : 0, 1);
+			if (keepAlive) {
+				try { keepAlive.connect(tickerScriptNode); } catch (e) {}
+			}
 
 			// there is an inherent imprecison to this approach since WebAudio will request the new
 			// data *before* it is needed, i.e. respective ticks will likely fire somewhat too early and the

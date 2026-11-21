@@ -1,19 +1,20 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, HelpCircle, FileAudio, RotateCw, CheckCircle2, Download, Disc3, Music, Play, Volume2, Star, Trash2, Check, ChevronDown, ChevronUp, Cpu, FileText, Database } from 'lucide-react';
-import { parseChiptuneFile } from '../utils/chiptuneParsers';
+import { parseChiptuneFileAsync } from '../utils/chiptuneParsers';
 import {
   generateFastTrackerXmBuffer,
   generateMidiFileBuffer,
   generateProTrackerModBuffer,
   generateScreamTrackerS3mBuffer
 } from '../utils/chiptuneExporters';
-import { getSoundFontBankInfo, getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import { getSoundFontBankInfo, getAvailableSoundFontInstruments, getGmProgramForPreset } from '../utils/soundFontEngine';
 import {
   SunVoxBridge,
   TinyRsidBridge,
+  WorkletSynthBridge,
   deleteSavedSoundFont,
-  getAudioContext,
   getDefaultSoundFontId,
+  getSoundEnginesConfig,
   isSoundFontFileName,
   loadSoundFontIntoCoreAndLib,
   onDefaultSoundFontChange,
@@ -132,16 +133,38 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   }, [hvscStats, parsedSidMetadata]);
 
   const handleAuditionNote = (instId: string) => {
-    const ctx = getAudioContext();
+    const ctx = unlockAudioContextSync();
     if (!ctx) return;
-    if (ctx.state === 'suspended') ctx.resume();
-    // Route audition chord exclusively through SpessaSynth engine (Root, 3rd, 5th)
-    SpessaSynth.noteOn(0, 60, 90, 0.45); // C4
-    setTimeout(() => SpessaSynth.noteOn(0, 64, 85, 0.45), 90); // E4
-    setTimeout(() => SpessaSynth.noteOn(0, 67, 95, 0.55), 180); // G4
+
+    const inst = instruments.find(i => i.id === instId);
+    const bank = inst?.bank ?? 0;
+    const prog = inst?.program ?? getGmProgramForPreset(instId);
+    const isDrum = bank === 128 || instId === 'gm_drums' || instId === 'gm_electronic_drums';
+    const targetCh = isDrum ? 9 : 0;
+    const notes = isDrum ? [36, 38, 42] : [60, 64, 67];
+    const cfg = getSoundEnginesConfig();
+
+    if (cfg.spessaSynth && WorkletSynthBridge.hasCustomSoundBankActive()) {
+      WorkletSynthBridge.selectPreset(targetCh, bank, 0, prog, isDrum);
+      notes.forEach((n, idx) => {
+        setTimeout(() => {
+          WorkletSynthBridge.noteOn(targetCh, n, 95);
+          setTimeout(() => WorkletSynthBridge.noteOff(targetCh, n), 450);
+        }, idx * 90);
+      });
+      return;
+    }
+
+    SpessaSynth.setChannelMute(targetCh, false);
+    SpessaSynth.setChannelBank(targetCh, bank);
+    SpessaSynth.setChannelProgram(targetCh, prog);
+    SpessaSynth.noteOn(targetCh, notes[0], 92, 0.45);
+    setTimeout(() => SpessaSynth.noteOn(targetCh, notes[1], 88, 0.45), 90);
+    setTimeout(() => SpessaSynth.noteOn(targetCh, notes[2], 95, 0.55), 180);
   };
 
   const handleSoundFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    unlockAudioContextSync();
     const inputEl = e.target;
     if (inputEl.files && inputEl.files[0]) {
       const sfFile = inputEl.files[0];
@@ -178,6 +201,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
 
   const executeConversion = (selectedFormat: string) => {
     if (!file || !fileBuffer) return;
+    unlockAudioContextSync();
 
     setIsConverting(true);
     setConvertedFileUrl(null);
@@ -187,17 +211,16 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
       `[INFO] Ingesting document: '${file.name}' (${(file.size / 1024).toFixed(2)} KB)...`
     ]);
     
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
         if (isSoundFontFileName(file.name)) {
-          loadSoundFontIntoCoreAndLib(fileBuffer, file.name).then(sfRes => {
-            setBankInfo(sfRes.bankInfo);
-            setInstruments(getAvailableSoundFontInstruments());
-            setConversionLog(prev => [...prev, ...sfRes.logs]);
-          });
+          const sfRes = await loadSoundFontIntoCoreAndLib(fileBuffer, file.name);
+          setBankInfo(sfRes.bankInfo);
+          setInstruments(getAvailableSoundFontInstruments());
+          setConversionLog(prev => [...prev, ...sfRes.logs]);
         }
 
-        const result = parseChiptuneFile(file.name, fileBuffer);
+        const result = await parseChiptuneFileAsync(file.name, fileBuffer);
         setParsedPatterns(result.patterns);
         setParsedAllPatterns(result.allPatterns || [result.patterns]);
         setParsedAudioBuffer(result.audioBuffer || null);
@@ -352,7 +375,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
     reader.readAsText(selected);
   };
 
-  const inspectIncomingIntakeFile = (incomingName: string, buf: ArrayBuffer) => {
+  const inspectIncomingIntakeFile = async (incomingName: string, buf: ArrayBuffer) => {
     const lower = incomingName.toLowerCase();
     if (lower.endsWith('.sid') || lower.endsWith('.mus') || lower.endsWith('.str')) {
       const sidMeta = parseSidHeader(buf, incomingName);
@@ -362,7 +385,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
       setParsedHvscLookup(hvsc);
       TinyRsidBridge.registerSidFile(buf, incomingName, sidMeta.startSong);
 
-      const res = parseChiptuneFile(incomingName, buf);
+      const res = await parseChiptuneFileAsync(incomingName, buf);
       setParsedPatterns(res.patterns);
       setParsedAllPatterns(res.allPatterns || [res.patterns]);
       setParsedAudioBuffer(null);
@@ -383,8 +406,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
       setParsedRawSidBuffer(null);
       setParsedSidMetadata(null);
       setParsedHvscLookup(null);
+      const hostCtx = unlockAudioContextSync();
+      if (hostCtx) SunVoxBridge.setHostAudioContext(hostCtx);
       SunVoxBridge.registerSunVoxFile(buf, incomingName);
-      const res = parseChiptuneFile(incomingName, buf);
+      const res = await parseChiptuneFileAsync(incomingName, buf);
       setParsedPatterns(res.patterns);
       setParsedAllPatterns(res.allPatterns || [res.patterns]);
       setParsedAudioBuffer(null);
@@ -412,6 +437,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    unlockAudioContextSync();
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const dropped = e.dataTransfer.files[0];
       setFile({
@@ -423,10 +449,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
       setParsedPatterns(null);
 
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         if (event.target?.result instanceof ArrayBuffer) {
           setFileBuffer(event.target.result);
-          inspectIncomingIntakeFile(dropped.name, event.target.result);
+          await inspectIncomingIntakeFile(dropped.name, event.target.result);
         }
       };
       reader.readAsArrayBuffer(dropped);
@@ -434,6 +460,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    unlockAudioContextSync();
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
       setFile({
@@ -445,10 +472,10 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
       setParsedPatterns(null);
 
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         if (event.target?.result instanceof ArrayBuffer) {
           setFileBuffer(event.target.result);
-          inspectIncomingIntakeFile(selected.name, event.target.result);
+          await inspectIncomingIntakeFile(selected.name, event.target.result);
         }
       };
       reader.readAsArrayBuffer(selected);

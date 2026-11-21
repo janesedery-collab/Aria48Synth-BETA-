@@ -496,11 +496,9 @@ function cancelAllScheduledNotesAndSilence(options?: { keepMidiPlayingFlag?: boo
 
 function shouldUseWorkletPrimary(): boolean {
   const activeSf = SpessaSynth.getActiveSoundFont();
-  if (activeSf?.id === 'spessa-chiptune-sf2') return false;
-  if (activeSf?.isCustom && !WorkletSynthBridge.isActiveBankSupportedByWorklet()) {
-    return false;
-  }
-  return WorkletSynthBridge.hasSoundBankReady();
+  if (!activeSf?.isCustom) return false;
+  if (!WorkletSynthBridge.isActiveBankSupportedByWorklet()) return false;
+  return WorkletSynthBridge.hasCustomSoundBankActive();
 }
 
 /**
@@ -720,7 +718,18 @@ export function initTinySynth(ctx: AudioContext) {
       tinySynthLimiter.connect(ctx.destination);
     }
     if (!tinySynthInstance && typeof WebAudioTinySynth !== 'undefined') {
-      tinySynthInstance = new WebAudioTinySynth({ quality: 1, useReverb: 0 });
+      const w = window as any;
+      const OrigAC = w.AudioContext;
+      const OrigWAC = w.webkitAudioContext;
+      const SharedAC = function () { return ctx; } as any;
+      w.AudioContext = SharedAC;
+      w.webkitAudioContext = SharedAC;
+      try {
+        tinySynthInstance = new WebAudioTinySynth({ quality: 1, useReverb: 0, internalcontext: 0 });
+      } finally {
+        w.AudioContext = OrigAC;
+        w.webkitAudioContext = OrigWAC;
+      }
     }
     if (tinySynthInstance) {
       tinySynthInstance.setAudioContext(ctx, tinySynthMasterGain);
@@ -769,6 +778,7 @@ export function getAudioContext(): AudioContext | null {
       void WorkletSynthBridge.init(audioCtx);
       initTinySynth(audioCtx);
       initSyntheticEngine(audioCtx);
+      SunVoxBridge.setHostAudioContext(audioCtx);
     }
   }
   return audioCtx;
@@ -776,24 +786,26 @@ export function getAudioContext(): AudioContext | null {
 
 export function unlockAudioContextSync(): AudioContext | null {
   const ctx = getAudioContext();
-  if (ctx && ctx.state === 'suspended') {
-    try {
-      void ctx.resume();
-    } catch {}
+  if (ctx) {
+    SunVoxBridge.setHostAudioContext(ctx);
+    if (ctx.state === 'suspended') {
+      try {
+        void ctx.resume();
+      } catch {}
+    }
   }
+  SunVoxBridge.resumeAudioContextSync();
   return ctx;
 }
 
 if (typeof window !== 'undefined') {
   const resumeSuspendedAudio = () => {
-    if (audioCtx && audioCtx.state === 'suspended') {
-      try {
-        void audioCtx.resume();
-      } catch {}
-    }
+    unlockAudioContextSync();
   };
-  window.addEventListener('pointerdown', resumeSuspendedAudio, { passive: true });
-  window.addEventListener('keydown', resumeSuspendedAudio, { passive: true });
+  window.addEventListener('pointerdown', resumeSuspendedAudio, { capture: true, passive: true });
+  window.addEventListener('keydown', resumeSuspendedAudio, { capture: true, passive: true });
+  window.addEventListener('click', resumeSuspendedAudio, { capture: true, passive: true });
+  window.addEventListener('drop', resumeSuspendedAudio, { capture: true, passive: true });
 }
 
 export function getTinySynth(): any {
@@ -1032,9 +1044,27 @@ export function playMidiBuffer(
 
     const genAtStart = ++midiPlaybackGeneration;
     isMidiPlayingInternal = true;
+
+    const lowerName = resolvedFileName.toLowerCase();
+    const meta = WorkletSynthBridge.getSequenceMetadata();
+    const isTrackerModule =
+      lowerName.endsWith('.mod') ||
+      lowerName.endsWith('.xm') ||
+      lowerName.endsWith('.s3m') ||
+      Boolean(meta?.hasEmbeddedSoundBank);
+
+    const shouldUseWorkletSequencer =
+      isTrackerModule ||
+      (activeEnginesConfig.spessaSynth && WorkletSynthBridge.hasCustomSoundBankActive());
+
+    if (!shouldUseWorkletSequencer) {
+      useWorkletSequencerActive = false;
+      playMidiViaTinySynthFallback(arrayBuffer, onEnded, targetBpm, baseSongBpm, initialSeekRatio);
+      return;
+    }
+
     useWorkletSequencerActive = true;
 
-    const meta = WorkletSynthBridge.getSequenceMetadata();
     const baseBpm = Math.max(30, meta?.bpm || baseSongBpm || 125);
     const clampedTarget = Math.max(30, Math.min(320, Number(targetBpm) || baseBpm));
     const rate = Math.max(0.25, Math.min(4.0, clampedTarget / baseBpm));
@@ -1522,6 +1552,13 @@ export async function playSunVoxBuffer(
     stopDirectAudio();
     stopMidiPlayback();
     cancelAllScheduledNotesAndSilence();
+    const ctx = unlockAudioContextSync();
+    if (ctx) {
+      SunVoxBridge.setHostAudioContext(ctx);
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch {}
+      }
+    }
     return await SunVoxBridge.playSunVox(arrayBuffer, fileName, options);
   } catch (err) {
     console.warn('SunVox playback error:', err);

@@ -15,7 +15,6 @@ import {
   deleteSavedSoundFont,
   SunVoxBridge,
   TinyRsidBridge,
-  syncChannelMuteSolo,
   getAudioContext,
   unlockAudioContextSync
 } from './AudioEngine';
@@ -29,7 +28,7 @@ import {
   onInterpolationModeChange
 } from '../engines/soundFontInterpolation';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
-import { parseChiptuneFile } from '../utils/chiptuneParsers';
+import { parseChiptuneFileAsync } from '../utils/chiptuneParsers';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import ExportStudioModal from './ExportStudioModal';
 import SpessaMidiMixerPanel from './SpessaMidiMixerPanel';
@@ -191,20 +190,12 @@ export default function TrackerEditor({
 
   const handleTogglePatternChannelMute = (chId: number) => {
     if (!setChannels) return;
-    setChannels(prev => {
-      const next = prev.map(c => (c.id === chId ? { ...c, mute: !c.mute } : c));
-      syncChannelMuteSolo(next);
-      return next;
-    });
+    setChannels(prev => prev.map(c => (c.id === chId ? { ...c, mute: !c.mute } : c)));
   };
 
   const handleTogglePatternChannelSolo = (chId: number) => {
     if (!setChannels) return;
-    setChannels(prev => {
-      const next = prev.map(c => (c.id === chId ? { ...c, solo: !c.solo } : c));
-      syncChannelMuteSolo(next);
-      return next;
-    });
+    setChannels(prev => prev.map(c => (c.id === chId ? { ...c, solo: !c.solo } : c)));
   };
 
   const totalPatterns = songPatterns?.length || 1;
@@ -249,6 +240,7 @@ export default function TrackerEditor({
   };
 
   const importSelectedFile = (selected: File) => {
+    unlockAudioContextSync();
     const extension = selected.name.includes('.')
       ? selected.name.substring(selected.name.lastIndexOf('.')).toLowerCase()
       : '';
@@ -293,10 +285,10 @@ export default function TrackerEditor({
     }
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       if (event.target?.result instanceof ArrayBuffer) {
         try {
-          const result = parseChiptuneFile(selected.name, event.target.result);
+          const result = await parseChiptuneFileAsync(selected.name, event.target.result);
 
           if (result.allPatterns && setSongPatterns) {
             setSongPatterns(result.allPatterns);
@@ -359,6 +351,7 @@ export default function TrackerEditor({
   };
 
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    unlockAudioContextSync();
     const inputEl = e.target;
     if (inputEl.files && inputEl.files[0]) {
       importSelectedFile(inputEl.files[0]);
@@ -390,6 +383,7 @@ export default function TrackerEditor({
   }, []);
 
   const handleDirectSoundFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    unlockAudioContextSync();
     const inputEl = e.target;
     if (inputEl.files && inputEl.files[0]) {
       const file = inputEl.files[0];
@@ -889,19 +883,31 @@ export default function TrackerEditor({
             <span>SunVox (WASM)</span>
           </button>
 
-          {sunvoxState.hasSunVoxLoaded && (
+          {(sunvoxState.hasSunVoxLoaded || sunvoxState.isLoading || sunvoxState.error) && (
             <div
               id="sunvox-status-badge"
-              className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-violet-950/60 border border-violet-600/50 text-[9px] font-mono text-violet-200"
-              title={`SunVox WASM Project: ${sunvoxState.songName} (${sunvoxState.moduleCount} modules, ${sunvoxState.totalLines} lines)`}
+              className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[9px] font-mono border ${
+                sunvoxState.error
+                  ? 'bg-red-950/70 border-red-600/60 text-red-200'
+                  : 'bg-violet-950/60 border-violet-600/50 text-violet-200'
+              }`}
+              title={sunvoxState.error || `SunVox WASM Project: ${sunvoxState.songName} (${sunvoxState.moduleCount} modules, ${sunvoxState.totalLines} lines)`}
             >
-              <span className="font-bold text-violet-300 truncate max-w-[140px]">{sunvoxState.songName}</span>
-              <span className="text-zinc-500">·</span>
-              <span>{sunvoxState.bpm} BPM</span>
-              <span className="text-zinc-500">·</span>
-              <span>Line {sunvoxState.currentLine}/{sunvoxState.totalLines}</span>
-              <span className="text-zinc-500">·</span>
-              <span>{sunvoxState.moduleCount} Mods</span>
+              {sunvoxState.error ? (
+                <span className="truncate max-w-[240px]">SunVox Err: {sunvoxState.error}</span>
+              ) : sunvoxState.isLoading ? (
+                <span>Initializing SunVox WASM...</span>
+              ) : (
+                <>
+                  <span className="font-bold text-violet-300 truncate max-w-[140px]">{sunvoxState.songName}</span>
+                  <span className="text-zinc-500">·</span>
+                  <span>{sunvoxState.bpm} BPM</span>
+                  <span className="text-zinc-500">·</span>
+                  <span>Line {sunvoxState.currentLine}/{sunvoxState.totalLines}</span>
+                  <span className="text-zinc-500">·</span>
+                  <span>{sunvoxState.moduleCount} Mods</span>
+                </>
+              )}
             </div>
           )}
 

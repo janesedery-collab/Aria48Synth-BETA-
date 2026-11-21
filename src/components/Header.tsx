@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, Radio, Car, ShieldAlert, Cable, Upload, Download, Sliders, History, Disc3, Share2, CheckCircle2, Minus, Plus, Cloud } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { parseChiptuneFile } from '../utils/chiptuneParsers';
+import { parseChiptuneFileAsync } from '../utils/chiptuneParsers';
 import { Channel } from '../types';
 import ExportStudioModal from './ExportStudioModal';
 import MidiControllerModal from './MidiControllerModal';
@@ -150,6 +150,7 @@ export default function Header({
   };
 
   const handleHeaderSoundFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    unlockAudioContextSync();
     const inputEl = e.target;
     const file = inputEl.files?.[0];
     if (file) {
@@ -394,6 +395,7 @@ export default function Header({
              <button
                id="header-soundfont-btn"
                onClick={() => {
+                 unlockAudioContextSync();
                  const sfInput = document.getElementById('header-soundfont-file-input');
                  if (sfInput) sfInput.click();
                }}
@@ -417,15 +419,16 @@ export default function Header({
                className="hidden"
                accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.sunvox,.sunsynth,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
                onChange={(e) => {
+                 unlockAudioContextSync();
                  const inputEl = e.target;
                  const file = inputEl.files?.[0];
                  if (file) {
                    const reader = new FileReader();
-                   reader.onload = (event) => {
+                   reader.onload = async (event) => {
                      const buffer = event.target?.result as ArrayBuffer;
                      if (buffer) {
                        try {
-                         const result = parseChiptuneFile(file.name, buffer);
+                         const result = await parseChiptuneFileAsync(file.name, buffer);
                          onImportSequence?.(
                            result.patterns, 
                            result.bpm, 

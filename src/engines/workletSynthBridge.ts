@@ -211,8 +211,6 @@ function channelToGSPart(ch: number): number {
 
 const PRIMARY_WORKLET_BANK_ID = 'aria-active-bank';
 export const SPESSASYNTH_PROCESSOR_CDN_URL =
-  'https://cdn.jsdelivr.net/npm/spessasynth_lib@4.4.10/dist/spessasynth_processor.min.js';
-const SPESSASYNTH_PROCESSOR_FALLBACK_CDN_URL =
   'https://cdn.jsdelivr.net/npm/spessasynth_lib@4.4.9/dist/spessasynth_processor.min.js';
 
 function isWorkletSupportedSoundBank(buf: ArrayBuffer, idOrName = ''): boolean {
@@ -235,25 +233,26 @@ function isWorkletSupportedSoundBank(buf: ArrayBuffer, idOrName = ''): boolean {
 }
 
 async function addWorkletModuleWithCdnFallback(ctx: AudioContext): Promise<void> {
-  const candidates = [SPESSASYNTH_PROCESSOR_CDN_URL, SPESSASYNTH_PROCESSOR_FALLBACK_CDN_URL];
-  for (const url of candidates) {
-    try {
-      const resp = await fetch(url, { mode: 'cors' });
-      if (!resp.ok) continue;
-      const code = await resp.text();
-      if (!code || code.length < 1024) continue;
-      const blobUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-      try {
-        await ctx.audioWorklet.addModule(blobUrl);
-        return;
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
-      }
-    } catch {
-      // Try next candidate
-    }
+  try {
+    await ctx.audioWorklet.addModule('/spessasynth_processor.min.js');
+    return;
+  } catch {
+    // Fallback to matching jsDelivr CDN build
   }
-  await ctx.audioWorklet.addModule('/spessasynth_processor.min.js');
+  const resp = await fetch(SPESSASYNTH_PROCESSOR_CDN_URL, { mode: 'cors' });
+  if (!resp.ok) {
+    throw new Error(`Failed to load SpessaSynth processor (${resp.status})`);
+  }
+  const code = await resp.text();
+  if (!code || code.length < 1024) {
+    throw new Error('Empty SpessaSynth processor script');
+  }
+  const blobUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+  try {
+    await ctx.audioWorklet.addModule(blobUrl);
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+  }
 }
 
 class WorkletSynthController {
@@ -358,6 +357,18 @@ class WorkletSynthController {
       this.workletReady &&
       this.activeBankSupportedByWorklet &&
       (this.defaultBankLoaded || this.customBanksLoaded.size > 0)
+    );
+  }
+
+  public hasCustomSoundBankActive(): boolean {
+    return Boolean(
+      this.synth &&
+      this.workletReady &&
+      this.activeBankSupportedByWorklet &&
+      this.customBanksLoaded.size > 0 &&
+      this.activeBankId !== 'aria-default-bank' &&
+      this.activeBankId !== 'spessa-default-gm' &&
+      this.activeBankId !== 'spessa-chiptune-sf2'
     );
   }
 

@@ -21,7 +21,7 @@ import {
   setDefaultSoundFontId,
   setMidiChannelMuted,
   setSunVoxMasterVolume,
-  syncChannelMuteSolo
+  unlockAudioContextSync
 } from './AudioEngine';
 import { getSavedSoundFontsFromCookies, saveAmplifier, SavedSoundFontCookieEntry } from '../utils/cookieStorage';
 
@@ -340,11 +340,7 @@ export default function MixerEQ({
     const nextMuted = !currentlyMuted;
     setMidiChannelMuted(channelIndex, nextMuted);
     if (setChannels) {
-      setChannels(prev => {
-        const next = prev.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c));
-        syncChannelMuteSolo(next);
-        return next;
-      });
+      setChannels(prev => prev.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c)));
     } else {
       TinyRsidBridge.syncChannelStates(
         channels.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c))
@@ -358,11 +354,7 @@ export default function MixerEQ({
       setMidiChannelMuted(i, false);
     }
     if (setChannels) {
-      setChannels(prev => {
-        const next = prev.map(c => (c.id >= 1 && c.id <= 16 ? { ...c, mute: false, solo: false } : c));
-        syncChannelMuteSolo(next);
-        return next;
-      });
+      setChannels(prev => prev.map(c => (c.id >= 1 && c.id <= 16 ? { ...c, mute: false, solo: false } : c)));
     }
     setMidiChannelStates([...SpessaSynth.getChannelStates()]);
   };
@@ -380,6 +372,7 @@ export default function MixerEQ({
   }, 0);
 
   const handleSoundFontUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    unlockAudioContextSync();
     const inputEl = e.target;
     if (inputEl.files && inputEl.files[0]) {
       const file = inputEl.files[0];

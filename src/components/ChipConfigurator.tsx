@@ -1,7 +1,6 @@
 import React from 'react';
 import { Cpu, Cable, Columns, Power, Sliders } from 'lucide-react';
 import { Channel, CHIPS } from '../types';
-import { syncChannelMuteSolo } from './AudioEngine';
 
 interface ChipConfiguratorProps {
   channels: Channel[];
@@ -11,11 +10,7 @@ interface ChipConfiguratorProps {
 
 export default function ChipConfigurator({ channels, setChannels, hardwareConnected }: ChipConfiguratorProps) {
   const applyChannelUpdate = (updater: (chs: Channel[]) => Channel[]) => {
-    setChannels(prev => {
-      const next = updater(prev);
-      syncChannelMuteSolo(next);
-      return next;
-    });
+    setChannels(prev => updater(prev));
   };
 
   const toggleChannel = (id: number) => {
