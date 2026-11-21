@@ -533,7 +533,7 @@ export function toggleMidiChannelMute(channelIndex: number): boolean {
 
 /**
  * Synchronize Aria48 channel mute, solo, enable, and panning states across
- * TinyRSid (WebSID), WorkletSynthesizer, and SpessaSynth.
+ * SunVox 2.1.4 WASM, TinyRSid (WebSID), WorkletSynthesizer, and SpessaSynth.
  */
 export function syncChannelMuteSolo(channels: Channel[]) {
   const anySolo = channels.some((c) => c.enabled && c.solo);
@@ -543,6 +543,7 @@ export function syncChannelMuteSolo(channels: Channel[]) {
     setMidiChannelMuted(i, effectiveMute);
   }
   TinyRsidBridge.syncChannelStates(channels);
+  SunVoxBridge.syncChannelStates(channels);
 }
 
 /**

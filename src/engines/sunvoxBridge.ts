@@ -209,6 +209,9 @@ class SunVoxBridgeController {
   private fxScopeInt16Scratch = new Int16Array(128);
   private gestureUnlockBound = false;
   private reinitSampleRateInFlight: Promise<void> | null = null;
+  private mutedModuleOutputs = new Map<number, number[]>();
+  private mutedChannelIndices = new Set<number>();
+  private lastChannelSyncSnapshot: Array<{ enabled?: boolean; mute?: boolean; solo?: boolean }> = [];
 
   private state: SunVoxRuntimeState = {
     hasSunVoxLoaded: false,
@@ -303,8 +306,12 @@ class SunVoxBridgeController {
         this.activeSampleRate = safeSr;
         this.slotOpened = sv_open_slot?.(0) === 0;
         this.loadedSignature = null;
+        this.mutedModuleOutputs.clear();
         if (this.currentBuffer && this.slotOpened) {
           await this.loadBufferIntoSlot(this.currentBuffer, this.state.fileName || 'project.sunvox');
+          if (this.lastChannelSyncSnapshot.length > 0) {
+            this.syncChannelStates(this.lastChannelSyncSnapshot);
+          }
           if (wasPlaying) {
             const sv_play = resolveGlobalSymbol('sv_play');
             const sv_rewind = resolveGlobalSymbol('sv_rewind');
@@ -802,12 +809,135 @@ class SunVoxBridgeController {
     };
   }
 
+  public getChannelMappedModules(): SunVoxModuleInfo[] {
+    const generators = this.state.activeModules.filter(
+      (m) => m.isGenerator && !NON_AUDIO_MODULE_TYPES.has(m.type)
+    );
+    if (generators.length > 0) return generators;
+    const audioMods = this.state.activeModules.filter((m) => !NON_AUDIO_MODULE_TYPES.has(m.type));
+    return audioMods.length > 0 ? audioMods : this.state.activeModules;
+  }
+
+  public syncChannelStates(channels: Array<{ enabled?: boolean; mute?: boolean; solo?: boolean }>) {
+    this.lastChannelSyncSnapshot = channels.map((c) => ({
+      enabled: c.enabled,
+      mute: c.mute,
+      solo: c.solo,
+    }));
+
+    const anySolo = channels.some((c) => c.enabled !== false && Boolean(c.solo));
+    this.mutedChannelIndices.clear();
+    for (let i = 0; i < channels.length; i++) {
+      const ch = channels[i];
+      const effectiveMute = ch.enabled === false || Boolean(ch.mute) || (anySolo && !ch.solo);
+      if (effectiveMute) {
+        this.mutedChannelIndices.add(i);
+      }
+    }
+
+    if (!this.state.hasSunVoxLoaded || !this.audioInitialized || !this.slotOpened) {
+      return;
+    }
+
+    const mappedMods = this.getChannelMappedModules();
+    if (mappedMods.length === 0) return;
+
+    const sv_get_module_outputs = resolveGlobalSymbol('sv_get_module_outputs');
+    const sv_disconnect_module = resolveGlobalSymbol('sv_disconnect_module');
+    const sv_connect_module = resolveGlobalSymbol('sv_connect_module');
+    const sv_lock_slot = resolveGlobalSymbol('sv_lock_slot');
+    const sv_unlock_slot = resolveGlobalSymbol('sv_unlock_slot');
+    const sv_set_module_ctl_value = resolveGlobalSymbol('sv_set_module_ctl_value');
+
+    const mutedByModId = new Map<number, boolean>();
+    let anyChanged = false;
+
+    for (let i = 0; i < mappedMods.length; i++) {
+      const mod = mappedMods[i];
+      if (!mod || mod.id <= 0) continue;
+
+      const ch = i < channels.length ? channels[i] : undefined;
+      const shouldMute = ch
+        ? ch.enabled === false || Boolean(ch.mute) || (anySolo && !ch.solo)
+        : anySolo;
+
+      mutedByModId.set(mod.id, shouldMute);
+
+      if (shouldMute) {
+        this.mutedChannelIndices.add(i);
+        if (!this.mutedModuleOutputs.has(mod.id) && typeof sv_get_module_outputs === 'function') {
+          try {
+            const rawOuts = sv_get_module_outputs(0, mod.id) as Int32Array | number[] | null;
+            const validDests: number[] = [];
+            if (rawOuts && typeof rawOuts.length === 'number') {
+              for (let k = 0; k < rawOuts.length; k++) {
+                const dest = rawOuts[k];
+                if (typeof dest === 'number' && Number.isInteger(dest) && dest >= 0) {
+                  validDests.push(dest);
+                }
+              }
+            }
+            this.mutedModuleOutputs.set(mod.id, validDests);
+            if (validDests.length > 0 && typeof sv_disconnect_module === 'function') {
+              try {
+                sv_lock_slot?.(0);
+                for (const dest of validDests) {
+                  sv_disconnect_module(0, mod.id, dest);
+                }
+              } finally {
+                sv_unlock_slot?.(0);
+              }
+            }
+          } catch {}
+        }
+      } else {
+        this.mutedChannelIndices.delete(i);
+        if (this.mutedModuleOutputs.has(mod.id)) {
+          const savedDests = this.mutedModuleOutputs.get(mod.id) || [];
+          this.mutedModuleOutputs.delete(mod.id);
+          if (savedDests.length > 0 && typeof sv_connect_module === 'function') {
+            try {
+              sv_lock_slot?.(0);
+              for (const dest of savedDests) {
+                sv_connect_module(0, mod.id, dest);
+              }
+            } finally {
+              sv_unlock_slot?.(0);
+            }
+          }
+          // Ensure Volume ctl wasn't left zeroed if module outputs were empty
+          void sv_set_module_ctl_value;
+        }
+      }
+    }
+
+    const updatedModules = this.state.activeModules.map((m) => {
+      if (mutedByModId.has(m.id)) {
+        const nextMuted = Boolean(mutedByModId.get(m.id));
+        if (m.isMuted !== nextMuted) {
+          anyChanged = true;
+          return { ...m, isMuted: nextMuted };
+        }
+      }
+      return m;
+    });
+
+    if (anyChanged) {
+      this.state = {
+        ...this.state,
+        activeModules: updatedModules,
+      };
+      this.notify();
+    }
+  }
+
   public registerSunVoxFile(arrayBuffer: ArrayBuffer, fileName: string): SunVoxRuntimeState {
     const copy = arrayBuffer.slice(0);
     const sig = bufferSignature(copy, fileName);
     if (this.loadedSignature !== sig) {
       this.pausedLine = 0;
       this.endedTriggered = false;
+      this.mutedModuleOutputs.clear();
     }
     this.currentBuffer = copy;
     this.state = {
@@ -817,6 +947,8 @@ class SunVoxBridgeController {
       songName: fileName.replace(/\.[^/.]+$/, '') || 'SunVox Project',
       currentLine: 0,
       elapsedSeconds: 0,
+      activeModules: [],
+      effectsActivity: [],
       error: null,
     };
     this.notify();
@@ -892,9 +1024,13 @@ class SunVoxBridgeController {
       this.loadedSignature = sig;
       this.pausedLine = 0;
       this.endedTriggered = false;
+      this.mutedModuleOutputs.clear();
       sv_set_autostop?.(0, 1);
       this.applyVolumeToEngine();
       this.inspectLoadedProject(fileName);
+      if (this.lastChannelSyncSnapshot.length > 0) {
+        this.syncChannelStates(this.lastChannelSyncSnapshot);
+      }
       this.notify();
       return true;
     })();
@@ -921,6 +1057,8 @@ class SunVoxBridgeController {
     this.loadedSynthModuleId = -1;
     this.pausedLine = 0;
     this.endedTriggered = false;
+    this.mutedModuleOutputs.clear();
+    this.mutedChannelIndices.clear();
     this.state = {
       ...this.state,
       hasSunVoxLoaded: false,
@@ -1134,11 +1272,16 @@ class SunVoxBridgeController {
     ) {
       return { hasData: false, peak: 0, sumSq: 0 };
     }
+
+    if (this.mutedChannelIndices.has(channelIndex0Based)) {
+      outBuf.fill(0);
+      return { hasData: false, peak: 0, sumSq: 0 };
+    }
+
     const sv_get_module_scope2 = resolveGlobalSymbol('sv_get_module_scope2');
 
     if (typeof sv_get_module_scope2 === 'function') {
-      const audioMods = this.state.activeModules.filter((m) => !NON_AUDIO_MODULE_TYPES.has(m.type));
-      const mods = audioMods.length > 0 ? audioMods : this.state.activeModules;
+      const mods = this.getChannelMappedModules();
 
       if (this.scopeInt16Scratch.length !== outBuf.length) {
         this.scopeInt16Scratch = new Int16Array(outBuf.length);
@@ -1169,13 +1312,18 @@ class SunVoxBridgeController {
         return null;
       };
 
-      const targetModId =
-        mods.length > 0 && channelIndex0Based < mods.length ? mods[channelIndex0Based].id : 0;
+      const mappedMod = mods.length > 0 && channelIndex0Based < mods.length ? mods[channelIndex0Based] : null;
+      if (mappedMod?.isMuted) {
+        outBuf.fill(0);
+        return { hasData: false, peak: 0, sumSq: 0 };
+      }
+
+      const targetModId = mappedMod ? mappedMod.id : 0;
       const primary = tryReadModule(targetModId, targetModId === 0 ? channelIndex0Based % 2 : 0);
       if (primary) return primary;
 
-      // Channel 0 & 1 also fall back to Master Output L/R so main output always visualizes live energy
-      if (targetModId !== 0 && channelIndex0Based < 2) {
+      // Channel 0 & 1 also fall back to Master Output L/R only when that channel itself isn't mapped to an isolated generator
+      if (!mappedMod && targetModId !== 0 && channelIndex0Based < 2) {
         const masterFallback = tryReadModule(0, channelIndex0Based % 2);
         if (masterFallback) return masterFallback;
       }
@@ -1183,21 +1331,24 @@ class SunVoxBridgeController {
 
     // Fallback: use live rendered stereo buffer for master output visualization on L/R channels
     if (this.usingUserAudioCallback && this.renderedFramesCount > 0 && channelIndex0Based < 2) {
-      const src = channelIndex0Based % 2 === 0 ? this.renderedScopeL : this.renderedScopeR;
-      const limit = Math.min(outBuf.length, src.length);
-      let peak = 0;
-      let sumSq = 0;
-      for (let i = 0; i < limit; i++) {
-        const s = src[i];
-        outBuf[i] = s;
-        const av = Math.abs(s);
-        if (av > peak) peak = av;
-        sumSq += s * s;
+      const mods = this.getChannelMappedModules();
+      if (channelIndex0Based >= mods.length || !mods[channelIndex0Based]?.isMuted) {
+        const src = channelIndex0Based % 2 === 0 ? this.renderedScopeL : this.renderedScopeR;
+        const limit = Math.min(outBuf.length, src.length);
+        let peak = 0;
+        let sumSq = 0;
+        for (let i = 0; i < limit; i++) {
+          const s = src[i];
+          outBuf[i] = s;
+          const av = Math.abs(s);
+          if (av > peak) peak = av;
+          sumSq += s * s;
+        }
+        for (let i = limit; i < outBuf.length; i++) {
+          outBuf[i] = 0;
+        }
+        return { hasData: peak > 0.0005, peak, sumSq };
       }
-      for (let i = limit; i < outBuf.length; i++) {
-        outBuf[i] = 0;
-      }
-      return { hasData: peak > 0.0005, peak, sumSq };
     }
 
     return { hasData: false, peak: 0, sumSq: 0 };

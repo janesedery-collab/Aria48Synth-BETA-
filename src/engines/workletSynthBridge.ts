@@ -237,6 +237,23 @@ async function addWorkletModuleWithCdnFallback(ctx: AudioContext): Promise<void>
     await ctx.audioWorklet.addModule('/spessasynth_processor.min.js');
     return;
   } catch {
+    // Fallback: fetch local worklet script on main window (ensures WebView shouldInterceptRequest handles it) and load via Blob URL
+  }
+  try {
+    const localResp = await fetch('/spessasynth_processor.min.js');
+    if (localResp.ok) {
+      const localCode = await localResp.text();
+      if (localCode && localCode.length >= 1024) {
+        const localBlobUrl = URL.createObjectURL(new Blob([localCode], { type: 'application/javascript' }));
+        try {
+          await ctx.audioWorklet.addModule(localBlobUrl);
+          return;
+        } finally {
+          setTimeout(() => URL.revokeObjectURL(localBlobUrl), 5000);
+        }
+      }
+    }
+  } catch {
     // Fallback to matching jsDelivr CDN build
   }
   const resp = await fetch(SPESSASYNTH_PROCESSOR_CDN_URL, { mode: 'cors' });

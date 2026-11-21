@@ -308,7 +308,9 @@ export default function App() {
     return () => unsubSid();
   }, []);
 
-  // Keep SunVox WASM runtime metadata (real song name, BPM, duration) synchronized cleanly
+  const sunvoxChannelsSigRef = useRef<string>('');
+
+  // Keep SunVox WASM runtime metadata (real song name, BPM, duration, active module channels) synchronized cleanly
   useEffect(() => {
     const unsubSv = SunVoxBridge.subscribe((nextSv) => {
       setSunvoxRuntime(nextSv);
@@ -319,6 +321,28 @@ export default function App() {
           setBpm(nextSv.bpm);
           setBaseSongBpm(nextSv.bpm);
         }
+
+        const mappedMods = SunVoxBridge.getChannelMappedModules();
+        const sig = `${nextSv.fileName}:${mappedMods.map((m) => m.id).join(',')}`;
+        if (mappedMods.length > 0 && sig !== sunvoxChannelsSigRef.current) {
+          sunvoxChannelsSigRef.current = sig;
+          const targetChCount = Math.min(MAX_CHANNELS, Math.max(8, mappedMods.length));
+          setTrackChannelsCount(targetChCount);
+          setChannels((prev) =>
+            prev.map((ch, idx) => {
+              const svMod = idx < mappedMods.length ? mappedMods[idx] : null;
+              return {
+                ...ch,
+                enabled: idx < targetChCount,
+                chip: 'Virtual DAC (SunVox 2.1.4 WASM)',
+                soundFontPreset: undefined,
+                label: svMod ? `#${svMod.id.toString().padStart(2, '0')} ${svMod.name}` : undefined,
+              };
+            })
+          );
+        }
+      } else if (!nextSv.hasSunVoxLoaded) {
+        sunvoxChannelsSigRef.current = '';
       }
     });
     return () => unsubSv();

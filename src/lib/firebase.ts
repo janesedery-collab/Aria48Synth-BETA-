@@ -68,12 +68,13 @@ export function handleFirestoreError(
 let connectionTested = false;
 async function testConnection() {
   if (connectionTested || typeof window === 'undefined') return;
+  if (window.location.hostname === 'appassets.androidplatform.net' || !navigator.onLine) return;
   connectionTested = true;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+      console.warn('Firestore offline mode active.');
     }
   }
 }

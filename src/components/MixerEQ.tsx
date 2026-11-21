@@ -12,6 +12,7 @@ import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import {
+  SunVoxBridge,
   TinyRsidBridge,
   SOUNDFONT_ACCEPT_ATTR,
   deleteSavedSoundFont,
@@ -342,9 +343,9 @@ export default function MixerEQ({
     if (setChannels) {
       setChannels(prev => prev.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c)));
     } else {
-      TinyRsidBridge.syncChannelStates(
-        channels.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c))
-      );
+      const updated = channels.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c));
+      TinyRsidBridge.syncChannelStates(updated);
+      SunVoxBridge.syncChannelStates(updated);
     }
     setMidiChannelStates([...SpessaSynth.getChannelStates()]);
   };

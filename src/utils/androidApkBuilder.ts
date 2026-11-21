@@ -1,7 +1,12 @@
 /**
  * androidApkBuilder.ts
- * Spec-compliant Android APK binary compiler & signer (AXML, resources.arsc, Dalvik DEX 035,
- * zipalign + CRC-32 + Central Directory, v1 JAR Signature + APK Signature Scheme v2).
+ * Spec-compliant Offline Android APK binary compiler & signer:
+ * - Compiled Binary AXML AndroidManifest.xml (API 21..33)
+ * - Compiled resources.arsc (@string/app_name, @mipmap/ic_launcher)
+ * - Multi-class Dalvik Executable classes.dex (035):
+ *     MainActivity + OfflineClient (shouldInterceptRequest -> assets/www/) + OfflineChromeClient (file picker)
+ * - Bundles entire production web app under assets/www/ (DEFLATE compressed)
+ * - 4-byte zipaligned STORED system binaries/resources + v1 JAR Signature + APK Signature Scheme v2
  */
 
 const CRC32_TABLE = (() => {
@@ -162,6 +167,22 @@ async function sha256(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(digest);
 }
 
+async function deflateRaw(data: Uint8Array): Promise<Uint8Array | null> {
+  if (typeof CompressionStream === 'undefined') return null;
+  try {
+    const cs = new CompressionStream('deflate-raw');
+    const writer = cs.writable.getWriter();
+    const copy = new Uint8Array(data.length);
+    copy.set(data);
+    void writer.write(copy);
+    void writer.close();
+    const ab = await new Response(cs.readable).arrayBuffer();
+    return new Uint8Array(ab);
+  } catch {
+    return null;
+  }
+}
+
 // ---------- DER / ASN.1 HELPERS FOR X.509 & PKCS#7 (CERT.RSA) ----------
 function derLen(len: number): Uint8Array {
   if (len < 0x80) return new Uint8Array([len]);
@@ -221,10 +242,6 @@ function derOid(oidNums: number[]): Uint8Array {
 
 function derUtf8Str(s: string): Uint8Array {
   return derTlv(0x0c, new TextEncoder().encode(s));
-}
-
-function derPrintableStr(s: string): Uint8Array {
-  return derTlv(0x13, new TextEncoder().encode(s));
 }
 
 function derUtcTime(date: Date): Uint8Array {
@@ -293,7 +310,6 @@ export function buildBinaryAndroidManifest(options: {
   minSdkVersion: number;
   targetSdkVersion: number;
 }): Uint8Array {
-  // Resource map attributes MUST occupy string indices 0..resIds.length-1
   const attrEntries: Array<[string, number]> = [
     ['theme', 0x01010000],
     ['label', 0x01010001],
@@ -368,7 +384,7 @@ export function buildBinaryAndroidManifest(options: {
   const pushStartNamespace = () => {
     const chunk = new Uint8Array(24);
     const dv = new DataView(chunk.buffer);
-    dv.setUint16(0, 0x0100, true); // RES_XML_START_NAMESPACE_TYPE
+    dv.setUint16(0, 0x0100, true);
     dv.setUint16(2, 16, true);
     dv.setUint32(4, 24, true);
     dv.setUint32(8, lineNum++, true);
@@ -381,7 +397,7 @@ export function buildBinaryAndroidManifest(options: {
   const pushEndNamespace = () => {
     const chunk = new Uint8Array(24);
     const dv = new DataView(chunk.buffer);
-    dv.setUint16(0, 0x0101, true); // RES_XML_END_NAMESPACE_TYPE
+    dv.setUint16(0, 0x0101, true);
     dv.setUint16(2, 16, true);
     dv.setUint32(4, 24, true);
     dv.setUint32(8, lineNum++, true);
@@ -394,7 +410,7 @@ export function buildBinaryAndroidManifest(options: {
   interface XmlAttr {
     ns: number;
     name: string;
-    type: number; // 0x01=ref, 0x03=str, 0x10=int, 0x11=hex, 0x12=bool
+    type: number;
     value: number | string;
   }
 
@@ -402,15 +418,15 @@ export function buildBinaryAndroidManifest(options: {
     const chunkSize = 36 + attrs.length * 20;
     const chunk = new Uint8Array(chunkSize);
     const dv = new DataView(chunk.buffer);
-    dv.setUint16(0, 0x0102, true); // RES_XML_START_ELEMENT_TYPE
+    dv.setUint16(0, 0x0102, true);
     dv.setUint16(2, 16, true);
     dv.setUint32(4, chunkSize, true);
     dv.setUint32(8, lineNum++, true);
     dv.setUint32(12, 0xffffffff, true);
-    dv.setUint32(16, 0xffffffff, true); // ns
+    dv.setUint32(16, 0xffffffff, true);
     dv.setUint32(20, intern(tag), true);
-    dv.setUint16(24, 20, true); // attributeStart
-    dv.setUint16(26, 20, true); // attributeSize
+    dv.setUint16(24, 20, true);
+    dv.setUint16(26, 20, true);
     dv.setUint16(28, attrs.length, true);
     dv.setUint16(30, 0, true);
     dv.setUint16(32, 0, true);
@@ -426,7 +442,7 @@ export function buildBinaryAndroidManifest(options: {
       dv.setUint32(off + 0, attr.ns >>> 0, true);
       dv.setUint32(off + 4, nameIdx, true);
       dv.setUint32(off + 8, strIdx, true);
-      dv.setUint16(off + 12, 8, true); // size of Res_value
+      dv.setUint16(off + 12, 8, true);
       dv.setUint8(off + 14, 0);
       dv.setUint8(off + 15, attr.type);
       dv.setUint32(off + 16, dataVal, true);
@@ -438,7 +454,7 @@ export function buildBinaryAndroidManifest(options: {
   const endEl = (tag: string) => {
     const chunk = new Uint8Array(24);
     const dv = new DataView(chunk.buffer);
-    dv.setUint16(0, 0x0103, true); // RES_XML_END_ELEMENT_TYPE
+    dv.setUint16(0, 0x0103, true);
     dv.setUint16(2, 16, true);
     dv.setUint32(4, 24, true);
     dv.setUint32(8, lineNum++, true);
@@ -472,9 +488,9 @@ export function buildBinaryAndroidManifest(options: {
   }
 
   startEl('application', [
-    { ns: nsUriIdx, name: 'theme', type: 0x01, value: 0x01030007 }, // @android:style/Theme.NoTitleBar.Fullscreen
-    { ns: nsUriIdx, name: 'label', type: 0x01, value: 0x7f010000 }, // @string/app_name
-    { ns: nsUriIdx, name: 'icon', type: 0x01, value: 0x7f020000 }, // @mipmap/ic_launcher
+    { ns: nsUriIdx, name: 'theme', type: 0x01, value: 0x01030007 },
+    { ns: nsUriIdx, name: 'label', type: 0x01, value: 0x7f010000 },
+    { ns: nsUriIdx, name: 'icon', type: 0x01, value: 0x7f020000 },
     { ns: nsUriIdx, name: 'allowBackup', type: 0x12, value: 0xffffffff },
     { ns: nsUriIdx, name: 'hardwareAccelerated', type: 0x12, value: 0xffffffff },
     { ns: nsUriIdx, name: 'usesCleartextTraffic', type: 0x12, value: 0xffffffff },
@@ -483,8 +499,8 @@ export function buildBinaryAndroidManifest(options: {
   startEl('activity', [
     { ns: nsUriIdx, name: 'name', type: 0x03, value: MAIN_ACTIVITY },
     { ns: nsUriIdx, name: 'exported', type: 0x12, value: 0xffffffff },
-    { ns: nsUriIdx, name: 'screenOrientation', type: 0x10, value: 6 }, // sensorLandscape
-    { ns: nsUriIdx, name: 'configChanges', type: 0x11, value: 0x04a0 }, // orientation|keyboardHidden|screenSize
+    { ns: nsUriIdx, name: 'screenOrientation', type: 0x10, value: 6 },
+    { ns: nsUriIdx, name: 'configChanges', type: 0x11, value: 0x04a0 },
   ]);
 
   startEl('intent-filter', []);
@@ -502,7 +518,7 @@ export function buildBinaryAndroidManifest(options: {
   const body = concatBytes(stringPoolChunk, resMapChunk, ...xmlNodes);
   const rootHeader = new Uint8Array(8);
   const rdv = new DataView(rootHeader.buffer);
-  rdv.setUint16(0, 0x0003, true); // RES_XML_TYPE
+  rdv.setUint16(0, 0x0003, true);
   rdv.setUint16(2, 8, true);
   rdv.setUint32(4, 8 + body.length, true);
 
@@ -519,41 +535,36 @@ export function buildResourcesArsc(packageName: string, appName: string, iconPat
     const spec = new Uint8Array(20);
     {
       const dv = new DataView(spec.buffer);
-      dv.setUint16(0, 0x0202, true); // RES_TABLE_TYPE_SPEC_TYPE
+      dv.setUint16(0, 0x0202, true);
       dv.setUint16(2, 16, true);
       dv.setUint32(4, 20, true);
       dv.setUint8(8, typeId);
-      dv.setUint32(12, 1, true); // entryCount
-      dv.setUint32(16, 0, true); // flags
+      dv.setUint32(12, 1, true);
+      dv.setUint32(16, 0, true);
     }
 
-    // ResTable_type header (84 bytes: 20 fixed + 64 ResTable_config)
     const headerSize = 84;
-    const entriesStart = headerSize + 4; // 1 uint32 entry offset
-    const entrySize = 16; // ResTable_entry (8) + Res_value (8)
+    const entriesStart = headerSize + 4;
+    const entrySize = 16;
     const typeChunkSize = entriesStart + entrySize;
     const typeChunk = new Uint8Array(typeChunkSize);
     {
       const dv = new DataView(typeChunk.buffer);
-      dv.setUint16(0, 0x0201, true); // RES_TABLE_TYPE_TYPE
+      dv.setUint16(0, 0x0201, true);
       dv.setUint16(2, headerSize, true);
       dv.setUint32(4, typeChunkSize, true);
       dv.setUint8(8, typeId);
-      dv.setUint32(12, 1, true); // entryCount
+      dv.setUint32(12, 1, true);
       dv.setUint32(16, entriesStart, true);
-      dv.setUint32(20, 64, true); // ResTable_config.size = 64
+      dv.setUint32(20, 64, true);
 
-      dv.setUint32(headerSize, 0, true); // offset of entry 0
-
-      // ResTable_entry
-      dv.setUint16(entriesStart + 0, 8, true); // size
-      dv.setUint16(entriesStart + 2, 0, true); // flags
+      dv.setUint32(headerSize, 0, true);
+      dv.setUint16(entriesStart + 0, 8, true);
+      dv.setUint16(entriesStart + 2, 0, true);
       dv.setUint32(entriesStart + 4, keyIdx, true);
-
-      // Res_value
-      dv.setUint16(entriesStart + 8, 8, true); // size
+      dv.setUint16(entriesStart + 8, 8, true);
       dv.setUint8(entriesStart + 10, 0);
-      dv.setUint8(entriesStart + 11, 0x03); // TYPE_STRING
+      dv.setUint8(entriesStart + 11, 0x03);
       dv.setUint32(entriesStart + 12, globalStrIdx, true);
     }
 
@@ -572,17 +583,17 @@ export function buildResourcesArsc(packageName: string, appName: string, iconPat
   const pkgHeader = new Uint8Array(pkgHeaderSize);
   {
     const dv = new DataView(pkgHeader.buffer);
-    dv.setUint16(0, 0x0200, true); // RES_TABLE_PACKAGE_TYPE
+    dv.setUint16(0, 0x0200, true);
     dv.setUint16(2, pkgHeaderSize, true);
     dv.setUint32(4, pkgTotal, true);
-    dv.setUint32(8, 0x7f, true); // package id
+    dv.setUint32(8, 0x7f, true);
     for (let i = 0; i < Math.min(127, packageName.length); i++) {
       dv.setUint16(12 + i * 2, packageName.charCodeAt(i), true);
     }
     dv.setUint32(268, typeStringsOff, true);
-    dv.setUint32(272, 2, true); // lastPublicType
+    dv.setUint32(272, 2, true);
     dv.setUint32(276, keyStringsOff, true);
-    dv.setUint32(280, 2, true); // lastPublicKey
+    dv.setUint32(280, 2, true);
     dv.setUint32(284, 0, true);
   }
 
@@ -591,75 +602,139 @@ export function buildResourcesArsc(packageName: string, appName: string, iconPat
   const tableHeader = new Uint8Array(12);
   {
     const dv = new DataView(tableHeader.buffer);
-    dv.setUint16(0, 0x0002, true); // RES_TABLE_TYPE
+    dv.setUint16(0, 0x0002, true);
     dv.setUint16(2, 12, true);
     dv.setUint32(4, totalSize, true);
-    dv.setUint32(8, 1, true); // packageCount
+    dv.setUint32(8, 1, true);
   }
 
   return concatBytes(tableHeader, globalPool, pkgChunk);
 }
 
-// ---------- 3. VALID DALVIK EXECUTABLE (CLASSES.DEX 035) ----------
-export function buildClassesDex(packageName: string, targetUrl: string): Uint8Array {
-  const internalClass = `L${packageName.replace(/\./g, '/')}/MainActivity;`;
+// ---------- 3. MULTI-CLASS OFFLINE DALVIK EXECUTABLE (CLASSES.DEX 035) ----------
+export function buildClassesDex(packageName: string): Uint8Array {
+  const pkgSlash = packageName.replace(/\./g, '/');
+  const mainClass = `L${pkgSlash}/MainActivity;`;
+  const clientClass = `L${pkgSlash}/OfflineClient;`;
+  const chromeClass = `L${pkgSlash}/OfflineChromeClient;`;
 
   const neededStrings = new Set<string>([
+    '*/*',
+    '*',
+    '/',
+    '.css',
+    '.html',
+    '.ico',
+    '.js',
+    '.json',
+    '.mjs',
+    '.png',
+    '.svg',
+    '.wasm',
+    '.webmanifest',
     '<init>',
+    'Access-Control-Allow-Origin',
+    'I',
     'L',
+    'LI',
+    'LL',
+    'LLL',
     'Landroid/app/Activity;',
     'Landroid/content/Context;',
+    'Landroid/content/Intent;',
+    'Landroid/content/res/AssetManager;',
+    'Landroid/net/Uri;',
     'Landroid/os/Bundle;',
     'Landroid/view/View;',
+    'Landroid/webkit/ValueCallback;',
+    'Landroid/webkit/WebChromeClient$FileChooserParams;',
     'Landroid/webkit/WebChromeClient;',
+    'Landroid/webkit/WebResourceRequest;',
+    'Landroid/webkit/WebResourceResponse;',
     'Landroid/webkit/WebSettings;',
     'Landroid/webkit/WebView;',
     'Landroid/webkit/WebViewClient;',
-    internalClass,
+    mainClass,
+    clientClass,
+    chromeClass,
+    'Ljava/io/InputStream;',
+    'Ljava/lang/Object;',
     'Ljava/lang/String;',
+    'Ljava/util/HashMap;',
+    'Ljava/util/Map;',
+    'OK',
+    'UTF-8',
     'V',
+    'VI',
+    'VIIL',
     'VL',
+    'VLL',
+    'VLLIL',
+    'VLLILL',
     'VZ',
     'Z',
+    'ZL',
+    'ZLL',
+    'ZLLL',
+    '[Landroid/net/Uri;',
+    'appassets.androidplatform.net',
+    'application/javascript',
+    'application/json',
+    'application/manifest+json',
+    'application/octet-stream',
+    'application/wasm',
+    'assets',
+    'canGoBack',
+    'concat',
+    'createIntent',
+    'endsWith',
+    'equals',
+    'filePathCallback',
+    'getAssets',
+    'getHost',
+    'getPath',
     'getSettings',
+    'getUrl',
+    'goBack',
+    'https://appassets.androidplatform.net/index.html',
+    'image/png',
+    'image/svg+xml',
+    'image/x-icon',
+    'index.html',
+    'length',
     'loadUrl',
+    'onActivityResult',
+    'onBackPressed',
     'onCreate',
+    'onReceiveValue',
+    'onShowFileChooser',
+    'open',
+    'openFileChooser',
+    'parseResult',
+    'put',
     'setAllowFileAccess',
     'setContentView',
     'setDomStorageEnabled',
     'setJavaScriptEnabled',
     'setMediaPlaybackRequiresUserGesture',
+    'setType',
+    'setVolumeControlStream',
     'setWebChromeClient',
     'setWebViewClient',
-    targetUrl,
+    'shouldInterceptRequest',
+    'startActivityForResult',
+    'startsWith',
+    'substring',
+    'text/css',
+    'text/html',
+    'webView',
+    'www/',
+    'activity',
   ]);
 
-  const sortedStringsFinal = Array.from(neededStrings).sort(compareUtf16CodeUnits);
-  const sIdx = (s: string) => {
-    const idx = sortedStringsFinal.indexOf(s);
-    if (idx < 0) throw new Error(`Missing DEX string: ${s}`);
-    return idx;
-  };
-
-  const typeDescriptorsFinal = [
-    'Landroid/app/Activity;',
-    'Landroid/content/Context;',
-    'Landroid/os/Bundle;',
-    'Landroid/view/View;',
-    'Landroid/webkit/WebChromeClient;',
-    'Landroid/webkit/WebSettings;',
-    'Landroid/webkit/WebView;',
-    'Landroid/webkit/WebViewClient;',
-    internalClass,
-    'Ljava/lang/String;',
-    'V',
-    'Z',
-  ].sort((a, b) => sIdx(a) - sIdx(b));
-
-  const tIdx = (desc: string) => {
-    const idx = typeDescriptorsFinal.indexOf(desc);
-    if (idx < 0) throw new Error(`Missing DEX type: ${desc}`);
-    return idx;
+  const toShortyChar = (desc: string): string => {
+    if (desc.startsWith('L') || desc.startsWith('[')) return 'L';
+    return desc;
   };
 
   interface ProtoDef {
@@ -668,19 +743,93 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
     params: string[];
   }
 
+  const makeProto = (ret: string, params: string[]): ProtoDef => {
+    const shorty = toShortyChar(ret) + params.map(toShortyChar).join('');
+    neededStrings.add(shorty);
+    neededStrings.add(ret);
+    params.forEach((p) => neededStrings.add(p));
+    return { shorty, ret, params };
+  };
+
   const rawProtos: ProtoDef[] = [
-    { shorty: 'V', ret: 'V', params: [] },
-    { shorty: 'L', ret: 'Landroid/webkit/WebSettings;', params: [] },
-    { shorty: 'VL', ret: 'V', params: ['Landroid/content/Context;'] },
-    { shorty: 'VL', ret: 'V', params: ['Landroid/os/Bundle;'] },
-    { shorty: 'VL', ret: 'V', params: ['Landroid/view/View;'] },
-    { shorty: 'VL', ret: 'V', params: ['Landroid/webkit/WebChromeClient;'] },
-    { shorty: 'VL', ret: 'V', params: ['Landroid/webkit/WebViewClient;'] },
-    { shorty: 'VL', ret: 'V', params: ['Ljava/lang/String;'] },
-    { shorty: 'VZ', ret: 'V', params: ['Z'] },
+    makeProto('I', []),
+    makeProto('Landroid/content/Intent;', []),
+    makeProto('Landroid/content/Intent;', ['Ljava/lang/String;']),
+    makeProto('Landroid/content/res/AssetManager;', []),
+    makeProto('Landroid/net/Uri;', []),
+    makeProto('Landroid/webkit/WebSettings;', []),
+    makeProto('Landroid/webkit/WebResourceResponse;', ['Landroid/webkit/WebView;', 'Landroid/webkit/WebResourceRequest;']),
+    makeProto('Ljava/io/InputStream;', ['Ljava/lang/String;']),
+    makeProto('Ljava/lang/Object;', ['Ljava/lang/Object;', 'Ljava/lang/Object;']),
+    makeProto('Ljava/lang/String;', []),
+    makeProto('Ljava/lang/String;', ['I']),
+    makeProto('Ljava/lang/String;', ['Ljava/lang/String;']),
+    makeProto('V', []),
+    makeProto('V', ['I']),
+    makeProto('V', ['I', 'I', 'Landroid/content/Intent;']),
+    makeProto('V', ['Landroid/content/Context;']),
+    makeProto('V', ['Landroid/content/Intent;', 'I']),
+    makeProto('V', ['Landroid/os/Bundle;']),
+    makeProto('V', ['Landroid/view/View;']),
+    makeProto('V', ['Landroid/webkit/WebChromeClient;']),
+    makeProto('V', ['Landroid/webkit/WebViewClient;']),
+    makeProto('V', [mainClass]),
+    makeProto('V', ['Ljava/lang/Object;']),
+    makeProto('V', ['Ljava/lang/String;']),
+    makeProto('V', ['Ljava/lang/String;', 'Ljava/lang/String;', 'I', 'Ljava/lang/String;', 'Ljava/util/Map;', 'Ljava/io/InputStream;']),
+    makeProto('V', ['Z']),
+    makeProto('Z', []),
+    makeProto('Z', ['Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;']),
+    makeProto('Z', ['Landroid/webkit/WebView;', 'Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;']),
+    makeProto('Z', ['Ljava/lang/Object;']),
+    makeProto('Z', ['Ljava/lang/String;']),
+    makeProto('[Landroid/net/Uri;', ['I', 'Landroid/content/Intent;']),
   ];
 
-  const compareProtos = (a: ProtoDef, b: ProtoDef) => {
+  const sortedStrings = Array.from(neededStrings).sort(compareUtf16CodeUnits);
+  const sIdx = (s: string) => {
+    const idx = sortedStrings.indexOf(s);
+    if (idx < 0) throw new Error(`Missing DEX string: ${s}`);
+    return idx;
+  };
+
+  const typeDescriptors = [
+    'I',
+    'Landroid/app/Activity;',
+    'Landroid/content/Context;',
+    'Landroid/content/Intent;',
+    'Landroid/content/res/AssetManager;',
+    'Landroid/net/Uri;',
+    'Landroid/os/Bundle;',
+    'Landroid/view/View;',
+    'Landroid/webkit/ValueCallback;',
+    'Landroid/webkit/WebChromeClient$FileChooserParams;',
+    'Landroid/webkit/WebChromeClient;',
+    'Landroid/webkit/WebResourceRequest;',
+    'Landroid/webkit/WebResourceResponse;',
+    'Landroid/webkit/WebSettings;',
+    'Landroid/webkit/WebView;',
+    'Landroid/webkit/WebViewClient;',
+    mainClass,
+    clientClass,
+    chromeClass,
+    'Ljava/io/InputStream;',
+    'Ljava/lang/Object;',
+    'Ljava/lang/String;',
+    'Ljava/util/HashMap;',
+    'Ljava/util/Map;',
+    'V',
+    'Z',
+    '[Landroid/net/Uri;',
+  ].sort((a, b) => sIdx(a) - sIdx(b));
+
+  const tIdx = (desc: string) => {
+    const idx = typeDescriptors.indexOf(desc);
+    if (idx < 0) throw new Error(`Missing DEX type: ${desc}`);
+    return idx;
+  };
+
+  rawProtos.sort((a, b) => {
     const rDiff = tIdx(a.ret) - tIdx(b.ret);
     if (rDiff !== 0) return rDiff;
     const minP = Math.min(a.params.length, b.params.length);
@@ -689,13 +838,42 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
       if (pDiff !== 0) return pDiff;
     }
     return a.params.length - b.params.length;
-  };
-  rawProtos.sort(compareProtos);
+  });
 
-  const protoIdx = (ret: string, params: string[]) =>
-    rawProtos.findIndex(
+  const protoIdx = (ret: string, params: string[]) => {
+    const idx = rawProtos.findIndex(
       (p) => p.ret === ret && p.params.length === params.length && p.params.every((x, i) => x === params[i])
     );
+    if (idx < 0) throw new Error(`Missing DEX proto: (${params.join('')})${ret}`);
+    return idx;
+  };
+
+  interface FieldDef {
+    cls: string;
+    name: string;
+    type: string;
+  }
+
+  const fields: FieldDef[] = [
+    { cls: mainClass, name: 'filePathCallback', type: 'Landroid/webkit/ValueCallback;' },
+    { cls: mainClass, name: 'webView', type: 'Landroid/webkit/WebView;' },
+    { cls: clientClass, name: 'assets', type: 'Landroid/content/res/AssetManager;' },
+    { cls: chromeClass, name: 'activity', type: mainClass },
+  ];
+
+  fields.sort((a, b) => {
+    const c = tIdx(a.cls) - tIdx(b.cls);
+    if (c !== 0) return c;
+    const n = sIdx(a.name) - sIdx(b.name);
+    if (n !== 0) return n;
+    return tIdx(a.type) - tIdx(b.type);
+  });
+
+  const fIdx = (cls: string, name: string) => {
+    const idx = fields.findIndex((f) => f.cls === cls && f.name === name);
+    if (idx < 0) throw new Error(`Missing DEX field: ${cls}.${name}`);
+    return idx;
+  };
 
   interface MethodDef {
     cls: string;
@@ -706,21 +884,52 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
 
   const methods: MethodDef[] = [
     { cls: 'Landroid/app/Activity;', name: '<init>', ret: 'V', params: [] },
+    { cls: 'Landroid/app/Activity;', name: 'onActivityResult', ret: 'V', params: ['I', 'I', 'Landroid/content/Intent;'] },
+    { cls: 'Landroid/app/Activity;', name: 'onBackPressed', ret: 'V', params: [] },
     { cls: 'Landroid/app/Activity;', name: 'onCreate', ret: 'V', params: ['Landroid/os/Bundle;'] },
     { cls: 'Landroid/app/Activity;', name: 'setContentView', ret: 'V', params: ['Landroid/view/View;'] },
+    { cls: 'Landroid/app/Activity;', name: 'setVolumeControlStream', ret: 'V', params: ['I'] },
+    { cls: 'Landroid/app/Activity;', name: 'startActivityForResult', ret: 'V', params: ['Landroid/content/Intent;', 'I'] },
+    { cls: 'Landroid/content/Context;', name: 'getAssets', ret: 'Landroid/content/res/AssetManager;', params: [] },
+    { cls: 'Landroid/content/Intent;', name: 'setType', ret: 'Landroid/content/Intent;', params: ['Ljava/lang/String;'] },
+    { cls: 'Landroid/content/res/AssetManager;', name: 'open', ret: 'Ljava/io/InputStream;', params: ['Ljava/lang/String;'] },
+    { cls: 'Landroid/net/Uri;', name: 'getHost', ret: 'Ljava/lang/String;', params: [] },
+    { cls: 'Landroid/net/Uri;', name: 'getPath', ret: 'Ljava/lang/String;', params: [] },
+    { cls: 'Landroid/webkit/ValueCallback;', name: 'onReceiveValue', ret: 'V', params: ['Ljava/lang/Object;'] },
+    { cls: 'Landroid/webkit/WebChromeClient$FileChooserParams;', name: 'createIntent', ret: 'Landroid/content/Intent;', params: [] },
+    { cls: 'Landroid/webkit/WebChromeClient$FileChooserParams;', name: 'parseResult', ret: '[Landroid/net/Uri;', params: ['I', 'Landroid/content/Intent;'] },
     { cls: 'Landroid/webkit/WebChromeClient;', name: '<init>', ret: 'V', params: [] },
+    { cls: 'Landroid/webkit/WebResourceRequest;', name: 'getUrl', ret: 'Landroid/net/Uri;', params: [] },
+    { cls: 'Landroid/webkit/WebResourceResponse;', name: '<init>', ret: 'V', params: ['Ljava/lang/String;', 'Ljava/lang/String;', 'I', 'Ljava/lang/String;', 'Ljava/util/Map;', 'Ljava/io/InputStream;'] },
     { cls: 'Landroid/webkit/WebSettings;', name: 'setAllowFileAccess', ret: 'V', params: ['Z'] },
     { cls: 'Landroid/webkit/WebSettings;', name: 'setDomStorageEnabled', ret: 'V', params: ['Z'] },
     { cls: 'Landroid/webkit/WebSettings;', name: 'setJavaScriptEnabled', ret: 'V', params: ['Z'] },
     { cls: 'Landroid/webkit/WebSettings;', name: 'setMediaPlaybackRequiresUserGesture', ret: 'V', params: ['Z'] },
     { cls: 'Landroid/webkit/WebView;', name: '<init>', ret: 'V', params: ['Landroid/content/Context;'] },
+    { cls: 'Landroid/webkit/WebView;', name: 'canGoBack', ret: 'Z', params: [] },
     { cls: 'Landroid/webkit/WebView;', name: 'getSettings', ret: 'Landroid/webkit/WebSettings;', params: [] },
+    { cls: 'Landroid/webkit/WebView;', name: 'goBack', ret: 'V', params: [] },
     { cls: 'Landroid/webkit/WebView;', name: 'loadUrl', ret: 'V', params: ['Ljava/lang/String;'] },
     { cls: 'Landroid/webkit/WebView;', name: 'setWebChromeClient', ret: 'V', params: ['Landroid/webkit/WebChromeClient;'] },
     { cls: 'Landroid/webkit/WebView;', name: 'setWebViewClient', ret: 'V', params: ['Landroid/webkit/WebViewClient;'] },
     { cls: 'Landroid/webkit/WebViewClient;', name: '<init>', ret: 'V', params: [] },
-    { cls: internalClass, name: '<init>', ret: 'V', params: [] },
-    { cls: internalClass, name: 'onCreate', ret: 'V', params: ['Landroid/os/Bundle;'] },
+    { cls: mainClass, name: '<init>', ret: 'V', params: [] },
+    { cls: mainClass, name: 'onActivityResult', ret: 'V', params: ['I', 'I', 'Landroid/content/Intent;'] },
+    { cls: mainClass, name: 'onBackPressed', ret: 'V', params: [] },
+    { cls: mainClass, name: 'onCreate', ret: 'V', params: ['Landroid/os/Bundle;'] },
+    { cls: mainClass, name: 'openFileChooser', ret: 'Z', params: ['Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;'] },
+    { cls: clientClass, name: '<init>', ret: 'V', params: ['Landroid/content/Context;'] },
+    { cls: clientClass, name: 'shouldInterceptRequest', ret: 'Landroid/webkit/WebResourceResponse;', params: ['Landroid/webkit/WebView;', 'Landroid/webkit/WebResourceRequest;'] },
+    { cls: chromeClass, name: '<init>', ret: 'V', params: [mainClass] },
+    { cls: chromeClass, name: 'onShowFileChooser', ret: 'Z', params: ['Landroid/webkit/WebView;', 'Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;'] },
+    { cls: 'Ljava/lang/String;', name: 'concat', ret: 'Ljava/lang/String;', params: ['Ljava/lang/String;'] },
+    { cls: 'Ljava/lang/String;', name: 'endsWith', ret: 'Z', params: ['Ljava/lang/String;'] },
+    { cls: 'Ljava/lang/String;', name: 'equals', ret: 'Z', params: ['Ljava/lang/Object;'] },
+    { cls: 'Ljava/lang/String;', name: 'length', ret: 'I', params: [] },
+    { cls: 'Ljava/lang/String;', name: 'startsWith', ret: 'Z', params: ['Ljava/lang/String;'] },
+    { cls: 'Ljava/lang/String;', name: 'substring', ret: 'Ljava/lang/String;', params: ['I'] },
+    { cls: 'Ljava/util/HashMap;', name: '<init>', ret: 'V', params: [] },
+    { cls: 'Ljava/util/HashMap;', name: 'put', ret: 'Ljava/lang/Object;', params: ['Ljava/lang/Object;', 'Ljava/lang/Object;'] },
   ];
 
   methods.sort((a, b) => {
@@ -731,8 +940,8 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
     return protoIdx(a.ret, a.params) - protoIdx(b.ret, b.params);
   });
 
-  const mIdx = (cls: string, name: string, ret: string, params: string[]) =>
-    methods.findIndex(
+  const mIdx = (cls: string, name: string, ret: string, params: string[]) => {
+    const idx = methods.findIndex(
       (m) =>
         m.cls === cls &&
         m.name === name &&
@@ -740,125 +949,393 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
         m.params.length === params.length &&
         m.params.every((x, i) => x === params[i])
     );
-
-  // Encode Dalvik instructions (16-bit code units)
-  const insnsInit: number[] = [
-    // invoke-direct {v0}, Activity.<init>()V
-    (1 << 12) | 0x70,
-    mIdx('Landroid/app/Activity;', '<init>', 'V', []),
-    0x0000,
-    // return-void
-    0x000e,
-  ];
-
-  const invoke35c = (opcode: number, method: number, regs: number[]): number[] => {
-    const cnt = regs.length;
-    const r0 = regs[0] || 0;
-    const r1 = regs[1] || 0;
-    const r2 = regs[2] || 0;
-    const r3 = regs[3] || 0;
-    const r4 = regs[4] || 0;
-    return [((cnt & 0xf) << 12) | ((r4 & 0xf) << 8) | opcode, method, ((r3 & 0xf) << 12) | ((r2 & 0xf) << 8) | ((r1 & 0xf) << 4) | (r0 & 0xf)];
+    if (idx < 0) throw new Error(`Missing DEX method: ${cls}.${name}`);
+    return idx;
   };
 
-  // onCreate(Bundle): registers=5 (locals v0,v1,v2; params v3=this, v4=savedInstanceState), ins=2, outs=2
-  const insnsOnCreate: number[] = [
-    // invoke-super {v3, v4}, Activity.onCreate(Bundle)V
-    ...invoke35c(0x6f, mIdx('Landroid/app/Activity;', 'onCreate', 'V', ['Landroid/os/Bundle;']), [3, 4]),
-    // new-instance v0, WebView
-    (0 << 8) | 0x22,
-    tIdx('Landroid/webkit/WebView;'),
-    // invoke-direct {v0, v3}, WebView.<init>(Context)V
-    ...invoke35c(0x70, mIdx('Landroid/webkit/WebView;', '<init>', 'V', ['Landroid/content/Context;']), [0, 3]),
-    // invoke-virtual {v0}, WebView.getSettings()WebSettings
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'getSettings', 'Landroid/webkit/WebSettings;', []), [0]),
-    // move-result-object v1
-    (1 << 8) | 0x0c,
-    // const/4 v2, 1
-    ((1 & 0xf) << 12) | (2 << 8) | 0x12,
-    // invoke-virtual {v1, v2}, WebSettings.setJavaScriptEnabled(Z)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setJavaScriptEnabled', 'V', ['Z']), [1, 2]),
-    // invoke-virtual {v1, v2}, WebSettings.setDomStorageEnabled(Z)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setDomStorageEnabled', 'V', ['Z']), [1, 2]),
-    // invoke-virtual {v1, v2}, WebSettings.setAllowFileAccess(Z)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setAllowFileAccess', 'V', ['Z']), [1, 2]),
-    // const/4 v2, 0
-    (2 << 8) | 0x12,
-    // invoke-virtual {v1, v2}, WebSettings.setMediaPlaybackRequiresUserGesture(Z)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setMediaPlaybackRequiresUserGesture', 'V', ['Z']), [1, 2]),
-    // new-instance v2, WebViewClient
-    (2 << 8) | 0x22,
-    tIdx('Landroid/webkit/WebViewClient;'),
-    // invoke-direct {v2}, WebViewClient.<init>()V
-    ...invoke35c(0x70, mIdx('Landroid/webkit/WebViewClient;', '<init>', 'V', []), [2]),
-    // invoke-virtual {v0, v2}, WebView.setWebViewClient(WebViewClient)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'setWebViewClient', 'V', ['Landroid/webkit/WebViewClient;']), [0, 2]),
-    // new-instance v2, WebChromeClient
-    (2 << 8) | 0x22,
-    tIdx('Landroid/webkit/WebChromeClient;'),
-    // invoke-direct {v2}, WebChromeClient.<init>()V
-    ...invoke35c(0x70, mIdx('Landroid/webkit/WebChromeClient;', '<init>', 'V', []), [2]),
-    // invoke-virtual {v0, v2}, WebView.setWebChromeClient(WebChromeClient)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'setWebChromeClient', 'V', ['Landroid/webkit/WebChromeClient;']), [0, 2]),
-    // invoke-virtual {v3, v0}, Activity.setContentView(View)V
-    ...invoke35c(0x6e, mIdx('Landroid/app/Activity;', 'setContentView', 'V', ['Landroid/view/View;']), [3, 0]),
-    // const-string v2, targetUrl
-    (2 << 8) | 0x1a,
-    sIdx(targetUrl),
-    // invoke-virtual {v0, v2}, WebView.loadUrl(String)V
-    ...invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'loadUrl', 'V', ['Ljava/lang/String;']), [0, 2]),
-    // return-void
-    0x000e,
-  ];
+  // Dalvik tiny assembler helpers
+  class InsnBuilder {
+    public units: number[] = [];
+    private labels = new Map<string, number>();
+    private fixups: Array<{ unitPos: number; instrStart: number; label: string; width: 16 }> = [];
+    public get pos() {
+      return this.units.length;
+    }
+    public label(name: string) {
+      this.labels.set(name, this.units.length);
+    }
+    public emit(...u: number[]) {
+      for (const x of u) this.units.push(x & 0xffff);
+    }
+    public invoke35c(op: number, m: number, regs: number[]) {
+      const cnt = regs.length;
+      const r0 = regs[0] || 0;
+      const r1 = regs[1] || 0;
+      const r2 = regs[2] || 0;
+      const r3 = regs[3] || 0;
+      const r4 = regs[4] || 0;
+      this.emit(
+        ((cnt & 0xf) << 12) | ((r4 & 0xf) << 8) | op,
+        m,
+        ((r3 & 0xf) << 12) | ((r2 & 0xf) << 8) | ((r1 & 0xf) << 4) | (r0 & 0xf)
+      );
+    }
+    public invokeRange(op: number, m: number, firstReg: number, count: number) {
+      this.emit(((count & 0xff) << 8) | op, m, firstReg);
+    }
+    public branch21t(op: number, reg: number, targetLabel: string) {
+      const instrStart = this.units.length;
+      this.emit(((reg & 0xff) << 8) | op);
+      const fixPos = this.units.length;
+      this.emit(0);
+      this.fixups.push({ unitPos: fixPos, instrStart, label: targetLabel, width: 16 });
+    }
+    public branch22t(op: number, rA: number, rB: number, targetLabel: string) {
+      const instrStart = this.units.length;
+      this.emit(((rB & 0xf) << 12) | ((rA & 0xf) << 8) | op);
+      const fixPos = this.units.length;
+      this.emit(0);
+      this.fixups.push({ unitPos: fixPos, instrStart, label: targetLabel, width: 16 });
+    }
+    public goto16(targetLabel: string) {
+      const instrStart = this.units.length;
+      this.emit(0x0029);
+      const fixPos = this.units.length;
+      this.emit(0);
+      this.fixups.push({ unitPos: fixPos, instrStart, label: targetLabel, width: 16 });
+    }
+    public resolve(name: string): number {
+      const v = this.labels.get(name);
+      if (v === undefined) throw new Error(`Missing DEX label: ${name}`);
+      return v;
+    }
+    public finalize(): number[] {
+      for (const fx of this.fixups) {
+        const target = this.resolve(fx.label);
+        const rel = target - fx.instrStart;
+        if (rel < -32768 || rel > 32767) throw new Error(`Branch overflow for ${fx.label}: ${rel}`);
+        this.units[fx.unitPos] = rel & 0xffff;
+      }
+      return this.units;
+    }
+  }
 
-  const buildCodeItem = (regs: number, ins: number, outs: number, insns: number[]): Uint8Array => {
-    const rawSize = 16 + insns.length * 2;
+  interface CodeTry {
+    startAddr: number;
+    endAddr: number;
+    catchAddr: number;
+  }
+
+  const buildCodeItem = (regs: number, ins: number, outs: number, insns: number[], tryItem?: CodeTry): Uint8Array => {
+    const triesSize = tryItem ? 1 : 0;
+    const padUnits = triesSize > 0 && insns.length % 2 === 1 ? 1 : 0;
+    let catchHandlerBytes: number[] = [];
+    if (tryItem) {
+      catchHandlerBytes = [0x01, 0x00]; // list size=1, handler[0].size=0 (catch_all only)
+      writeUleb128(catchHandlerBytes, tryItem.catchAddr);
+    }
+    const rawSize = 16 + (insns.length + padUnits) * 2 + triesSize * 8 + catchHandlerBytes.length;
     const padded = (rawSize + 3) & ~3;
     const buf = new Uint8Array(padded);
     const dv = new DataView(buf.buffer);
     dv.setUint16(0, regs, true);
     dv.setUint16(2, ins, true);
     dv.setUint16(4, outs, true);
-    dv.setUint16(6, 0, true); // tries_size
-    dv.setUint32(8, 0, true); // debug_info_off
+    dv.setUint16(6, triesSize, true);
+    dv.setUint32(8, 0, true);
     dv.setUint32(12, insns.length, true);
     for (let i = 0; i < insns.length; i++) {
       dv.setUint16(16 + i * 2, insns[i] & 0xffff, true);
     }
+    if (tryItem) {
+      const tryOff = 16 + (insns.length + padUnits) * 2;
+      dv.setUint32(tryOff + 0, tryItem.startAddr, true);
+      dv.setUint16(tryOff + 4, tryItem.endAddr - tryItem.startAddr, true);
+      dv.setUint16(tryOff + 6, 1, true); // offset after 1-byte uleb128(1)
+      buf.set(catchHandlerBytes, tryOff + 8);
+    }
     return buf;
   };
 
-  // Compute exact DEX section layout
+  // --- Method bytecodes ---
+  // 1. MainActivity.<init>()V (regs=1, ins=1, outs=1; v0=this)
+  const mainInitB = new InsnBuilder();
+  mainInitB.invoke35c(0x70, mIdx('Landroid/app/Activity;', '<init>', 'V', []), [0]);
+  mainInitB.emit(0x000e);
+
+  // 2. MainActivity.onActivityResult(I,I,Intent)V (regs=6, ins=4, outs=4; v2=this,v3=req,v4=res,v5=data)
+  const mainActivityResB = new InsnBuilder();
+  mainActivityResB.invoke35c(0x6f, mIdx('Landroid/app/Activity;', 'onActivityResult', 'V', ['I', 'I', 'Landroid/content/Intent;']), [2, 3, 4, 5]);
+  mainActivityResB.emit((2 << 12) | (0 << 8) | 0x54, fIdx(mainClass, 'filePathCallback')); // iget-object v0, v2
+  mainActivityResB.branch21t(0x38, 0, 'done'); // if-eqz v0, :done
+  mainActivityResB.emit((1 << 8) | 0x13, 1001); // const/16 v1, 1001
+  mainActivityResB.branch22t(0x33, 3, 1, 'done'); // if-ne v3, v1, :done
+  mainActivityResB.invoke35c(0x71, mIdx('Landroid/webkit/WebChromeClient$FileChooserParams;', 'parseResult', '[Landroid/net/Uri;', ['I', 'Landroid/content/Intent;']), [4, 5]);
+  mainActivityResB.emit((1 << 8) | 0x0c); // move-result-object v1
+  mainActivityResB.invoke35c(0x72, mIdx('Landroid/webkit/ValueCallback;', 'onReceiveValue', 'V', ['Ljava/lang/Object;']), [0, 1]);
+  mainActivityResB.emit((0 << 8) | 0x12); // const/4 v0, 0
+  mainActivityResB.emit((2 << 12) | (0 << 8) | 0x5b, fIdx(mainClass, 'filePathCallback')); // iput-object v0, v2
+  mainActivityResB.label('done');
+  mainActivityResB.emit(0x000e); // return-void
+
+  // 3. MainActivity.onBackPressed()V (regs=2, ins=1, outs=1; v1=this)
+  const mainBackB = new InsnBuilder();
+  mainBackB.emit((1 << 12) | (0 << 8) | 0x54, fIdx(mainClass, 'webView')); // iget-object v0, v1
+  mainBackB.branch21t(0x38, 0, 'super_back');
+  mainBackB.invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'canGoBack', 'Z', []), [0]);
+  mainBackB.emit((0 << 8) | 0x0a); // move-result v0
+  mainBackB.branch21t(0x38, 0, 'super_back');
+  mainBackB.emit((1 << 12) | (0 << 8) | 0x54, fIdx(mainClass, 'webView'));
+  mainBackB.invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'goBack', 'V', []), [0]);
+  mainBackB.emit(0x000e);
+  mainBackB.label('super_back');
+  mainBackB.invoke35c(0x6f, mIdx('Landroid/app/Activity;', 'onBackPressed', 'V', []), [1]);
+  mainBackB.emit(0x000e);
+
+  // 4. MainActivity.onCreate(Bundle)V (regs=6, ins=2, outs=2; v4=this, v5=savedInstanceState)
+  const mainOnCreateB = new InsnBuilder();
+  mainOnCreateB.invoke35c(0x6f, mIdx('Landroid/app/Activity;', 'onCreate', 'V', ['Landroid/os/Bundle;']), [4, 5]);
+  mainOnCreateB.emit((3 << 12) | (0 << 8) | 0x12); // const/4 v0, 3 (STREAM_MUSIC)
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/app/Activity;', 'setVolumeControlStream', 'V', ['I']), [4, 0]);
+  mainOnCreateB.emit((0 << 8) | 0x22, tIdx('Landroid/webkit/WebView;')); // new-instance v0, WebView
+  mainOnCreateB.invoke35c(0x70, mIdx('Landroid/webkit/WebView;', '<init>', 'V', ['Landroid/content/Context;']), [0, 4]);
+  mainOnCreateB.emit((4 << 12) | (0 << 8) | 0x5b, fIdx(mainClass, 'webView')); // iput-object v0, v4
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'getSettings', 'Landroid/webkit/WebSettings;', []), [0]);
+  mainOnCreateB.emit((1 << 8) | 0x0c); // move-result-object v1
+  mainOnCreateB.emit((1 << 12) | (2 << 8) | 0x12); // const/4 v2, 1
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setJavaScriptEnabled', 'V', ['Z']), [1, 2]);
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setDomStorageEnabled', 'V', ['Z']), [1, 2]);
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setAllowFileAccess', 'V', ['Z']), [1, 2]);
+  mainOnCreateB.emit((0 << 12) | (2 << 8) | 0x12); // const/4 v2, 0
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebSettings;', 'setMediaPlaybackRequiresUserGesture', 'V', ['Z']), [1, 2]);
+  mainOnCreateB.emit((2 << 8) | 0x22, tIdx(clientClass)); // new-instance v2, OfflineClient
+  mainOnCreateB.invoke35c(0x70, mIdx(clientClass, '<init>', 'V', ['Landroid/content/Context;']), [2, 4]);
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'setWebViewClient', 'V', ['Landroid/webkit/WebViewClient;']), [0, 2]);
+  mainOnCreateB.emit((2 << 8) | 0x22, tIdx(chromeClass)); // new-instance v2, OfflineChromeClient
+  mainOnCreateB.invoke35c(0x70, mIdx(chromeClass, '<init>', 'V', [mainClass]), [2, 4]);
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'setWebChromeClient', 'V', ['Landroid/webkit/WebChromeClient;']), [0, 2]);
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/app/Activity;', 'setContentView', 'V', ['Landroid/view/View;']), [4, 0]);
+  mainOnCreateB.emit((2 << 8) | 0x1a, sIdx('https://appassets.androidplatform.net/index.html'));
+  mainOnCreateB.invoke35c(0x6e, mIdx('Landroid/webkit/WebView;', 'loadUrl', 'V', ['Ljava/lang/String;']), [0, 2]);
+  mainOnCreateB.emit(0x000e);
+
+  // 5. MainActivity.openFileChooser(ValueCallback, FileChooserParams)Z (regs=6, ins=3, outs=3; v3=this,v4=cb,v5=params)
+  const mainOpenChooserB = new InsnBuilder();
+  mainOpenChooserB.emit((3 << 12) | (0 << 8) | 0x54, fIdx(mainClass, 'filePathCallback'));
+  mainOpenChooserB.branch21t(0x38, 0, 'store_cb');
+  mainOpenChooserB.emit((0 << 12) | (1 << 8) | 0x12); // const/4 v1, 0
+  mainOpenChooserB.invoke35c(0x72, mIdx('Landroid/webkit/ValueCallback;', 'onReceiveValue', 'V', ['Ljava/lang/Object;']), [0, 1]);
+  mainOpenChooserB.label('store_cb');
+  mainOpenChooserB.emit((3 << 12) | (4 << 8) | 0x5b, fIdx(mainClass, 'filePathCallback'));
+  const chooserTryStart = mainOpenChooserB.pos;
+  mainOpenChooserB.invoke35c(0x6e, mIdx('Landroid/webkit/WebChromeClient$FileChooserParams;', 'createIntent', 'Landroid/content/Intent;', []), [5]);
+  mainOpenChooserB.emit((0 << 8) | 0x0c); // move-result-object v0
+  mainOpenChooserB.emit((1 << 8) | 0x1a, sIdx('*/*'));
+  mainOpenChooserB.invoke35c(0x6e, mIdx('Landroid/content/Intent;', 'setType', 'Landroid/content/Intent;', ['Ljava/lang/String;']), [0, 1]);
+  mainOpenChooserB.emit((1 << 8) | 0x13, 1001); // const/16 v1, 1001
+  mainOpenChooserB.invoke35c(0x6e, mIdx('Landroid/app/Activity;', 'startActivityForResult', 'V', ['Landroid/content/Intent;', 'I']), [3, 0, 1]);
+  mainOpenChooserB.emit((1 << 12) | (0 << 8) | 0x12); // const/4 v0, 1
+  mainOpenChooserB.emit((0 << 8) | 0x0f); // return v0
+  const chooserTryEnd = mainOpenChooserB.pos;
+  const chooserCatchAddr = mainOpenChooserB.pos;
+  mainOpenChooserB.emit((0 << 8) | 0x0d); // move-exception v0
+  mainOpenChooserB.emit((0 << 12) | (1 << 8) | 0x12); // const/4 v1, 0
+  mainOpenChooserB.emit((3 << 12) | (1 << 8) | 0x5b, fIdx(mainClass, 'filePathCallback'));
+  mainOpenChooserB.emit((0 << 12) | (0 << 8) | 0x12); // const/4 v0, 0 (false)
+  mainOpenChooserB.emit((0 << 8) | 0x0f); // return v0
+
+  // 6. OfflineClient.<init>(Context)V (regs=3, ins=2, outs=1; v1=this, v2=ctx)
+  const clientInitB = new InsnBuilder();
+  clientInitB.invoke35c(0x70, mIdx('Landroid/webkit/WebViewClient;', '<init>', 'V', []), [1]);
+  clientInitB.invoke35c(0x6e, mIdx('Landroid/content/Context;', 'getAssets', 'Landroid/content/res/AssetManager;', []), [2]);
+  clientInitB.emit((0 << 8) | 0x0c); // move-result-object v0
+  clientInitB.emit((1 << 12) | (0 << 8) | 0x5b, fIdx(clientClass, 'assets'));
+  clientInitB.emit(0x000e);
+
+  // 7. OfflineClient.shouldInterceptRequest(WebView, WebResourceRequest)WebResourceResponse
+  //    regs=11, ins=3, outs=7; params: v8=this, v9=view, v10=request
+  const clientInterceptB = new InsnBuilder();
+  const interceptTryStart = clientInterceptB.pos;
+  clientInterceptB.invoke35c(0x72, mIdx('Landroid/webkit/WebResourceRequest;', 'getUrl', 'Landroid/net/Uri;', []), [10]);
+  clientInterceptB.emit((0 << 8) | 0x0c); // move-result-object v0 (Uri)
+  clientInterceptB.branch21t(0x38, 0, 'ret_null');
+  clientInterceptB.invoke35c(0x6e, mIdx('Landroid/net/Uri;', 'getHost', 'Ljava/lang/String;', []), [0]);
+  clientInterceptB.emit((1 << 8) | 0x0c); // move-result-object v1 (host)
+  clientInterceptB.emit((2 << 8) | 0x1a, sIdx('appassets.androidplatform.net'));
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'equals', 'Z', ['Ljava/lang/Object;']), [2, 1]);
+  clientInterceptB.emit((1 << 8) | 0x0a); // move-result v1
+  clientInterceptB.branch21t(0x38, 1, 'ret_null');
+  clientInterceptB.invoke35c(0x6e, mIdx('Landroid/net/Uri;', 'getPath', 'Ljava/lang/String;', []), [0]);
+  clientInterceptB.emit((0 << 8) | 0x0c); // move-result-object v0 (path)
+  clientInterceptB.branch21t(0x38, 0, 'default_path');
+  clientInterceptB.emit((1 << 8) | 0x1a, sIdx('/'));
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'equals', 'Z', ['Ljava/lang/Object;']), [0, 1]);
+  clientInterceptB.emit((1 << 8) | 0x0a);
+  clientInterceptB.branch21t(0x39, 1, 'default_path'); // if-nez
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'length', 'I', []), [0]);
+  clientInterceptB.emit((1 << 8) | 0x0a);
+  clientInterceptB.branch21t(0x38, 1, 'default_path');
+  clientInterceptB.goto16('check_slash');
+
+  clientInterceptB.label('default_path');
+  clientInterceptB.emit((0 << 8) | 0x1a, sIdx('index.html'));
+  clientInterceptB.goto16('open_asset');
+
+  clientInterceptB.label('check_slash');
+  clientInterceptB.emit((1 << 8) | 0x1a, sIdx('/'));
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'startsWith', 'Z', ['Ljava/lang/String;']), [0, 1]);
+  clientInterceptB.emit((1 << 8) | 0x0a);
+  clientInterceptB.branch21t(0x38, 1, 'open_asset');
+  clientInterceptB.emit((1 << 12) | (1 << 8) | 0x12); // const/4 v1, 1
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'substring', 'Ljava/lang/String;', ['I']), [0, 1]);
+  clientInterceptB.emit((0 << 8) | 0x0c); // v0 = path without leading '/'
+
+  clientInterceptB.label('open_asset');
+  clientInterceptB.emit((1 << 8) | 0x1a, sIdx('www/'));
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'concat', 'Ljava/lang/String;', ['Ljava/lang/String;']), [1, 0]);
+  clientInterceptB.emit((1 << 8) | 0x0c); // v1 = "www/" + path
+  clientInterceptB.emit((8 << 12) | (2 << 8) | 0x54, fIdx(clientClass, 'assets')); // iget-object v2, v8
+  clientInterceptB.invoke35c(0x6e, mIdx('Landroid/content/res/AssetManager;', 'open', 'Ljava/io/InputStream;', ['Ljava/lang/String;']), [2, 1]);
+  clientInterceptB.emit((6 << 8) | 0x0c); // move-result-object v6 (InputStream)
+
+  // Determine MIME type in v1 based on extension of path (v0)
+  clientInterceptB.emit((1 << 8) | 0x1a, sIdx('application/octet-stream'));
+  const extRules: Array<[string, string]> = [
+    ['.html', 'text/html'],
+    ['.js', 'application/javascript'],
+    ['.mjs', 'application/javascript'],
+    ['.css', 'text/css'],
+    ['.wasm', 'application/wasm'],
+    ['.json', 'application/json'],
+    ['.webmanifest', 'application/manifest+json'],
+    ['.png', 'image/png'],
+    ['.svg', 'image/svg+xml'],
+    ['.ico', 'image/x-icon'],
+  ];
+  extRules.forEach(([ext, mime], i) => {
+    const nextLbl = `ext_next_${i}`;
+    clientInterceptB.emit((2 << 8) | 0x1a, sIdx(ext));
+    clientInterceptB.invoke35c(0x6e, mIdx('Ljava/lang/String;', 'endsWith', 'Z', ['Ljava/lang/String;']), [0, 2]);
+    clientInterceptB.emit((2 << 8) | 0x0a);
+    clientInterceptB.branch21t(0x38, 2, nextLbl);
+    clientInterceptB.emit((1 << 8) | 0x1a, sIdx(mime));
+    clientInterceptB.goto16('mime_done');
+    clientInterceptB.label(nextLbl);
+  });
+
+  clientInterceptB.label('mime_done');
+  // v5 = new HashMap(), add Access-Control-Allow-Origin: *
+  clientInterceptB.emit((5 << 8) | 0x22, tIdx('Ljava/util/HashMap;'));
+  clientInterceptB.invoke35c(0x70, mIdx('Ljava/util/HashMap;', '<init>', 'V', []), [5]);
+  clientInterceptB.emit((2 << 8) | 0x1a, sIdx('Access-Control-Allow-Origin'));
+  clientInterceptB.emit((3 << 8) | 0x1a, sIdx('*'));
+  clientInterceptB.invoke35c(0x6e, mIdx('Ljava/util/HashMap;', 'put', 'Ljava/lang/Object;', ['Ljava/lang/Object;', 'Ljava/lang/Object;']), [5, 2, 3]);
+  // Construct WebResourceResponse(v1=mime, v2="UTF-8", v3=200, v4="OK", v5=headers, v6=stream) into v0
+  clientInterceptB.emit((0 << 8) | 0x22, tIdx('Landroid/webkit/WebResourceResponse;'));
+  clientInterceptB.emit((2 << 8) | 0x1a, sIdx('UTF-8'));
+  clientInterceptB.emit((3 << 8) | 0x13, 200); // const/16 v3, 200
+  clientInterceptB.emit((4 << 8) | 0x1a, sIdx('OK'));
+  clientInterceptB.invokeRange(
+    0x76, // invoke-direct/range
+    mIdx('Landroid/webkit/WebResourceResponse;', '<init>', 'V', [
+      'Ljava/lang/String;',
+      'Ljava/lang/String;',
+      'I',
+      'Ljava/lang/String;',
+      'Ljava/util/Map;',
+      'Ljava/io/InputStream;',
+    ]),
+    0,
+    7
+  );
+  clientInterceptB.emit((0 << 8) | 0x11); // return-object v0
+
+  clientInterceptB.label('ret_null');
+  clientInterceptB.emit((0 << 12) | (0 << 8) | 0x12); // const/4 v0, 0
+  clientInterceptB.emit((0 << 8) | 0x11); // return-object v0
+  const interceptTryEnd = clientInterceptB.pos;
+
+  const interceptCatchAddr = clientInterceptB.pos;
+  clientInterceptB.emit((0 << 8) | 0x0d); // move-exception v0
+  clientInterceptB.emit((0 << 12) | (0 << 8) | 0x12); // const/4 v0, 0
+  clientInterceptB.emit((0 << 8) | 0x11); // return-object v0
+
+  // 8. OfflineChromeClient.<init>(MainActivity)V (regs=2, ins=2, outs=1; v0=this, v1=act)
+  const chromeInitB = new InsnBuilder();
+  chromeInitB.invoke35c(0x70, mIdx('Landroid/webkit/WebChromeClient;', '<init>', 'V', []), [0]);
+  chromeInitB.emit((0 << 12) | (1 << 8) | 0x5b, fIdx(chromeClass, 'activity'));
+  chromeInitB.emit(0x000e);
+
+  // 9. OfflineChromeClient.onShowFileChooser(WebView, ValueCallback, FileChooserParams)Z
+  //    regs=5, ins=4, outs=3; v1=this, v2=wv, v3=cb, v4=params
+  const chromeShowB = new InsnBuilder();
+  chromeShowB.emit((1 << 12) | (0 << 8) | 0x54, fIdx(chromeClass, 'activity'));
+  chromeShowB.invoke35c(
+    0x6e,
+    mIdx(mainClass, 'openFileChooser', 'Z', ['Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;']),
+    [0, 3, 4]
+  );
+  chromeShowB.emit((0 << 8) | 0x0a); // move-result v0
+  chromeShowB.emit((0 << 8) | 0x0f); // return v0
+
+  // Build code items
+  const codeItemsBytes = [
+    buildCodeItem(1, 1, 1, mainInitB.finalize()),
+    buildCodeItem(6, 4, 4, mainActivityResB.finalize()),
+    buildCodeItem(2, 1, 1, mainBackB.finalize()),
+    buildCodeItem(6, 2, 2, mainOnCreateB.finalize()),
+    buildCodeItem(6, 3, 3, mainOpenChooserB.finalize(), {
+      startAddr: chooserTryStart,
+      endAddr: chooserTryEnd,
+      catchAddr: chooserCatchAddr,
+    }),
+    buildCodeItem(3, 2, 1, clientInitB.finalize()),
+    buildCodeItem(11, 3, 7, clientInterceptB.finalize(), {
+      startAddr: interceptTryStart,
+      endAddr: interceptTryEnd,
+      catchAddr: interceptCatchAddr,
+    }),
+    buildCodeItem(2, 2, 1, chromeInitB.finalize()),
+    buildCodeItem(5, 4, 3, chromeShowB.finalize()),
+  ];
+
+  // DEX layout computation
   const headerSize = 0x70;
   const stringIdsOff = headerSize;
-  const stringIdsSize = sortedStringsFinal.length;
+  const stringIdsSize = sortedStrings.length;
   const typeIdsOff = stringIdsOff + stringIdsSize * 4;
-  const typeIdsSize = typeDescriptorsFinal.length;
+  const typeIdsSize = typeDescriptors.length;
   const protoIdsOff = typeIdsOff + typeIdsSize * 4;
   const protoIdsSize = rawProtos.length;
-  const methodIdsOff = protoIdsOff + protoIdsSize * 12;
+  const fieldIdsOff = protoIdsOff + protoIdsSize * 12;
+  const fieldIdsSize = fields.length;
+  const methodIdsOff = fieldIdsOff + fieldIdsSize * 8;
   const methodIdsSize = methods.length;
   const classDefsOff = methodIdsOff + methodIdsSize * 8;
-  const classDefsSize = 1;
+
+  const classDefsOrder = [
+    { cls: mainClass, sup: 'Landroid/app/Activity;' },
+    { cls: clientClass, sup: 'Landroid/webkit/WebViewClient;' },
+    { cls: chromeClass, sup: 'Landroid/webkit/WebChromeClient;' },
+  ];
+  const classDefsSize = classDefsOrder.length;
 
   let dataCursor = classDefsOff + classDefsSize * 32;
   const align4 = () => {
     dataCursor = (dataCursor + 3) & ~3;
   };
 
-  // Code items (4-byte aligned)
+  // Code items
   align4();
   const codeSectionOff = dataCursor;
-  const codeInitOff = dataCursor;
-  const codeInitBytes = buildCodeItem(1, 1, 1, insnsInit);
-  dataCursor += codeInitBytes.length;
+  const codeOffsets: number[] = [];
+  for (const ci of codeItemsBytes) {
+    align4();
+    codeOffsets.push(dataCursor);
+    dataCursor += ci.length;
+  }
 
-  align4();
-  const codeOnCreateOff = dataCursor;
-  const codeOnCreateBytes = buildCodeItem(5, 2, 2, insnsOnCreate);
-  dataCursor += codeOnCreateBytes.length;
-
-  // Type lists (4-byte aligned, for protos with params.length > 0)
+  // Type lists
   const protosWithParams = rawProtos.filter((p) => p.params.length > 0);
   align4();
   const typeListSectionOff = dataCursor;
@@ -879,50 +1356,110 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
     dataCursor += tl.length;
   }
 
-  // String data items (1-byte aligned inside data section)
+  // String data items
   const stringDataSectionOff = dataCursor;
   const stringDataOffsets: number[] = [];
   const stringDataChunks: Uint8Array[] = [];
-  for (const s of sortedStringsFinal) {
+  for (const s of sortedStrings) {
     stringDataOffsets.push(dataCursor);
     const enc = encodeMutf8String(s);
     stringDataChunks.push(enc);
     dataCursor += enc.length;
   }
 
-  // Class data item (MainActivity)
-  const classDataOff = dataCursor;
-  const classDataBytesList: number[] = [];
-  writeUleb128(classDataBytesList, 0); // static_fields_size
-  writeUleb128(classDataBytesList, 0); // instance_fields_size
-  writeUleb128(classDataBytesList, 1); // direct_methods_size
-  writeUleb128(classDataBytesList, 1); // virtual_methods_size
-  // Direct method: <init>
-  writeUleb128(classDataBytesList, mIdx(internalClass, '<init>', 'V', []));
-  writeUleb128(classDataBytesList, 0x10001); // ACC_PUBLIC | ACC_CONSTRUCTOR
-  writeUleb128(classDataBytesList, codeInitOff);
-  // Virtual method: onCreate
-  writeUleb128(classDataBytesList, mIdx(internalClass, 'onCreate', 'V', ['Landroid/os/Bundle;']));
-  writeUleb128(classDataBytesList, 0x0004); // ACC_PROTECTED
-  writeUleb128(classDataBytesList, codeOnCreateOff);
-  const classDataBytes = new Uint8Array(classDataBytesList);
-  dataCursor += classDataBytes.length;
+  // Helper to encode class_data_item cleanly (sorted by index with diffs)
+  const encodeClassData = (
+    instFields: Array<{ idx: number; access: number }>,
+    directMethods: Array<{ idx: number; access: number; codeOff: number }>,
+    virtualMethods: Array<{ idx: number; access: number; codeOff: number }>
+  ): Uint8Array => {
+    const out: number[] = [];
+    writeUleb128(out, 0); // static_fields_size
+    writeUleb128(out, instFields.length);
+    writeUleb128(out, directMethods.length);
+    writeUleb128(out, virtualMethods.length);
 
-  // Map list (4-byte aligned)
+    instFields.sort((a, b) => a.idx - b.idx);
+    let prev = 0;
+    for (const f of instFields) {
+      writeUleb128(out, f.idx - prev);
+      writeUleb128(out, f.access);
+      prev = f.idx;
+    }
+
+    directMethods.sort((a, b) => a.idx - b.idx);
+    prev = 0;
+    for (const m of directMethods) {
+      writeUleb128(out, m.idx - prev);
+      writeUleb128(out, m.access);
+      writeUleb128(out, m.codeOff);
+      prev = m.idx;
+    }
+
+    virtualMethods.sort((a, b) => a.idx - b.idx);
+    prev = 0;
+    for (const m of virtualMethods) {
+      writeUleb128(out, m.idx - prev);
+      writeUleb128(out, m.access);
+      writeUleb128(out, m.codeOff);
+      prev = m.idx;
+    }
+
+    return new Uint8Array(out);
+  };
+
+  const classDataSectionOff = dataCursor;
+  const classDataChunks = [
+    // MainActivity
+    encodeClassData(
+      [
+        { idx: fIdx(mainClass, 'filePathCallback'), access: 0x0001 },
+        { idx: fIdx(mainClass, 'webView'), access: 0x0001 },
+      ],
+      [{ idx: mIdx(mainClass, '<init>', 'V', []), access: 0x10001, codeOff: codeOffsets[0] }],
+      [
+        { idx: mIdx(mainClass, 'onActivityResult', 'V', ['I', 'I', 'Landroid/content/Intent;']), access: 0x0004, codeOff: codeOffsets[1] },
+        { idx: mIdx(mainClass, 'onBackPressed', 'V', []), access: 0x0001, codeOff: codeOffsets[2] },
+        { idx: mIdx(mainClass, 'onCreate', 'V', ['Landroid/os/Bundle;']), access: 0x0004, codeOff: codeOffsets[3] },
+        { idx: mIdx(mainClass, 'openFileChooser', 'Z', ['Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;']), access: 0x0001, codeOff: codeOffsets[4] },
+      ]
+    ),
+    // OfflineClient
+    encodeClassData(
+      [{ idx: fIdx(clientClass, 'assets'), access: 0x0012 }],
+      [{ idx: mIdx(clientClass, '<init>', 'V', ['Landroid/content/Context;']), access: 0x10001, codeOff: codeOffsets[5] }],
+      [{ idx: mIdx(clientClass, 'shouldInterceptRequest', 'Landroid/webkit/WebResourceResponse;', ['Landroid/webkit/WebView;', 'Landroid/webkit/WebResourceRequest;']), access: 0x0001, codeOff: codeOffsets[6] }]
+    ),
+    // OfflineChromeClient
+    encodeClassData(
+      [{ idx: fIdx(chromeClass, 'activity'), access: 0x0012 }],
+      [{ idx: mIdx(chromeClass, '<init>', 'V', [mainClass]), access: 0x10001, codeOff: codeOffsets[7] }],
+      [{ idx: mIdx(chromeClass, 'onShowFileChooser', 'Z', ['Landroid/webkit/WebView;', 'Landroid/webkit/ValueCallback;', 'Landroid/webkit/WebChromeClient$FileChooserParams;']), access: 0x0001, codeOff: codeOffsets[8] }]
+    ),
+  ];
+
+  const classDataOffsets: number[] = [];
+  for (const cd of classDataChunks) {
+    classDataOffsets.push(dataCursor);
+    dataCursor += cd.length;
+  }
+
+  // Map list
   align4();
   const mapListOff = dataCursor;
   const mapItems: Array<[number, number, number]> = [
-    [0x0000, 1, 0], // TYPE_HEADER_ITEM
-    [0x0001, stringIdsSize, stringIdsOff], // TYPE_STRING_ID_ITEM
-    [0x0002, typeIdsSize, typeIdsOff], // TYPE_TYPE_ID_ITEM
-    [0x0003, protoIdsSize, protoIdsOff], // TYPE_PROTO_ID_ITEM
-    [0x0005, methodIdsSize, methodIdsOff], // TYPE_METHOD_ID_ITEM
-    [0x0006, classDefsSize, classDefsOff], // TYPE_CLASS_DEF_ITEM
-    [0x2001, 2, codeSectionOff], // TYPE_CODE_ITEM
-    [0x1001, protosWithParams.length, typeListSectionOff], // TYPE_TYPE_LIST
-    [0x2002, stringIdsSize, stringDataSectionOff], // TYPE_STRING_DATA_ITEM
-    [0x2000, 1, classDataOff], // TYPE_CLASS_DATA_ITEM
-    [0x1000, 1, mapListOff], // TYPE_MAP_LIST
+    [0x0000, 1, 0],
+    [0x0001, stringIdsSize, stringIdsOff],
+    [0x0002, typeIdsSize, typeIdsOff],
+    [0x0003, protoIdsSize, protoIdsOff],
+    [0x0004, fieldIdsSize, fieldIdsOff],
+    [0x0005, methodIdsSize, methodIdsOff],
+    [0x0006, classDefsSize, classDefsOff],
+    [0x2001, codeItemsBytes.length, codeSectionOff],
+    [0x1001, protosWithParams.length, typeListSectionOff],
+    [0x2002, stringIdsSize, stringDataSectionOff],
+    [0x2000, classDataChunks.length, classDataSectionOff],
+    [0x1000, 1, mapListOff],
   ];
 
   const mapListBytes = new Uint8Array(4 + mapItems.length * 12);
@@ -946,14 +1483,12 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
   const dex = new Uint8Array(totalFileSize);
   const dv = new DataView(dex.buffer);
 
-  // Header (0x70 bytes)
-  const magic = [0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00]; // "dex\n035\0"
-  dex.set(magic, 0);
+  dex.set([0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00], 0);
   dv.setUint32(0x20, totalFileSize, true);
   dv.setUint32(0x24, headerSize, true);
-  dv.setUint32(0x28, 0x12345678, true); // ENDIAN_CONSTANT
-  dv.setUint32(0x2c, 0, true); // link_size
-  dv.setUint32(0x30, 0, true); // link_off
+  dv.setUint32(0x28, 0x12345678, true);
+  dv.setUint32(0x2c, 0, true);
+  dv.setUint32(0x30, 0, true);
   dv.setUint32(0x34, mapListOff, true);
   dv.setUint32(0x38, stringIdsSize, true);
   dv.setUint32(0x3c, stringIdsOff, true);
@@ -961,8 +1496,8 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
   dv.setUint32(0x44, typeIdsOff, true);
   dv.setUint32(0x48, protoIdsSize, true);
   dv.setUint32(0x4c, protoIdsOff, true);
-  dv.setUint32(0x50, 0, true); // field_ids_size
-  dv.setUint32(0x54, 0, true); // field_ids_off
+  dv.setUint32(0x50, fieldIdsSize, true);
+  dv.setUint32(0x54, fieldIdsOff, true);
   dv.setUint32(0x58, methodIdsSize, true);
   dv.setUint32(0x5c, methodIdsOff, true);
   dv.setUint32(0x60, classDefsSize, true);
@@ -970,14 +1505,19 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
   dv.setUint32(0x68, dataSize, true);
   dv.setUint32(0x6c, dataOff, true);
 
-  // Write string_ids, type_ids, proto_ids, method_ids, class_defs
   stringDataOffsets.forEach((off, i) => dv.setUint32(stringIdsOff + i * 4, off, true));
-  typeDescriptorsFinal.forEach((desc, i) => dv.setUint32(typeIdsOff + i * 4, sIdx(desc), true));
+  typeDescriptors.forEach((desc, i) => dv.setUint32(typeIdsOff + i * 4, sIdx(desc), true));
   rawProtos.forEach((p, i) => {
     const base = protoIdsOff + i * 12;
     dv.setUint32(base + 0, sIdx(p.shorty), true);
     dv.setUint32(base + 4, tIdx(p.ret), true);
     dv.setUint32(base + 8, p.params.length > 0 ? typeListOffsets.get(p)! : 0, true);
+  });
+  fields.forEach((f, i) => {
+    const base = fieldIdsOff + i * 8;
+    dv.setUint16(base + 0, tIdx(f.cls), true);
+    dv.setUint16(base + 2, tIdx(f.type), true);
+    dv.setUint32(base + 4, sIdx(f.name), true);
   });
   methods.forEach((m, i) => {
     const base = methodIdsOff + i * 8;
@@ -985,27 +1525,24 @@ export function buildClassesDex(packageName: string, targetUrl: string): Uint8Ar
     dv.setUint16(base + 2, protoIdx(m.ret, m.params), true);
     dv.setUint32(base + 4, sIdx(m.name), true);
   });
-  {
-    const base = classDefsOff;
-    dv.setUint32(base + 0, tIdx(internalClass), true);
+  classDefsOrder.forEach((c, i) => {
+    const base = classDefsOff + i * 32;
+    dv.setUint32(base + 0, tIdx(c.cls), true);
     dv.setUint32(base + 4, 0x0001, true); // ACC_PUBLIC
-    dv.setUint32(base + 8, tIdx('Landroid/app/Activity;'), true);
-    dv.setUint32(base + 12, 0, true); // interfaces_off
-    dv.setUint32(base + 16, 0xffffffff, true); // NO_INDEX source file
-    dv.setUint32(base + 20, 0, true); // annotations_off
-    dv.setUint32(base + 24, classDataOff, true);
-    dv.setUint32(base + 28, 0, true); // static_values_off
-  }
+    dv.setUint32(base + 8, tIdx(c.sup), true);
+    dv.setUint32(base + 12, 0, true);
+    dv.setUint32(base + 16, 0xffffffff, true);
+    dv.setUint32(base + 20, 0, true);
+    dv.setUint32(base + 24, classDataOffsets[i], true);
+    dv.setUint32(base + 28, 0, true);
+  });
 
-  // Write data items
-  dex.set(codeInitBytes, codeInitOff);
-  dex.set(codeOnCreateBytes, codeOnCreateOff);
+  codeItemsBytes.forEach((ci, i) => dex.set(ci, codeOffsets[i]));
   protosWithParams.forEach((p, i) => dex.set(typeListChunks[i], typeListOffsets.get(p)!));
   stringDataChunks.forEach((c, i) => dex.set(c, stringDataOffsets[i]));
-  dex.set(classDataBytes, classDataOff);
+  classDataChunks.forEach((cd, i) => dex.set(cd, classDataOffsets[i]));
   dex.set(mapListBytes, mapListOff);
 
-  // Compute SHA-1 signature (bytes 32..end) and Adler-32 checksum (bytes 12..end)
   const sig = sha1(dex.subarray(32));
   dex.set(sig, 12);
   const cksum = adler32(dex.subarray(12));
@@ -1042,7 +1579,7 @@ async function createSelfSignedSigner() {
     0x30,
     rdn([2, 5, 4, 6], 'US'),
     rdn([2, 5, 4, 10], 'Aria48 Audio Studio'),
-    rdn([2, 5, 4, 3], 'Aria48 Tracker Android Release')
+    rdn([2, 5, 4, 3], 'Aria48 Tracker Offline Android Release')
   );
 
   const now = new Date();
@@ -1056,7 +1593,7 @@ async function createSelfSignedSigner() {
 
   const tbsCertificate = derTlv(
     0x30,
-    derTlv(0xa0, derInt(2)), // v3
+    derTlv(0xa0, derInt(2)),
     serialDer,
     algSha256Rsa,
     subjectName,
@@ -1089,7 +1626,7 @@ async function createSelfSignedSigner() {
     const issuerAndSerial = derTlv(0x30, subjectName, serialDer);
     const signerInfo = derTlv(
       0x30,
-      derInt(1), // version 1
+      derInt(1),
       issuerAndSerial,
       algSha256,
       algRsaEnc,
@@ -1098,11 +1635,11 @@ async function createSelfSignedSigner() {
 
     const signedData = derTlv(
       0x30,
-      derInt(1), // CMS version 1
-      derTlv(0x31, algSha256), // digestAlgorithms SET
-      derTlv(0x30, oidPkcs7Data), // encapContentInfo (detached)
-      derTlv(0xa0, certDer), // certificates [0] IMPLICIT
-      derTlv(0x31, signerInfo) // signerInfos SET
+      derInt(1),
+      derTlv(0x31, algSha256),
+      derTlv(0x30, oidPkcs7Data),
+      derTlv(0xa0, certDer),
+      derTlv(0x31, signerInfo)
     );
 
     return derTlv(0x30, oidPkcs7SignedData, derTlv(0xa0, signedData));
@@ -1115,13 +1652,14 @@ async function createSelfSignedSigner() {
 interface ZipEntry {
   name: string;
   data: Uint8Array;
+  compress?: boolean;
 }
 
-function buildAlignedZipSections(entries: ZipEntry[]): {
+async function buildAlignedZipSections(entries: ZipEntry[]): Promise<{
   entriesSection: Uint8Array;
   centralDir: Uint8Array;
   eocd: Uint8Array;
-} {
+}> {
   const encoder = new TextEncoder();
   const localParts: Uint8Array[] = [];
   const cdParts: Uint8Array[] = [];
@@ -1130,47 +1668,57 @@ function buildAlignedZipSections(entries: ZipEntry[]): {
   for (const entry of entries) {
     const fnBytes = encoder.encode(entry.name);
     const dataCrc = crc32(entry.data);
-    // 4-byte zipalign for stored entries
-    const headerLen = 30 + fnBytes.length;
-    const alignPad = (4 - ((offset + headerLen) % 4)) % 4;
+    let method = 0; // STORED
+    let payload = entry.data;
 
-    const lfh = new Uint8Array(headerLen + alignPad + entry.data.length);
+    if (entry.compress && entry.data.length > 64) {
+      const deflated = await deflateRaw(entry.data);
+      if (deflated && deflated.length < entry.data.length) {
+        method = 8; // DEFLATE
+        payload = deflated;
+      }
+    }
+
+    const headerLen = 30 + fnBytes.length;
+    // 4-byte zipalign ONLY applies to STORED (uncompressed) entries in Android APKs
+    const alignPad = method === 0 ? (4 - ((offset + headerLen) % 4)) % 4 : 0;
+
+    const lfh = new Uint8Array(headerLen + alignPad + payload.length);
     const ldv = new DataView(lfh.buffer);
     ldv.setUint32(0, 0x04034b50, true);
-    ldv.setUint16(4, 20, true); // version needed
-    ldv.setUint16(6, 0x0800, true); // UTF-8 filename flag
-    ldv.setUint16(8, 0, true); // STORED
+    ldv.setUint16(4, 20, true);
+    ldv.setUint16(6, 0x0800, true);
+    ldv.setUint16(8, method, true);
     ldv.setUint16(10, 0, true);
     ldv.setUint16(12, 0x5421, true);
     ldv.setUint32(14, dataCrc, true);
-    ldv.setUint32(18, entry.data.length, true);
+    ldv.setUint32(18, payload.length, true);
     ldv.setUint32(22, entry.data.length, true);
     ldv.setUint16(26, fnBytes.length, true);
     ldv.setUint16(28, alignPad, true);
     lfh.set(fnBytes, 30);
-    // extra field bytes (alignPad zero bytes) left as 0
-    lfh.set(entry.data, headerLen + alignPad);
+    lfh.set(payload, headerLen + alignPad);
     localParts.push(lfh);
 
     const cdh = new Uint8Array(46 + fnBytes.length);
     const cdv = new DataView(cdh.buffer);
     cdv.setUint32(0, 0x02014b50, true);
-    cdv.setUint16(4, 20, true); // version made by
-    cdv.setUint16(6, 20, true); // version needed
-    cdv.setUint16(8, 0x0800, true); // UTF-8
-    cdv.setUint16(10, 0, true); // STORED
+    cdv.setUint16(4, 20, true);
+    cdv.setUint16(6, 20, true);
+    cdv.setUint16(8, 0x0800, true);
+    cdv.setUint16(10, method, true);
     cdv.setUint16(12, 0, true);
     cdv.setUint16(14, 0x5421, true);
     cdv.setUint32(16, dataCrc, true);
-    cdv.setUint32(20, entry.data.length, true);
+    cdv.setUint32(20, payload.length, true);
     cdv.setUint32(24, entry.data.length, true);
     cdv.setUint16(28, fnBytes.length, true);
-    cdv.setUint16(30, 0, true); // extra field length
-    cdv.setUint16(32, 0, true); // comment length
-    cdv.setUint16(34, 0, true); // disk number
-    cdv.setUint16(36, 0, true); // internal attrs
-    cdv.setUint32(38, 0, true); // external attrs
-    cdv.setUint32(42, offset, true); // relative offset of local header
+    cdv.setUint16(30, 0, true);
+    cdv.setUint16(32, 0, true);
+    cdv.setUint16(34, 0, true);
+    cdv.setUint16(36, 0, true);
+    cdv.setUint32(38, 0, true);
+    cdv.setUint32(42, offset, true);
     cdh.set(fnBytes, 46);
     cdParts.push(cdh);
 
@@ -1239,11 +1787,9 @@ async function buildApkSignatureV2Block(
   eocdTemplate: Uint8Array,
   signer: Awaited<ReturnType<typeof createSelfSignedSigner>>
 ): Promise<{ signingBlock: Uint8Array; updatedEocd: Uint8Array }> {
-  // For APK v2 digest computation, EOCD's central directory offset is treated as entriesSection.length
   const rootDigest = await computeApkV2ChunkedSha256(entriesSection, centralDir, eocdTemplate);
 
   const SIG_ALGO_RSA_PKCS1_SHA256 = 0x0103;
-  // digest entry: u32 sig_algo + len_prefixed(digest)
   const digestEntry = (() => {
     const lp = lenPrefixedU32(rootDigest);
     const b = new Uint8Array(4 + lp.length);
@@ -1272,7 +1818,6 @@ async function buildApkSignatureV2Block(
   );
   const apkV2BlockValue = lenPrefixedU32(signerBlock);
 
-  // ID-value pair: u64 pairSize + u32 ID (0x7109871a) + value
   const APK_SIG_V2_ID = 0x7109871a;
   const pairLen = 4 + apkV2BlockValue.length;
   const pairBytes = new Uint8Array(8 + pairLen);
@@ -1282,8 +1827,7 @@ async function buildApkSignatureV2Block(
   pdv.setUint32(8, APK_SIG_V2_ID, true);
   pairBytes.set(apkV2BlockValue, 12);
 
-  // Align total signing block size to 4096-byte page boundary (optional padding block 0x42726577) or clean 8-byte block
-  const blockSizeAfterFirstU64 = pairBytes.length + 8 + 16; // pairs + size_u64 + "APK Sig Block 42"
+  const blockSizeAfterFirstU64 = pairBytes.length + 8 + 16;
   const totalBlockSize = 8 + blockSizeAfterFirstU64;
   const signingBlock = new Uint8Array(totalBlockSize);
   const bdv = new DataView(signingBlock.buffer);
@@ -1301,8 +1845,13 @@ async function buildApkSignatureV2Block(
   return { signingBlock, updatedEocd };
 }
 
+export interface OfflineBundleAsset {
+  path: string;
+  data: Uint8Array;
+}
+
 export interface ApkBuildInput {
-  targetUrl: string;
+  offlineFiles: OfflineBundleAsset[];
   iconPngBytes: Uint8Array;
   appName?: string;
   packageName?: string;
@@ -1314,16 +1863,16 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
   apkBytes: Uint8Array;
   fileName: string;
   packageName: string;
-  targetUrl: string;
+  bundledFilesCount: number;
 }> {
+  if (!input.offlineFiles || input.offlineFiles.length === 0) {
+    throw new Error('Offline asset bundle is empty; cannot compile standalone APK');
+  }
+
   const packageName = input.packageName || 'com.aria48.tracker';
   const appName = input.appName || 'Aria48 Tracker';
   const versionName = input.versionName || '2.4.0';
   const versionCode = input.versionCode || 240;
-  const safeUrl =
-    input.targetUrl && /^https?:\/\//i.test(input.targetUrl)
-      ? input.targetUrl
-      : 'https://aria48-tracker.web.app/';
 
   const iconEntryPath = 'res/mipmap-xxhdpi-v4/ic_launcher.png';
   const manifestXml = buildBinaryAndroidManifest({
@@ -1334,7 +1883,8 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
     targetSdkVersion: 33,
   });
   const resourcesArsc = buildResourcesArsc(packageName, appName, iconEntryPath);
-  const classesDex = buildClassesDex(packageName, safeUrl);
+  const classesDex = buildClassesDex(packageName);
+
   const appConfigJson = new TextEncoder().encode(
     JSON.stringify(
       {
@@ -1342,7 +1892,9 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
         package: packageName,
         version: versionName,
         code: versionCode,
-        url: safeUrl,
+        mode: 'offline-standalone',
+        origin: 'https://appassets.androidplatform.net/index.html',
+        bundledFiles: input.offlineFiles.length,
         builtAt: new Date().toISOString(),
       },
       null,
@@ -1350,18 +1902,48 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
     )
   );
 
+  const fallback1x1Png = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54,
+    0x78, 0x9c, 0x63, 0x60, 0x60, 0xf8, 0x0f, 0x00,
+    0x01, 0x04, 0x01, 0x00, 0x8d, 0x84, 0x6f, 0x1d,
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+  ]);
+  const hasValidPng =
+    input.iconPngBytes &&
+    input.iconPngBytes.length >= 24 &&
+    input.iconPngBytes[0] === 0x89 &&
+    input.iconPngBytes[1] === 0x50 &&
+    input.iconPngBytes[2] === 0x4e &&
+    input.iconPngBytes[3] === 0x47;
+  const resolvedIconBytes = hasValidPng ? input.iconPngBytes : fallback1x1Png;
+
   const baseEntries: ZipEntry[] = [
-    { name: 'AndroidManifest.xml', data: manifestXml },
-    { name: 'classes.dex', data: classesDex },
-    { name: 'resources.arsc', data: resourcesArsc },
-    { name: iconEntryPath, data: input.iconPngBytes },
-    { name: 'assets/app-config.json', data: appConfigJson },
+    { name: 'AndroidManifest.xml', data: manifestXml, compress: false },
+    { name: 'classes.dex', data: classesDex, compress: false },
+    { name: 'resources.arsc', data: resourcesArsc, compress: false },
+    { name: iconEntryPath, data: resolvedIconBytes, compress: false },
+    { name: 'assets/app-config.json', data: appConfigJson, compress: true },
   ];
 
-  // Build v1 JAR signature (META-INF/MANIFEST.MF, META-INF/CERT.SF, META-INF/CERT.RSA)
+  for (const file of input.offlineFiles) {
+    const clean = file.path.replace(/^\/+/, '');
+    // Keep binary wasm uncompressed if small or deflate JS/CSS/HTML cleanly; AssetManager.open() reads both STORED and DEFLATE
+    const isBinaryAsset = clean.endsWith('.png') || clean.endsWith('.ico');
+    baseEntries.push({
+      name: `assets/www/${clean}`,
+      data: file.data,
+      compress: !isBinaryAsset,
+    });
+  }
+
   const manifestLines: string[] = [
     'Manifest-Version: 1.0',
-    'Created-By: Aria48 APK Packager',
+    'Created-By: Aria48 Offline APK Packager',
     '',
   ];
   const sfSectionEntries: string[] = [];
@@ -1377,7 +1959,7 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
   const manifestMfBytes = new TextEncoder().encode(manifestLines.join('\r\n'));
   const mfFullDigest = base64FromBytes(await sha256(manifestMfBytes));
   const certSfStr =
-    `Signature-Version: 1.0\r\nCreated-By: Aria48 APK Packager\r\nSHA-256-Digest-Manifest: ${mfFullDigest}\r\n\r\n` +
+    `Signature-Version: 1.0\r\nCreated-By: Aria48 Offline APK Packager\r\nSHA-256-Digest-Manifest: ${mfFullDigest}\r\n\r\n` +
     sfSectionEntries.join('');
   const certSfBytes = new TextEncoder().encode(certSfStr);
 
@@ -1386,12 +1968,12 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
 
   const allEntries: ZipEntry[] = [
     ...baseEntries,
-    { name: 'META-INF/MANIFEST.MF', data: manifestMfBytes },
-    { name: 'META-INF/CERT.SF', data: certSfBytes },
-    { name: 'META-INF/CERT.RSA', data: certRsaBytes },
+    { name: 'META-INF/MANIFEST.MF', data: manifestMfBytes, compress: false },
+    { name: 'META-INF/CERT.SF', data: certSfBytes, compress: false },
+    { name: 'META-INF/CERT.RSA', data: certRsaBytes, compress: false },
   ];
 
-  const { entriesSection, centralDir, eocd } = buildAlignedZipSections(allEntries);
+  const { entriesSection, centralDir, eocd } = await buildAlignedZipSections(allEntries);
   const { signingBlock, updatedEocd } = await buildApkSignatureV2Block(
     entriesSection,
     centralDir,
@@ -1402,8 +1984,8 @@ export async function buildSignedAria48Apk(input: ApkBuildInput): Promise<{
   const apkBytes = concatBytes(entriesSection, signingBlock, centralDir, updatedEocd);
   return {
     apkBytes,
-    fileName: `Aria48Tracker-v${versionName}.apk`,
+    fileName: `Aria48Tracker-v${versionName}-offline.apk`,
     packageName,
-    targetUrl: safeUrl,
+    bundledFilesCount: input.offlineFiles.length,
   };
 }

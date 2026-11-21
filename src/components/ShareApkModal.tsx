@@ -8,9 +8,10 @@ import {
   Copy,
   ShieldCheck,
   Sparkles,
+  WifiOff,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { buildSignedAria48Apk } from '../utils/androidApkBuilder';
+import { buildSignedAria48Apk, OfflineBundleAsset } from '../utils/androidApkBuilder';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface ShareApkModalProps {
@@ -19,10 +20,18 @@ interface ShareApkModalProps {
   trackTitle?: string | null;
 }
 
+interface OfflineManifestResponse {
+  generatedAt?: string;
+  manifestPrefix?: string;
+  files: string[];
+}
+
 export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkModalProps) {
   const [copied, setCopied] = useState(false);
   const [isGeneratingApk, setIsGeneratingApk] = useState(false);
+  const [buildProgressLabel, setBuildProgressLabel] = useState<string>('');
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+  const [bundledInfo, setBundledInfo] = useState<{ files: number; sizeMb: string } | null>(null);
   const [apkError, setApkError] = useState<string | null>(null);
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
@@ -67,25 +76,67 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
   };
 
   /**
-   * Builds and signs a genuine zipaligned Android APK (binary AXML, resources.arsc,
-   * Dalvik classes.dex, v1 JAR signature + APK Signature Scheme v2).
+   * Downloads the full compiled production web app (HTML/JS/CSS + SunVox WASM + WebSID WASM +
+   * SpessaSynth AudioWorklet) and compiles a 100% offline signed Android APK that serves everything
+   * from inside assets/www/ with zero Google AI Studio sign-in or network access required.
    */
   const handleDownloadApk = async () => {
     setIsGeneratingApk(true);
     setDownloadSuccess(false);
     setApkError(null);
+    setBundledInfo(null);
+    setBuildProgressLabel('Preparing offline app bundle...');
 
     try {
-      let iconPngBytes = new Uint8Array(0);
-      try {
-        const iconResp = await fetch('/pwa-192x192.png');
-        if (iconResp.ok) {
-          iconPngBytes = new Uint8Array(await iconResp.arrayBuffer());
-        }
-      } catch {}
+      const manifestResp = await fetch('/offline-apk-manifest.json', { cache: 'no-store' });
+      if (!manifestResp.ok) {
+        throw new Error(`Could not load offline bundle manifest (${manifestResp.status})`);
+      }
+      const manifest = (await manifestResp.json()) as OfflineManifestResponse;
+      if (!manifest.files || manifest.files.length === 0) {
+        throw new Error('Offline bundle manifest returned no files');
+      }
 
-      const { apkBytes, fileName } = await buildSignedAria48Apk({
-        targetUrl: currentUrl,
+      const prefix = manifest.manifestPrefix || '/';
+      const offlineFiles: OfflineBundleAsset[] = [];
+
+      for (let i = 0; i < manifest.files.length; i++) {
+        const relPath = manifest.files[i];
+        setBuildProgressLabel(`Packing offline assets (${i + 1}/${manifest.files.length})...`);
+        const assetUrl = `${prefix.replace(/\/+$/, '')}/${relPath.replace(/^\/+/, '')}`;
+        const assetResp = await fetch(assetUrl, { cache: 'no-store' });
+        if (!assetResp.ok) {
+          throw new Error(`Failed bundling offline asset ${relPath} (${assetResp.status})`);
+        }
+        let bytes: Uint8Array = new Uint8Array(await assetResp.arrayBuffer());
+
+        // Inside the self-contained APK, remove PWA SW registration tag so WebView starts silently with zero SW lookups
+        if (relPath === 'index.html') {
+          const htmlStr = new TextDecoder()
+            .decode(bytes)
+            .replace(/<script[^>]*id=["']vite-plugin-pwa:register-sw["'][^>]*><\/script>/gi, '');
+          bytes = new Uint8Array(new TextEncoder().encode(htmlStr));
+        }
+
+        offlineFiles.push({ path: relPath, data: bytes });
+      }
+
+      let iconPngBytes: Uint8Array = new Uint8Array(0);
+      const bundledIcon = offlineFiles.find((f) => f.path === 'pwa-192x192.png');
+      if (bundledIcon) {
+        iconPngBytes = bundledIcon.data;
+      } else {
+        try {
+          const iconResp = await fetch('/pwa-192x192.png');
+          if (iconResp.ok) {
+            iconPngBytes = new Uint8Array(await iconResp.arrayBuffer());
+          }
+        } catch {}
+      }
+
+      setBuildProgressLabel('Compiling Dalvik DEX & signing APK...');
+      const { apkBytes, fileName, bundledFilesCount } = await buildSignedAria48Apk({
+        offlineFiles,
         iconPngBytes,
         appName: 'Aria48 Tracker',
         packageName: 'com.aria48.tracker',
@@ -93,7 +144,9 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
         versionCode: 240,
       });
 
-      const blob = new Blob([apkBytes], { type: 'application/vnd.android.package-archive' });
+      const apkBufCopy = new Uint8Array(apkBytes.byteLength);
+      apkBufCopy.set(apkBytes);
+      const blob = new Blob([apkBufCopy], { type: 'application/vnd.android.package-archive' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -103,12 +156,18 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 5000);
 
+      setBundledInfo({
+        files: bundledFilesCount,
+        sizeMb: (apkBytes.byteLength / (1024 * 1024)).toFixed(2),
+      });
       setIsGeneratingApk(false);
+      setBuildProgressLabel('');
       setDownloadSuccess(true);
     } catch (e: any) {
-      console.warn('APK generation failed:', e);
-      setApkError(e?.message || 'Could not compile signed APK package');
+      console.warn('Offline APK generation failed:', e);
+      setApkError(e?.message || 'Could not compile offline signed APK package');
       setIsGeneratingApk(false);
+      setBuildProgressLabel('');
     }
   };
 
@@ -135,13 +194,13 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
               </div>
               <div>
                 <h2 className="text-base font-black uppercase tracking-wider text-white flex items-center gap-2">
-                  Share &amp; Android APK
+                  Offline Android APK
                   <span className="text-[9px] px-1.5 py-0.5 bg-emerald-950 text-emerald-300 rounded font-normal border border-emerald-800">
-                    Android 5.0+ · API 21–33
+                    100% Offline · API 21–33
                   </span>
                 </h2>
                 <p className="text-[11px] text-zinc-400 font-sans">
-                  Download a signed Android APK wrapper or install directly as a WebAPK
+                  Self-contained Android package — no internet or Google AI Studio sign-in required
                 </p>
               </div>
             </div>
@@ -154,20 +213,20 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
             </button>
           </div>
 
-          {/* Primary APK Download Action Card */}
+          {/* Primary Offline APK Download Card */}
           <div className="bg-gradient-to-br from-emerald-950/40 via-zinc-900/60 to-black border border-emerald-500/30 rounded-xl p-4 flex flex-col gap-3 shadow-inner">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2 text-xs font-bold text-emerald-300 uppercase tracking-wide">
-                  <Download size={14} className="text-emerald-400" />
-                  <span>Aria48Tracker-v2.4.0.apk (v1 + v2 Signed)</span>
+                  <WifiOff size={14} className="text-emerald-400" />
+                  <span>Aria48Tracker-v2.4.0-offline.apk</span>
                 </div>
                 <p className="text-[10.5px] text-zinc-400 font-sans mt-1 leading-relaxed">
-                  Compiled Dalvik WebView APK with binary AXML manifest, mipmap icon, 4-byte zipalign, and RSA-2048 v1/v2 signatures pointing to your live studio.
+                  Bundles the full Aria48 Studio, SunVox 2.1.4 WASM, SpessaSynth Core/AudioWorklet, and WebSID WASM directly inside <code className="text-emerald-300">assets/www/</code> with native Android file-picker support. Opens straight into the tracker in Airplane Mode with zero AI Studio login prompt.
                 </p>
               </div>
               <span className="text-[9.5px] font-mono text-zinc-400 whitespace-nowrap bg-black/60 px-2 py-0.5 rounded border border-zinc-800">
-                v2.4.0 · APK v2
+                Standalone · v2
               </span>
             </div>
 
@@ -177,27 +236,33 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
               </div>
             )}
 
+            {downloadSuccess && bundledInfo && (
+              <div className="text-[10px] font-mono text-emerald-300 bg-emerald-950/40 border border-emerald-700/50 rounded px-2.5 py-1.5">
+                Bundled {bundledInfo.files} offline runtime files into {bundledInfo.sizeMb} MB signed APK.
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 id="modal-download-apk-btn"
                 onClick={() => void handleDownloadApk()}
                 disabled={isGeneratingApk}
-                className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold rounded-lg text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(16,185,129,0.3)] cursor-pointer"
+                className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold rounded-lg text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(16,185,129,0.3)] cursor-pointer disabled:opacity-60"
               >
                 {isGeneratingApk ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    <span>Compiling &amp; Signing APK...</span>
+                    <span>{buildProgressLabel || 'Packaging Offline APK...'}</span>
                   </>
                 ) : downloadSuccess ? (
                   <>
                     <Check size={15} className="text-white" />
-                    <span>Signed APK Downloaded!</span>
+                    <span>Offline APK Downloaded!</span>
                   </>
                 ) : (
                   <>
                     <Download size={15} />
-                    <span>Download Signed APK (.apk)</span>
+                    <span>Download Offline APK (.apk)</span>
                   </>
                 )}
               </button>
@@ -224,18 +289,18 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
             {/* Quick Install Guide */}
             <div className="mt-1 pt-2 border-t border-emerald-900/40 text-[9.5px] text-zinc-400 font-sans flex flex-col gap-1">
               <span className="text-emerald-400 font-mono font-bold text-[9px] uppercase tracking-wider">
-                Installation on Android:
+                Installation on Android (Works 100% Offline):
               </span>
-              <p>1. Tap Download Signed APK &gt; open the downloaded file in Files or Chrome.</p>
-              <p>2. Allow &quot;Install unknown apps&quot; for your browser/file manager if prompted.</p>
-              <p>3. Confirm Install (note: self-signed APKs show a Play Protect &quot;Install anyway&quot; prompt).</p>
+              <p>1. Tap Download Offline APK &gt; open the `.apk` file from Android Files or Downloads.</p>
+              <p>2. Allow &quot;Install unknown apps&quot; if prompted; confirm Install (&quot;Install anyway&quot; for self-signed cert).</p>
+              <p>3. Launch Aria48 Tracker anywhere — loads locally from APK assets with no Google login gate.</p>
             </div>
           </div>
 
-          {/* Shareable App URL Section */}
+          {/* Shareable Web URL Section */}
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3 flex flex-col gap-2">
             <span className="text-[10px] text-zinc-400 uppercase tracking-wider font-bold">
-              Target App URL Embedded in APK:
+              Optional Web Studio URL (APK Runs Locally Offline):
             </span>
             <div className="flex items-center gap-1.5 bg-black border border-zinc-800 rounded-lg p-1.5">
               <input
@@ -268,7 +333,7 @@ export default function ShareApkModal({ isOpen, onClose, trackTitle }: ShareApkM
           <div className="flex items-center justify-between text-[10px] text-zinc-500 border-t border-zinc-900 pt-3">
             <span className="flex items-center gap-1.5">
               <ShieldCheck size={12} className="text-emerald-400" />
-              Real DEX 035 + Binary AXML + RSA-2048 v1/v2 Signed
+              Bundled Local Assets + Multi-Class DEX + v1/v2 Signed
             </span>
             <button
               onClick={onClose}
