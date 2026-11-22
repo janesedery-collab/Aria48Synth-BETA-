@@ -83,6 +83,7 @@ export interface ChiptuneImportResult {
     expansions: string[];
     machine: string;
     subsongsCount: number;
+    maxFxColumns?: number;
     channels: { index: number; name: string; chip: string }[];
   };
   channelSoundFonts?: { [channelId: number]: string };
@@ -801,11 +802,14 @@ function parseNSF(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
 function parseFTM(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'module.ftm'): ChiptuneImportResult {
   const mod = parseFamiTrackerBinary(arrayBuffer, fileName);
   const conv = convertFamiTrackerToAriaPatterns(mod, 0);
+  const analysis = analyzePatternMatrix(conv.allPatterns.flat());
+  const octaveRange = analysis.octaveRange && analysis.octaveRange !== 'N/A' ? analysis.octaveRange : 'C0 - B7';
   return {
     patterns: conv.patterns,
     allPatterns: conv.allPatterns,
     bpm: conv.bpm,
     chipType: conv.chipType,
+    octaveRange,
     title: mod.title,
     fileName,
     duration: formatDuration(conv.durationSeconds),
@@ -818,12 +822,13 @@ function parseFTM(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'module.f
       expansions: mod.expansions,
       machine: mod.machine,
       subsongsCount: mod.songs.length,
+      maxFxColumns: mod.maxFxColumns,
       channels: mod.channels.map((c) => ({ index: c.index, name: c.name, chip: c.chip })),
     },
     log: [
       ...logs,
       ...mod.parseNotes,
-      `[FAMITRACKER] Parsed ${mod.format.toUpperCase()} ("${mod.title}") · ${conv.channelsCount} ch · Expansions: ${mod.expansions.join(', ')}`
+      `[FAMITRACKER] Parsed ${mod.format.toUpperCase()} ("${mod.title}") · ${conv.channelsCount} ch · ${mod.instruments.length} inst · ${mod.dpcmSamples.length} DPCM · Expansions: ${mod.expansions.join(', ')}`
     ]
   };
 }

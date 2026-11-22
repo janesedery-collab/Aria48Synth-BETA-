@@ -104,6 +104,7 @@ function createChannelState(index, desc, prevMuted = false, prevSolo = false, sc
     pitchFine: 0,
     seqTick: 0,
     seqPos: [0, 0, 0, 0, 0],
+    seqEnded: [false, false, false, false, false],
     released: false,
     gate: false,
     cutTicks: -1,
@@ -124,6 +125,8 @@ function createChannelState(index, desc, prevMuted = false, prevSolo = false, sc
     dpcmSampleIdx: -1,
     dpcmPos: 0,
     dpcmAcc: 64,
+    dpcmHpPrev: 0,
+    dpcmHpOut: 0,
     dpcmRate: 15,
     dpcmLoop: false,
     level: 0,
@@ -158,6 +161,7 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
 
     this.speed = 6;
     this.tempo = 150;
+    this.bpmScale = 1.0;
     this.machine = 'NTSC';
     this.chState = [];
     this.previewVoices = [];
@@ -193,6 +197,7 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       this.module = msg.module;
       this.activeSongIndex = Math.max(0, Math.min((this.module.songs?.length || 1) - 1, msg.songIndex || 0));
       this.machine = this.module.machine || 'NTSC';
+      this.bpmScale = 1.0;
       this.resetPlaybackState(false);
     } else if (msg.type === 'play') {
       if (this.module) {
@@ -215,10 +220,16 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
     } else if (msg.type === 'setSubsong') {
       if (this.module && this.module.songs && this.module.songs[msg.index]) {
         this.activeSongIndex = msg.index;
+        this.bpmScale = 1.0;
         this.resetPlaybackState(this.isPlaying);
       }
     } else if (msg.type === 'setMachine') {
       this.machine = msg.machine || 'NTSC';
+    } else if (msg.type === 'setBpmScale') {
+      const nextScale = Number(msg.scale);
+      if (Number.isFinite(nextScale) && nextScale > 0) {
+        this.bpmScale = Math.max(0.2, Math.min(4.0, nextScale));
+      }
     } else if (msg.type === 'setMuteSolo') {
       const mutes = msg.mutes || [];
       const solos = msg.solos || [];
@@ -391,22 +402,38 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       st.dpcmSampleIdx = -1;
       return;
     }
-    const inst = this.getInstrumentForChannel(st);
     const keyIdx = Math.max(0, Math.min(95, noteId - 1));
+    let inst = this.getInstrumentForChannel(st);
+
+    // If channel has no explicit instrument yet, locate any 2A03 instrument mapping this DPCM key
+    if ((!inst || !Array.isArray(inst.dpcmMap) || !inst.dpcmMap[keyIdx] || inst.dpcmMap[keyIdx].sampleIndex < 0) && this.module?.instruments) {
+      const fallbackDpcmInst = this.module.instruments.find(
+        (ins) => Array.isArray(ins.dpcmMap) && ins.dpcmMap[keyIdx] && ins.dpcmMap[keyIdx].sampleIndex >= 0
+      );
+      if (fallbackDpcmInst) {
+        inst = fallbackDpcmInst;
+        if (st.instIdx < 0) st.instIdx = fallbackDpcmInst.index;
+      }
+    }
+
     if (inst && Array.isArray(inst.dpcmMap) && inst.dpcmMap.length > keyIdx) {
       const mapping = inst.dpcmMap[keyIdx];
       if (mapping && mapping.sampleIndex >= 0) {
         const byId = samples.findIndex((s) => s.index === mapping.sampleIndex);
-        st.dpcmSampleIdx = byId >= 0 ? byId : (mapping.sampleIndex < samples.length ? mapping.sampleIndex : -1);
+        st.dpcmSampleIdx = byId >= 0 ? byId : (mapping.sampleIndex < samples.length ? mapping.sampleIndex : 0);
         st.dpcmRate = mapping.pitch & 0x0f;
         st.dpcmLoop = Boolean(mapping.loop);
         st.dpcmPos = 0;
         st.dpcmAcc = mapping.deltaCounter >= 0 ? mapping.deltaCounter & 0x7f : 64;
+        st.dpcmHpPrev = (st.dpcmAcc - 64) / 64;
+        st.dpcmHpOut = 0;
+        st.gate = true;
+        st.envVol = 15;
         return;
       }
-      // If instrument explicitly has a DPCM keymap and this key isn't mapped, don't randomly play wrong sample
+      // If instrument explicitly has a DPCM keymap and this key isn't mapped, fall back safely only during manual preview
       const anyMapped = inst.dpcmMap.some((m) => m && m.sampleIndex >= 0);
-      if (anyMapped) {
+      if (anyMapped && !st.isPreview) {
         st.dpcmSampleIdx = -1;
         return;
       }
@@ -416,6 +443,10 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
     st.dpcmLoop = false;
     st.dpcmPos = 0;
     st.dpcmAcc = 64;
+    st.dpcmHpPrev = 0;
+    st.dpcmHpOut = 0;
+    st.gate = true;
+    st.envVol = 15;
   }
 
   stepSequencerTick() {
@@ -469,7 +500,7 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
     }
 
     if (cell.note === 97) {
-      // === Note Cut: immediate silence
+      // === Note Cut: immediate silence & clear pitch slides
       st.gate = false;
       st.activeNoteId = 0;
       st.noteName = cell.noteName;
@@ -477,6 +508,9 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       st.macroPitchAccum = 0;
       st.macroFixedNote = -1;
       st.macroArpSemis = 0;
+      st.slideSpeed = 0;
+      st.portaSpeed = 0;
+      st.noteSlideDir = 0;
     } else if (cell.note === 98) {
       // OFF / Release: jump sequences to releasePoint (if available)
       st.released = true;
@@ -504,6 +538,7 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       st.released = false;
       st.seqTick = 0;
       st.seqPos = [0, 0, 0, 0, 0];
+      st.seqEnded = [false, false, false, false, false];
       st.arpRelAccum = 0;
       st.macroPitchAccum = 0;
       st.macroArpSemis = 0;
@@ -541,13 +576,19 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
           st.arpY = y;
           st.arpTick = 0;
         } else if (cmd === '1') {
-          // Hardware pitch slide up (decrease period)
+          // Hardware pitch slide up (decrease period) - mutually exclusive with 3xx/Qxy/Rxy
           st.slideSpeed = val === 0 ? 0 : -val;
+          st.portaSpeed = 0;
+          st.noteSlideDir = 0;
         } else if (cmd === '2') {
-          // Hardware pitch slide down (increase period)
+          // Hardware pitch slide down (increase period) - mutually exclusive with 3xx/Qxy/Rxy
           st.slideSpeed = val === 0 ? 0 : val;
+          st.portaSpeed = 0;
+          st.noteSlideDir = 0;
         } else if (cmd === '3') {
           st.portaSpeed = val;
+          st.slideSpeed = 0;
+          st.noteSlideDir = 0;
           if (cell.note > 0 && cell.note < 97 && st.baseFreq > 0) {
             st.portaTargetFreq = ftNoteToFreq(cell.note, 0, st.pitchFine, st.freqMult);
           }
@@ -584,6 +625,8 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
           st.noteSlideSpeed = Math.max(1, x);
           st.noteSlideSemis = y;
           st.noteSlideAccum = 0;
+          st.slideSpeed = 0;
+          st.portaSpeed = 0;
         } else if (cmd === 'W') {
           st.dpcmRate = val & 0x0f;
           st.s5bNoisePeriod = val & 0x1f;
@@ -665,14 +708,18 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       const seq = this.module.sequences.find((s) => s.type === sType && s.index === seqIdx && s.chip === inst.chip);
       if (seq && seq.releasePoint >= 0 && seq.releasePoint < seq.items.length) {
         st.seqPos[sType] = seq.releasePoint;
+        st.seqEnded[sType] = false;
       }
     }
   }
 
-  stepSequenceIndex(seq, pos, released) {
+  stepSequenceIndex(seq, pos, released, wasEnded) {
     const len = seq.items.length;
-    if (len <= 0) return 0;
+    if (len <= 0) return { pos: 0, ended: true };
+    if (wasEnded) return { pos: Math.max(0, Math.min(len - 1, pos)), ended: true };
+
     let next = pos + 1;
+    let ended = false;
 
     if (!released) {
       if (seq.releasePoint >= 0 && seq.releasePoint <= len) {
@@ -681,6 +728,7 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
             next = seq.loopPoint;
           } else {
             next = Math.max(0, seq.releasePoint - 1);
+            ended = true;
           }
         }
       } else if (next >= len) {
@@ -688,6 +736,7 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
           next = seq.loopPoint;
         } else {
           next = len - 1;
+          ended = true;
         }
       }
     } else {
@@ -695,14 +744,16 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
         next = seq.releasePoint;
       } else if (next >= len) {
         next = len - 1;
+        ended = true;
       }
     }
-    return Math.max(0, Math.min(len - 1, next));
+    return { pos: Math.max(0, Math.min(len - 1, next)), ended };
   }
 
   evaluateMacrosForChannel(st, advanceFirst) {
     const inst = this.getInstrumentForChannel(st);
     let seqVol = st.vol;
+    if (!Array.isArray(st.seqEnded)) st.seqEnded = [false, false, false, false, false];
 
     if (inst && this.module && Array.isArray(this.module.sequences)) {
       // 0: Volume envelope
@@ -710,7 +761,11 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       if (volSeqIdx >= 0) {
         const seq = this.module.sequences.find((s) => s.type === 0 && s.index === volSeqIdx && s.chip === inst.chip);
         if (seq && seq.items.length > 0) {
-          if (advanceFirst) st.seqPos[0] = this.stepSequenceIndex(seq, st.seqPos[0], st.released);
+          if (advanceFirst) {
+            const step = this.stepSequenceIndex(seq, st.seqPos[0], st.released, st.seqEnded[0]);
+            st.seqPos[0] = step.pos;
+            st.seqEnded[0] = step.ended;
+          }
           const rawItem = Math.max(0, seq.items[st.seqPos[0]]);
           const scale = seq.chip === 'FDS' || rawItem > 15 ? 31 : 15;
           if (rawItem === 0 || st.vol === 0) {
@@ -727,7 +782,13 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       if (arpSeqIdx >= 0) {
         const seq = this.module.sequences.find((s) => s.type === 1 && s.index === arpSeqIdx && s.chip === inst.chip);
         if (seq && seq.items.length > 0) {
-          if (advanceFirst) st.seqPos[1] = this.stepSequenceIndex(seq, st.seqPos[1], st.released);
+          let skipRelAccum = st.seqEnded[1];
+          if (advanceFirst) {
+            const step = this.stepSequenceIndex(seq, st.seqPos[1], st.released, st.seqEnded[1]);
+            st.seqPos[1] = step.pos;
+            skipRelAccum = step.ended;
+            st.seqEnded[1] = step.ended;
+          }
           const raw = seq.items[st.seqPos[1]];
           const setting = seq.setting & 0x03;
           if (setting === 1) {
@@ -736,9 +797,11 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
             st.macroFixedNote = Math.max(1, Math.min(96, unsignedVal + 1));
             st.macroArpSemis = 0;
           } else if (setting === 2) {
-            // Relative cumulative semitones
+            // Relative cumulative semitones — NEVER accumulate once non-looping macro has finished
             st.macroFixedNote = -1;
-            st.arpRelAccum = Math.max(-48, Math.min(48, st.arpRelAccum + raw));
+            if (!skipRelAccum) {
+              st.arpRelAccum = Math.max(-48, Math.min(48, st.arpRelAccum + raw));
+            }
             st.macroArpSemis = st.arpRelAccum;
           } else if (setting === 3) {
             // Scheme (signed 6-bit offset)
@@ -753,23 +816,39 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
         }
       }
 
-      // 2: Pitch envelope (accumulates signed hardware pitch units per tick)
+      // 2: Pitch envelope (accumulates signed hardware pitch units per active macro step only)
       const pitchSeqIdx = inst.seqIndices[2];
       if (pitchSeqIdx >= 0) {
         const seq = this.module.sequences.find((s) => s.type === 2 && s.index === pitchSeqIdx && s.chip === inst.chip);
         if (seq && seq.items.length > 0) {
-          if (advanceFirst) st.seqPos[2] = this.stepSequenceIndex(seq, st.seqPos[2], st.released);
-          st.macroPitchAccum += seq.items[st.seqPos[2]];
+          let skipPitchAccum = st.seqEnded[2];
+          if (advanceFirst) {
+            const step = this.stepSequenceIndex(seq, st.seqPos[2], st.released, st.seqEnded[2]);
+            st.seqPos[2] = step.pos;
+            skipPitchAccum = step.ended;
+            st.seqEnded[2] = step.ended;
+          }
+          if (!skipPitchAccum) {
+            st.macroPitchAccum = Math.max(-1600, Math.min(1600, st.macroPitchAccum + seq.items[st.seqPos[2]]));
+          }
         }
       }
 
-      // 3: Hi-Pitch envelope (16x pitch units)
+      // 3: Hi-Pitch envelope (16x pitch units per active macro step only)
       const hiPitchSeqIdx = inst.seqIndices[3];
       if (hiPitchSeqIdx >= 0) {
         const seq = this.module.sequences.find((s) => s.type === 3 && s.index === hiPitchSeqIdx && s.chip === inst.chip);
         if (seq && seq.items.length > 0) {
-          if (advanceFirst) st.seqPos[3] = this.stepSequenceIndex(seq, st.seqPos[3], st.released);
-          st.macroPitchAccum += seq.items[st.seqPos[3]] * 16;
+          let skipHiPitchAccum = st.seqEnded[3];
+          if (advanceFirst) {
+            const step = this.stepSequenceIndex(seq, st.seqPos[3], st.released, st.seqEnded[3]);
+            st.seqPos[3] = step.pos;
+            skipHiPitchAccum = step.ended;
+            st.seqEnded[3] = step.ended;
+          }
+          if (!skipHiPitchAccum) {
+            st.macroPitchAccum = Math.max(-1600, Math.min(1600, st.macroPitchAccum + seq.items[st.seqPos[3]] * 16));
+          }
         }
       }
 
@@ -778,7 +857,11 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       if (dutySeqIdx >= 0) {
         const seq = this.module.sequences.find((s) => s.type === 4 && s.index === dutySeqIdx && s.chip === inst.chip);
         if (seq && seq.items.length > 0) {
-          if (advanceFirst) st.seqPos[4] = this.stepSequenceIndex(seq, st.seqPos[4], st.released);
+          if (advanceFirst) {
+            const step = this.stepSequenceIndex(seq, st.seqPos[4], st.released, st.seqEnded[4]);
+            st.seqPos[4] = step.pos;
+            st.seqEnded[4] = step.ended;
+          }
           const dVal = seq.items[st.seqPos[4]];
           const dUnsigned = dVal < 0 ? dVal + 256 : dVal;
           st.duty = dUnsigned & 7;
@@ -818,18 +901,19 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
       semiOffset += Math.sin(st.vibPhase) * (st.vibDepth / 15) * 0.7;
     }
 
-    // Base frequency after note + arp + vibrato
+    // Base frequency after note + arp + vibrato (full Oct 0..7 C-0..B-7)
     const freqAfterArp = ftNoteToFreq(noteToUse, semiOffset, st.pitchFine, st.freqMult);
     if (freqAfterArp <= 0) return;
 
-    // Combine with period-domain slide & macroPitchAccum (accurate across all octaves 0..7)
+    // Combine with bounded period-domain slide & macroPitchAccum (accurate across all octaves 0..7)
     const totalPeriodDelta = st.periodOffset - st.macroPitchAccum;
     if (totalPeriodDelta === 0) {
       st.curFreq = freqAfterArp;
     } else {
       const cpu = this.getCpuHz();
       const basePeriod = cpu / (16.0 * freqAfterArp);
-      const effPeriod = Math.max(4.0, Math.min(8191.0, basePeriod + totalPeriodDelta));
+      // Period >= 18.0 prevents ultrasonic runaway above ~6.2kHz while allowing B-7 (period ~28) cleanly
+      const effPeriod = Math.max(18.0, Math.min(8191.0, basePeriod + totalPeriodDelta));
       st.curFreq = cpu / (16.0 * effPeriod);
     }
   }
@@ -1033,7 +1117,11 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
                 else if (!bit && st.dpcmAcc >= 2) st.dpcmAcc -= 2;
               }
             }
-            raw = ((st.dpcmAcc - 64) / 64) * 0.38;
+            const x = (st.dpcmAcc - 64) / 64;
+            const y = x - (st.dpcmHpPrev || 0) + 0.996 * (st.dpcmHpOut || 0);
+            st.dpcmHpPrev = x;
+            st.dpcmHpOut = y;
+            raw = Math.max(-0.85, Math.min(0.85, y * 0.72));
           }
         }
       }
@@ -1191,7 +1279,9 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
     const frames = outL.length;
 
     const tickHz = this.machine === 'PAL' ? 50 : 60;
-    const samplesPerTick = (sampleRate / tickHz) * (150 / Math.max(30, this.tempo));
+    const samplesPerTick =
+      ((sampleRate / tickHz) * (150 / Math.max(30, this.tempo))) /
+      Math.max(0.2, this.bpmScale || 1.0);
     const anySolo = this.chState.some((c) => c.solo);
 
     const wasmReady =
@@ -1209,6 +1299,15 @@ class AriaNesWorkletProcessor extends AudioWorkletProcessor {
         if (this.tickSamplesAccum >= samplesPerTick) {
           this.tickSamplesAccum -= samplesPerTick;
           this.stepSequencerTick();
+        }
+        if (this.previewVoices.length > 0) {
+          this.previewTickAccum++;
+          if (this.previewTickAccum >= samplesPerTick) {
+            this.previewTickAccum -= samplesPerTick;
+            for (let p = 0; p < this.previewVoices.length; p++) {
+              this.stepChannelEffectsAndMacros(this.previewVoices[p]);
+            }
+          }
         }
       }
       const rendered = this.wasmExports._nes_render(this.wasmOutL, this.wasmOutR, frames);

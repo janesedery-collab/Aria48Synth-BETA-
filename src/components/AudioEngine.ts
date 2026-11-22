@@ -1419,28 +1419,20 @@ export function playNote(
 
     const chIdx = (channelId - 1) % 16;
     const workletChIdx = Math.max(0, Math.min(47, channelId - 1));
-    if (SpessaSynth.isChannelMuted(chIdx) || WorkletSynthBridge.isChannelMuted(workletChIdx)) return;
-
     const volNorm = Math.round((volume / 100) * 127);
     const freq = midiNoteToFrequency(midiNum);
-
-    // CRITICAL: Precise 5ms lookahead audio timestamp ensures all sound engines
-    // (WorkletSynthesizer / SpessaSynth, WebAudioTinySynth, and Synthetic Oscillators)
-    // start simultaneously on the exact same audio buffer frame with zero engine delay!
-    const targetTime = ctx.currentTime + 0.005;
-
-    const gmProg = getGmProgramForPreset(soundFontPreset);
-    const noteGen = midiPlaybackGeneration;
-    const durMs = Math.max(30, Math.round(duration * 1000));
-
     const targetEngine = MasterAudioRouter.detectEngineForChannel({ chip, soundFontPreset });
 
     if (targetEngine === 'FAMITRACKER') {
+      const nesState = NesWorkletEngine.getState();
+      const anySolo = nesState.channels.some((c) => c.solo);
+      const nesCh = nesState.channels[workletChIdx];
+      if (nesCh && (nesCh.muted || (anySolo && !nesCh.solo))) return;
       if (activeEnginesConfig.famitracker) {
         const famBus = MasterAudioRouter.getEngineInput('FAMITRACKER') || ctx.destination;
         void NesWorkletEngine.attachToMasterRouter(ctx, famBus).then(() => {
           void NesWorkletEngine.previewNote(
-            Math.max(0, channelId - 1),
+            workletChIdx,
             midiNum,
             volNorm,
             chip,
@@ -1451,6 +1443,17 @@ export function playNote(
       }
       return;
     }
+
+    if (SpessaSynth.isChannelMuted(chIdx) || WorkletSynthBridge.isChannelMuted(workletChIdx)) return;
+
+    // CRITICAL: Precise 5ms lookahead audio timestamp ensures all sound engines
+    // (WorkletSynthesizer / SpessaSynth, WebAudioTinySynth, and Synthetic Oscillators)
+    // start simultaneously on the exact same audio buffer frame with zero engine delay!
+    const targetTime = ctx.currentTime + 0.005;
+
+    const gmProg = getGmProgramForPreset(soundFontPreset);
+    const noteGen = midiPlaybackGeneration;
+    const durMs = Math.max(30, Math.round(duration * 1000));
 
     // Strict Furnace WASM / retro-chip isolation:
     // Never replace Furnace's retro sound chips with generic Web Audio OscillatorNode fallbacks!

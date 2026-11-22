@@ -119,29 +119,51 @@ class BinaryCursor {
 
   public fixedString(byteLen: number): string {
     const end = Math.min(this.u8.length, this.pos + byteLen);
-    let out = '';
-    let ended = false;
+    let zeroAt = end;
     for (let i = this.pos; i < end; i++) {
-      const b = this.u8[i];
-      if (b === 0) ended = true;
-      if (!ended && b >= 0x20 && b <= 0x7e) {
-        out += String.fromCharCode(b);
+      if (this.u8[i] === 0) {
+        zeroAt = i;
+        break;
       }
     }
+    const raw = this.u8.subarray(this.pos, zeroAt);
     this.pos = end;
-    return out.trim();
+    try {
+      return new TextDecoder('utf-8', { fatal: false })
+        .decode(raw)
+        .replace(/[\x00-\x1f\x7f]/g, '')
+        .trim();
+    } catch {
+      let out = '';
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i] >= 0x20 && raw[i] <= 0x7e) out += String.fromCharCode(raw[i]);
+      }
+      return out.trim();
+    }
   }
 
   public nullString(maxBytes = 256): string {
-    let out = '';
+    const start = this.pos;
     let read = 0;
     while (this.pos < this.u8.length && read < maxBytes) {
       const b = this.u8[this.pos++];
       read++;
       if (b === 0) break;
-      if (b >= 0x20 && b <= 0x7e) out += String.fromCharCode(b);
     }
-    return out.trim();
+    const end = this.pos > start && this.u8[this.pos - 1] === 0 ? this.pos - 1 : this.pos;
+    const raw = this.u8.subarray(start, end);
+    try {
+      return new TextDecoder('utf-8', { fatal: false })
+        .decode(raw)
+        .replace(/[\x00-\x1f\x7f]/g, '')
+        .trim();
+    } catch {
+      let out = '';
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i] >= 0x20 && raw[i] <= 0x7e) out += String.fromCharCode(raw[i]);
+      }
+      return out.trim();
+    }
   }
 
   public lenString(): string {
@@ -314,7 +336,10 @@ export function parseFamiTrackerBinary(
     cur.seek(saved);
     for (let i = 0; i < bytes.length; i++) {
       const b = bytes[i];
-      if (b !== 0 && (b < 0x09 || b > 0x7e)) return false;
+      // Allow ASCII printable, common whitespace (tab/nl), and UTF-8 continuation/leading bytes (>= 0x80)
+      if (b !== 0 && ((b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d) || b === 0x7f)) {
+        return false;
+      }
     }
     return true;
   };
@@ -334,10 +359,13 @@ export function parseFamiTrackerBinary(
       const seqIdx = cur.u32Read();
       const seqType = cur.u32Read();
       const itemCount = cur.u8Read();
-      if (seqIdx > 512 || seqType > 8) return { ok: false, endPos: cur.pos, items: out };
+      if (seqIdx > 512 || seqType > 5) return { ok: false, endPos: cur.pos, items: out };
       const loopPoint = layout === 'v1' ? -1 : cur.i32Read();
       const releasePoint = layout === 'v4' || layout === 'v3' ? cur.i32Read() : -1;
       const setting = layout === 'v4' ? cur.u32Read() : 0;
+      if (loopPoint < -1 || loopPoint > 256 || releasePoint < -1 || releasePoint > 256 || setting > 64) {
+        return { ok: false, endPos: cur.pos, items: out };
+      }
       if (cur.pos + itemCount > blockEnd) return { ok: false, endPos: cur.pos, items: out };
       const items: number[] = [];
       for (let k = 0; k < itemCount; k++) {
@@ -357,14 +385,23 @@ export function parseFamiTrackerBinary(
     if (layout === 'v6') {
       if (cur.pos + count * 8 <= blockEnd) {
         for (let i = 0; i < count; i++) {
-          out[i].releasePoint = cur.i32Read();
-          out[i].setting = cur.u32Read();
+          const rel = cur.i32Read();
+          const set = cur.u32Read();
+          if (rel < -1 || rel > 256 || set > 64) {
+            return { ok: false, endPos: cur.pos, items: out };
+          }
+          out[i].releasePoint = rel;
+          out[i].setting = set;
         }
       }
     } else if (layout === 'v5') {
       if (cur.pos + count * 4 <= blockEnd) {
         for (let i = 0; i < count; i++) {
-          out[i].releasePoint = cur.i32Read();
+          const rel = cur.i32Read();
+          if (rel < -1 || rel > 256) {
+            return { ok: false, endPos: cur.pos, items: out };
+          }
+          out[i].releasePoint = rel;
         }
       }
     }
@@ -480,14 +517,20 @@ export function parseFamiTrackerBinary(
 
             let chosen: FamiTrackerSequence[] | null = null;
             let bestItems: FamiTrackerSequence[] = [];
+            let bestDelta = Number.MAX_SAFE_INTEGER;
             for (const lay of candidates) {
               const res = tryReadSequencesLayout(startPos, count, blockEnd, chipForBlock, lay);
               if (res.ok) {
                 chosen = res.items;
                 break;
               }
-              if (res.items.length > bestItems.length) {
+              const delta = Math.abs(blockEnd - res.endPos);
+              if (
+                res.items.length > bestItems.length ||
+                (res.items.length === bestItems.length && delta < bestDelta)
+              ) {
                 bestItems = res.items;
+                bestDelta = delta;
               }
             }
             const finalSeqs = chosen || bestItems;
@@ -525,6 +568,8 @@ export function parseFamiTrackerBinary(
                   const canBe3 = remainingBytes >= keysCount * 3 + 4 && isPlausibleNameHeader(cur.pos + keysCount * 3);
                   const canBe2 = remainingBytes >= keysCount * 2 + 4 && isPlausibleNameHeader(cur.pos + keysCount * 2);
                   if (!canBe3 && canBe2) hasDeltaByte = false;
+                } else if (remainingBytes >= keysCount * 3 + 4 && !isPlausibleNameHeader(cur.pos + keysCount * 2) && isPlausibleNameHeader(cur.pos + keysCount * 3)) {
+                  hasDeltaByte = true;
                 }
                 const entryBytes = hasDeltaByte ? 3 : 2;
                 if (cur.pos + keysCount * entryBytes <= blockEnd) {
@@ -697,9 +742,14 @@ export function parseFamiTrackerBinary(
         } else if (blockId === 'DPCM SAMPLES') {
           const count = Math.min(64, cur.u32Read());
           for (let i = 0; i < count && cur.pos < blockEnd; i++) {
-            const idx = cur.u8Read();
+            const entryStart = cur.pos;
+            const looksLikeU8Idx = cur.pos + 9 <= blockEnd && isPlausibleNameHeader(cur.pos + 1);
+            const looksLikeU32Idx = cur.pos + 12 <= blockEnd && isPlausibleNameHeader(cur.pos + 4);
+            const idx = !looksLikeU8Idx && looksLikeU32Idx ? cur.u32Read() : cur.u8Read();
             const name = cur.lenString() || `DPCM_${idx}`;
-            const size = Math.min(65536, cur.u32Read());
+            const rawSize = cur.u32Read();
+            const size = Math.max(0, Math.min(blockEnd - cur.pos, Math.min(65536, rawSize)));
+            if (cur.pos <= entryStart) break;
             const data = cur.bytes(size);
             dpcmSamples.push({ index: idx, name, data });
           }
@@ -724,6 +774,16 @@ export function parseFamiTrackerBinary(
   );
   const effectiveChCount = Math.max(channels.length, parsedChannelsCount);
 
+  // Populate parsed per-channel FX column widths and compute module max
+  const parsedFxMax = Math.max(
+    1,
+    ...fxColumnsByChannel,
+    ...fxColumnsByTrack.flat()
+  );
+  channels.forEach((ch, idx) => {
+    ch.fxColumns = Math.max(1, Math.min(4, fxColumnsByChannel[idx] || parsedFxMax || 1));
+  });
+
   songs.forEach((song) => {
     if (song.frameList.length === 0) {
       song.frameList = [Array.from({ length: effectiveChCount }, () => 0)];
@@ -745,6 +805,7 @@ export function parseFamiTrackerBinary(
     expansions,
     n163Channels,
     channelsCount: effectiveChCount,
+    maxFxColumns: Math.max(1, Math.min(4, parsedFxMax)),
     channels,
     songs,
     sequences,
@@ -770,12 +831,12 @@ export function convertFamiTrackerToAriaPatterns(
 } {
   const song = mod.songs[songIndex] || mod.songs[0];
   const chCount = Math.min(48, Math.max(5, mod.channels.length || mod.channelsCount));
-  const rowCap = Math.min(64, song.rowsPerPattern || 64);
+  const rowCap = Math.max(1, Math.min(256, song.rowsPerPattern || 64));
 
   const allPatterns: any[][] = [];
-  for (let orderIdx = 0; orderIdx < Math.min(64, song.frameList.length); orderIdx++) {
+  for (let orderIdx = 0; orderIdx < Math.min(128, song.frameList.length); orderIdx++) {
     const orderPats = song.frameList[orderIdx] || [];
-    const patGrid: any[] = Array.from({ length: 64 }, () => {
+    const patGrid: any[] = Array.from({ length: rowCap }, () => {
       const rowObj: any = {};
       for (let c = 1; c <= Math.max(8, chCount); c++) {
         rowObj[c] = { note: '---', inst: '..', vol: '..', delay: '000', fx: ['....', '....', '....', '....'] };
@@ -807,7 +868,7 @@ export function convertFamiTrackerToAriaPatterns(
 
   if (allPatterns.length === 0) {
     allPatterns.push(
-      Array.from({ length: 64 }, () => {
+      Array.from({ length: rowCap }, () => {
         const rowObj: any = {};
         for (let c = 1; c <= 8; c++) {
           rowObj[c] = { note: '---', inst: '..', vol: '..', delay: '000', fx: ['....', '....', '....', '....'] };
@@ -823,8 +884,8 @@ export function convertFamiTrackerToAriaPatterns(
     Math.min(300, Math.round(((song.tempo || 150) * 6) / Math.max(1, song.speed || 6)))
   );
   const ticksPerSec = mod.machine === 'PAL' ? 50 : 60;
-  const rowsPerSec = ticksPerSec / Math.max(1, song.speed || 6);
-  const totalRows = Math.max(64, song.frameList.length * (song.rowsPerPattern || 64));
+  const rowsPerSec = (ticksPerSec * ((song.tempo || 150) / 150)) / Math.max(1, song.speed || 6);
+  const totalRows = Math.max(rowCap, song.frameList.length * rowCap);
   const durationSeconds = Math.max(8, totalRows / Math.max(1, rowsPerSec));
 
   const expLabel =

@@ -109,6 +109,7 @@ export interface FamiTrackerModule {
   expansions: ExpansionChipName[];
   n163Channels: number;
   channelsCount: number;
+  maxFxColumns?: number;
   channels: FamiTrackerChannelDescriptor[];
   songs: FamiTrackerSong[];
   sequences: FamiTrackerSequence[];
@@ -152,6 +153,7 @@ export interface NesPlaybackState {
   currentRow: number;
   rowsPerPattern: number;
   bpm: number;
+  baseBpm: number;
   speed: number;
   machine: NesMachineStandard;
   expansionMask: number;
@@ -159,6 +161,7 @@ export interface NesPlaybackState {
   elapsedSeconds: number;
   estimatedDurationSeconds: number;
   masterVolume: number; // 0..1.5
+  instruments: { index: number; name: string; chip: ExpansionChipName }[];
   channels: NesChannelLiveState[];
 }
 

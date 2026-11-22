@@ -59,6 +59,7 @@ export class NesWorkletEngineController {
     currentRow: 0,
     rowsPerPattern: 64,
     bpm: 150,
+    baseBpm: 150,
     speed: 6,
     machine: 'NTSC',
     expansionMask: 0,
@@ -66,6 +67,7 @@ export class NesWorkletEngineController {
     elapsedSeconds: 0,
     estimatedDurationSeconds: 0,
     masterVolume: 0.95,
+    instruments: [],
     channels: [],
   };
 
@@ -91,6 +93,7 @@ export class NesWorkletEngineController {
       ...this.state,
       subsongNames: [...this.state.subsongNames],
       expansions: [...this.state.expansions],
+      instruments: this.state.instruments.map((ins) => ({ ...ins })),
       channels: this.state.channels.map((c) => ({ ...c })),
     };
   }
@@ -250,12 +253,7 @@ export class NesWorkletEngineController {
       this.state.currentOrder = msg.currentOrder ?? this.state.currentOrder;
       this.state.currentRow = msg.currentRow ?? this.state.currentRow;
       this.state.speed = msg.speed ?? this.state.speed;
-      if (msg.tempo) {
-        this.state.bpm = Math.max(
-          40,
-          Math.min(300, Math.round((msg.tempo * 6) / Math.max(1, this.state.speed)))
-        );
-      }
+      // Preserve stable base/user BPM so row-level Fxx speed changes never cause 158<->250 flicker
       this.state.elapsedSeconds = msg.elapsedSeconds ?? this.state.elapsedSeconds;
 
       const lvls: number[] = msg.channelLevels || [];
@@ -320,12 +318,18 @@ export class NesWorkletEngineController {
       currentRow: 0,
       rowsPerPattern: song0?.rowsPerPattern || 64,
       bpm: conv.bpm,
+      baseBpm: conv.bpm,
       speed: song0?.speed || 6,
       machine: mod.machine,
       expansionMask: mod.expansionMask,
       expansions: mod.expansions,
       elapsedSeconds: 0,
       estimatedDurationSeconds: conv.durationSeconds,
+      instruments: mod.instruments.map((ins) => ({
+        index: ins.index,
+        name: ins.name,
+        chip: ins.chip,
+      })),
       channels: liveChannels,
     };
 
@@ -349,11 +353,23 @@ export class NesWorkletEngineController {
       moduleTitle: '',
       moduleAuthor: '',
       moduleFormat: null,
+      bpm: 150,
+      baseBpm: 150,
+      instruments: [],
       channels: [],
       elapsedSeconds: 0,
       estimatedDurationSeconds: 0,
     };
     this.notify();
+  }
+
+  public setUserBpm(targetBpm: number, baseBpmOverride?: number) {
+    if (!this.currentModule) return;
+    const base = Math.max(30, baseBpmOverride || this.state.baseBpm || 150);
+    const clampedTarget = Math.max(30, Math.min(320, Math.round(targetBpm)));
+    const scale = Math.max(0.2, Math.min(4.0, clampedTarget / base));
+    this.state.bpm = clampedTarget;
+    this.workletNode?.port.postMessage({ type: 'setBpmScale', scale });
   }
 
   public getCurrentModule(): FamiTrackerModule | null {
@@ -454,6 +470,7 @@ export class NesWorkletEngineController {
     this.state.totalOrders = Math.max(1, song.frameList.length);
     this.state.rowsPerPattern = song.rowsPerPattern || 64;
     this.state.bpm = conv.bpm;
+    this.state.baseBpm = conv.bpm;
     this.state.speed = song.speed || 6;
     this.state.estimatedDurationSeconds = conv.durationSeconds;
     this.state.elapsedSeconds = 0;

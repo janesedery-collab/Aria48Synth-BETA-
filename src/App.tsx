@@ -320,15 +320,17 @@ export default function App() {
   }, []);
 
   const sunvoxChannelsSigRef = useRef<string>('');
+  const sunvoxBpmLoadedRef = useRef<string>('');
 
-  // Keep SunVox WASM runtime metadata (real song name, BPM, duration, active module channels) synchronized cleanly
+  // Keep SunVox WASM runtime metadata (real song name, initial BPM, duration, active module channels) synchronized cleanly
   useEffect(() => {
     const unsubSv = SunVoxBridge.subscribe((nextSv) => {
       setSunvoxRuntime(nextSv);
       if (nextSv.hasSunVoxLoaded && nextSv.isReady) {
         if (nextSv.songName) setTrackTitle(nextSv.songName);
         if (nextSv.durationSeconds > 0) setTrackDuration(formatDuration(nextSv.durationSeconds));
-        if (nextSv.bpm >= 30 && nextSv.bpm <= 320) {
+        if (nextSv.bpm >= 30 && nextSv.bpm <= 320 && sunvoxBpmLoadedRef.current !== nextSv.fileName) {
+          sunvoxBpmLoadedRef.current = nextSv.fileName;
           setBpm(nextSv.bpm);
           setBaseSongBpm(nextSv.bpm);
         }
@@ -354,6 +356,7 @@ export default function App() {
         }
       } else if (!nextSv.hasSunVoxLoaded) {
         sunvoxChannelsSigRef.current = '';
+        sunvoxBpmLoadedRef.current = '';
       }
     });
     return () => unsubSv();
@@ -362,7 +365,7 @@ export default function App() {
   const nesChannelsSigRef = useRef<string>('');
   const prevFtSongIdxRef = useRef<number>(-1);
 
-  // Keep FamiTracker / bitphase NES AudioWorklet state, BPM, subsong duration, and active channel meters synchronized
+  // Keep FamiTracker / bitphase NES AudioWorklet state, subsong duration, and active channel meters synchronized
   useEffect(() => {
     const unsubNes = NesWorkletEngine.subscribe((nextNes) => {
       setFamiTrackerRuntime(nextNes);
@@ -370,10 +373,6 @@ export default function App() {
         if (nextNes.moduleTitle) setTrackTitle(nextNes.moduleTitle);
         if (nextNes.estimatedDurationSeconds > 0) {
           setTrackDuration(formatDuration(nextNes.estimatedDurationSeconds));
-        }
-        if (nextNes.bpm >= 30 && nextNes.bpm <= 320) {
-          setBpm(nextNes.bpm);
-          setBaseSongBpm(nextNes.bpm);
         }
 
         const ftMod = NesWorkletEngine.getCurrentModule();
@@ -386,6 +385,8 @@ export default function App() {
             setPatterns(subConv.patterns);
             setCurrentPatternIndex(0);
             setActiveRow(0);
+            setBpm(subConv.bpm);
+            setBaseSongBpm(subConv.bpm);
           }
         }
 
@@ -544,7 +545,10 @@ export default function App() {
       const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
       setMidiLiveTotalSec(prog.totalSeconds);
     }
-  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer]);
+    if (loadedFamiTrackerBuffer) {
+      NesWorkletEngine.setUserBpm(bpm, baseSongBpm);
+    }
+  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedFamiTrackerBuffer]);
 
   // Clock-Locked Tracker Row & Pattern Synchronization (SID / SunVox / MIDI / AudioBuffer / Pattern Sequencer)
   useEffect(() => {
@@ -604,10 +608,11 @@ export default function App() {
     }
 
     // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI / SID / SunVox / FamiTracker)
+    const maxRowIndex = Math.max(0, (patterns?.length || 64) - 1);
     const msPerRow = Math.max(15, (60 / Math.max(30, bpm) / 4) * 1000);
     const timer = setInterval(() => {
       setActiveRow((prevRow) => {
-        if (prevRow >= 63) {
+        if (prevRow >= maxRowIndex) {
           if (playMode === 'song') {
             setCurrentPatternIndex((prevIdx) => {
               const nextIdx = (prevIdx + 1) % Math.max(1, songPatterns.length);
@@ -746,6 +751,8 @@ export default function App() {
     } else if (rawSunVoxBuffer) {
       const ctx = unlockAudioContextSync();
       if (ctx) SunVoxBridge.setHostAudioContext(ctx);
+      sunvoxBpmLoadedRef.current = '';
+      sunvoxChannelsSigRef.current = '';
       setLoadedSunVoxFileName(resolvedName);
       NesWorkletEngine.clearModule();
       TinyRsidBridge.clearLoadedSid();
@@ -844,6 +851,9 @@ export default function App() {
             }
             assignedLabel = `SID${sidChipIdx + 1} V${voiceNum} · ${panTag}`;
           }
+        } else if (rawSunVoxBuffer || chipType?.includes('SunVox')) {
+          assignedChip = 'Virtual DAC (SunVox 2.1.4 WASM)';
+          assignedPreset = undefined;
         } else if (channelSoundFonts && channelSoundFonts[ch.id]) {
           assignedPreset = channelSoundFonts[ch.id];
           assignedChip = 'General MIDI (SoundFont)';
