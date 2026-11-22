@@ -10,6 +10,11 @@ import {
   lookupHvscForSid,
   parseSidHeader
 } from './hvscManager';
+import {
+  convertFamiTrackerToAriaPatterns,
+  isFamiTrackerFileName,
+  parseFamiTrackerBinary
+} from '../lib/chips/nes/famitrackerParser';
 
 // Exact ProTracker Period Table (Octaves 2 through 6)
 const AMIGA_PERIOD_TABLE: { p: number; n: string }[] = [
@@ -69,7 +74,17 @@ export interface ChiptuneImportResult {
   rawMidiBuffer?: ArrayBuffer;
   rawSidBuffer?: ArrayBuffer;
   rawSunVoxBuffer?: ArrayBuffer;
+  rawFamiTrackerBuffer?: ArrayBuffer;
   sidMetadata?: SidHeaderMetadata;
+  famiTrackerMeta?: {
+    format: 'ftm' | '0cc' | 'dnm';
+    title: string;
+    author: string;
+    expansions: string[];
+    machine: string;
+    subsongsCount: number;
+    channels: { index: number; name: string; chip: string }[];
+  };
   channelSoundFonts?: { [channelId: number]: string };
   sequenceMetadata?: LoadedSequenceMetadata;
 }
@@ -180,8 +195,8 @@ export function parseChiptuneFile(
     result = parseSID(arrayBuffer, logs, fileName);
   } else if (extension === '.nsf' || extension === '.nsfe') {
     result = parseNSF(arrayBuffer, logs);
-  } else if (extension === '.ftm') {
-    result = parseFTM(arrayBuffer, logs);
+  } else if (isFamiTrackerFileName(fileName)) {
+    result = parseFTM(arrayBuffer, logs, fileName);
   } else if (extension === '.gbs') {
     result = parseGBS(arrayBuffer, logs);
   } else if (extension === '.vgm' || extension === '.vgz') {
@@ -783,8 +798,34 @@ function parseNSF(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResul
   };
 }
 
-function parseFTM(arrayBuffer: ArrayBuffer, logs: string[]): ChiptuneImportResult {
-  return parseNSF(arrayBuffer, logs);
+function parseFTM(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'module.ftm'): ChiptuneImportResult {
+  const mod = parseFamiTrackerBinary(arrayBuffer, fileName);
+  const conv = convertFamiTrackerToAriaPatterns(mod, 0);
+  return {
+    patterns: conv.patterns,
+    allPatterns: conv.allPatterns,
+    bpm: conv.bpm,
+    chipType: conv.chipType,
+    title: mod.title,
+    fileName,
+    duration: formatDuration(conv.durationSeconds),
+    channelsCount: conv.channelsCount,
+    rawFamiTrackerBuffer: arrayBuffer.slice(0),
+    famiTrackerMeta: {
+      format: mod.format,
+      title: mod.title,
+      author: mod.author,
+      expansions: mod.expansions,
+      machine: mod.machine,
+      subsongsCount: mod.songs.length,
+      channels: mod.channels.map((c) => ({ index: c.index, name: c.name, chip: c.chip })),
+    },
+    log: [
+      ...logs,
+      ...mod.parseNotes,
+      `[FAMITRACKER] Parsed ${mod.format.toUpperCase()} ("${mod.title}") · ${conv.channelsCount} ch · Expansions: ${mod.expansions.join(', ')}`
+    ]
+  };
 }
 
 /**

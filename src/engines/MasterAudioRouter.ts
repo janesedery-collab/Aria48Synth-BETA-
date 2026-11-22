@@ -17,6 +17,11 @@ import { SpessaSynthAdapter } from './SpessaSynthBridge';
 import { TinyRSIDAdapter } from './TinyRSIDAdapter';
 import { SunVoxAdapter, SUNVOX_JS_URL, SUNVOX_WASM_URL } from './SunVoxAdapter';
 import { TinySynthBridge } from './TinySynthBridge';
+import {
+  NesWorkletEngine,
+  NES_WORKLET_PROCESSOR_URL,
+  NES_APU_WASM_URL,
+} from './NesWorkletEngine';
 
 export interface EngineBusDescriptor {
   kind: EngineKind;
@@ -31,6 +36,7 @@ class MasterAudioRouterEngine {
   private buses = new Map<EngineKind, EngineBusDescriptor>();
   private busConfig = new Map<EngineKind, { enabled: boolean; gain: number }>([
     ['FURNACE', { enabled: true, gain: 1.0 }],
+    ['FAMITRACKER', { enabled: true, gain: 0.95 }],
     ['SF2/SFE', { enabled: true, gain: 0.9 }],
     ['TINYRSID', { enabled: true, gain: 0.95 }],
     ['SUNVOX', { enabled: true, gain: 0.95 }],
@@ -108,6 +114,7 @@ class MasterAudioRouterEngine {
 
     // Attach engine nodes asynchronously without blocking UI
     void FurnaceBridge.attachToMasterRouter(ctx, this.getEngineInput('FURNACE')!);
+    void NesWorkletEngine.attachToMasterRouter(ctx, this.getEngineInput('FAMITRACKER')!);
     void SpessaSynthAdapter.attachToMasterRouter(ctx, this.getEngineInput('SF2/SFE')!);
     void TinyRSIDAdapter.attachToMasterRouter(ctx, this.getEngineInput('TINYRSID')!);
     void SunVoxAdapter.attachToMasterRouter(ctx, this.getEngineInput('SUNVOX')!);
@@ -156,6 +163,7 @@ class MasterAudioRouterEngine {
       }
     }
     if (kind === 'FURNACE') FurnaceBridge.setEngineEnabled(enabled);
+    if (kind === 'FAMITRACKER') NesWorkletEngine.setEngineEnabled(enabled);
     if (kind === 'TINYSYNTH') TinySynthBridge.setEnabled(enabled);
     this.notify();
   }
@@ -185,6 +193,9 @@ class MasterAudioRouterEngine {
    */
   public detectEngineForFile(fileName: string): EngineKind {
     const lower = (fileName || '').toLowerCase();
+    if (lower.endsWith('.ftm') || lower.endsWith('.0cc') || lower.endsWith('.dnm')) {
+      return 'FAMITRACKER';
+    }
     if (lower.endsWith('.fur') || lower.endsWith('.fui') || lower.endsWith('.fuw') || lower.endsWith('.dmp') || lower.endsWith('.opm')) {
       return 'FURNACE';
     }
@@ -217,6 +228,20 @@ class MasterAudioRouterEngine {
       return 'SF2/SFE';
     }
     if (
+      !preset.startsWith('fur_') &&
+      !chip.includes('furnace') &&
+      (chip.includes('famitracker') ||
+        chip.includes('rp2a03') ||
+        chip.includes('vrc6') ||
+        chip.includes('vrc7') ||
+        chip.includes('fds') ||
+        chip.includes('n163') ||
+        chip.includes('namco 163') ||
+        chip.includes('sunsoft 5b'))
+    ) {
+      return 'FAMITRACKER';
+    }
+    if (
       preset.startsWith('fur_') ||
       chip.includes('furnace') ||
       chip.includes('ym2612') ||
@@ -224,16 +249,12 @@ class MasterAudioRouterEngine {
       chip.includes('opl3') ||
       chip.includes('ym2151') ||
       chip.includes('sn76489') ||
-      chip.includes('rp2a03') ||
       chip.includes('dmg') ||
       chip.includes('spc700') ||
       chip.includes('huc6280') ||
       chip.includes('ay') ||
       chip.includes('pokey') ||
-      chip.includes('scc') ||
-      chip.includes('vrc6') ||
-      chip.includes('fds') ||
-      chip.includes('n163')
+      chip.includes('scc')
     ) {
       return 'FURNACE';
     }
@@ -263,7 +284,15 @@ class MasterAudioRouterEngine {
   ): EngineKind {
     const engine = options?.engine || this.detectEngineForChannel(options?.channel);
     const ch0 = Math.max(0, channelId - 1);
-    if (engine === 'FURNACE') {
+    if (engine === 'FAMITRACKER') {
+      void NesWorkletEngine.previewNote(
+        ch0,
+        midiNote,
+        velocity,
+        options?.channel?.chip,
+        options?.durationSec ?? 0.25
+      );
+    } else if (engine === 'FURNACE') {
       FurnaceBridge.noteOn(ch0, midiNote, velocity, options?.furnaceInstIdx);
     } else if (engine === 'TINYSYNTH') {
       TinySynthBridge.noteOn(ch0 % 16, midiNote, velocity, options?.program);
@@ -275,7 +304,9 @@ class MasterAudioRouterEngine {
 
   public routeNoteOff(channelId: number, midiNote?: number, engine: EngineKind = 'FURNACE') {
     const ch0 = Math.max(0, channelId - 1);
-    if (engine === 'FURNACE') {
+    if (engine === 'FAMITRACKER') {
+      NesWorkletEngine.stopPreviewChannel(ch0);
+    } else if (engine === 'FURNACE') {
       FurnaceBridge.noteOff(ch0);
     } else if (engine === 'TINYSYNTH' && midiNote !== undefined) {
       TinySynthBridge.noteOff(ch0 % 16, midiNote);
@@ -309,8 +340,18 @@ class MasterAudioRouterEngine {
     const fur = FurnaceBridge.getState();
     const sid = TinyRSIDAdapter.getBundleStatus();
     const sv = SunVoxAdapter.getBundleStatus();
+    const nes = NesWorkletEngine.getBundleStatus();
 
     return [
+      {
+        id: 'famitracker',
+        label: 'Bitphase NES APU / FamiTracker (nes_apu.wasm)',
+        defaultJsUrl: NES_WORKLET_PROCESSOR_URL,
+        defaultWasmUrl: NES_APU_WASM_URL,
+        customJsName: nes.label,
+        status: nes.status,
+        error: nes.error,
+      },
       {
         id: 'furnace',
         label: 'Furnace Headless (aria_furnace_all.js)',
@@ -342,13 +383,15 @@ class MasterAudioRouterEngine {
   }
 
   public async hotSwapWasmBundle(
-    id: 'furnace' | 'tinyrsid' | 'sunvox',
+    id: 'furnace' | 'tinyrsid' | 'sunvox' | 'famitracker',
     jsUrlOrBlob: string,
     wasmUrlOrBlob?: string,
     label?: string
   ): Promise<boolean> {
     let ok = false;
-    if (id === 'furnace') {
+    if (id === 'famitracker') {
+      ok = await NesWorkletEngine.tryLoadWasmFromUrl(wasmUrlOrBlob || NES_APU_WASM_URL, label);
+    } else if (id === 'furnace') {
       ok = await FurnaceBridge.loadWasmBundle(jsUrlOrBlob, wasmUrlOrBlob, label);
     } else if (id === 'tinyrsid') {
       ok = await TinyRSIDAdapter.reloadWasmBundle(jsUrlOrBlob, wasmUrlOrBlob, label);

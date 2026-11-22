@@ -10,6 +10,7 @@ import { WorkletSynthBridge } from './workletSynthBridge';
 import { TinyRsidBridge } from './tinyRsidBridge';
 import { SunVoxBridge } from './sunvoxBridge';
 import { FurnaceBridge } from './FurnaceBridge';
+import { NesWorkletEngine } from './NesWorkletEngine';
 
 export const WEBSCOPE_ENGINE_ID = "webscope-oscilloscope-master.zip";
 
@@ -87,6 +88,7 @@ class WebScopeEngine {
   private sidScratchBuffer = new Float32Array(1024);
   private sunvoxScratchBuffer = new Float32Array(1024);
   private furnaceScratchBuffer = new Float32Array(1024);
+  private nesScratchBuffer = new Float32Array(1024);
   private directAudioAnalysers: AnalyserNode[] = [];
   private directAudioPlaying = false;
 
@@ -217,6 +219,7 @@ class WebScopeEngine {
     if (isPlaying) {
       const sidState = TinyRsidBridge.getState();
       const sunvoxState = SunVoxBridge.getState();
+      const nesState = NesWorkletEngine.getState();
       const furnaceState = FurnaceBridge.getState();
       const useSidTrace =
         sidState.hasSidLoaded &&
@@ -228,9 +231,17 @@ class WebScopeEngine {
         sunvoxState.hasSunVoxLoaded &&
         sunvoxState.isPlaying &&
         sunvoxState.engineEnabled;
+      const useNesTrace =
+        !useSidTrace &&
+        !useSunVoxTrace &&
+        nesState.hasModuleLoaded &&
+        nesState.isPlaying &&
+        channelIndex >= 0 &&
+        channelIndex < nesState.channels.length;
       const useFurnaceTrace =
         !useSidTrace &&
         !useSunVoxTrace &&
+        !useNesTrace &&
         furnaceState.engineEnabled &&
         FurnaceBridge.isWasmReady();
 
@@ -248,6 +259,14 @@ class WebScopeEngine {
           this.timeDomainBuffer.set(this.sunvoxScratchBuffer);
           peakLevel = svRes.peak;
           sumSquares = svRes.sumSq;
+          hasSignal = true;
+        }
+      } else if (useNesTrace) {
+        const nesRes = NesWorkletEngine.getVoiceScopeSamples(channelIndex, this.nesScratchBuffer);
+        if (nesRes.hasData) {
+          this.timeDomainBuffer.set(this.nesScratchBuffer);
+          peakLevel = nesRes.peak;
+          sumSquares = nesRes.sumSq;
           hasSignal = true;
         }
       } else if (useFurnaceTrace) {

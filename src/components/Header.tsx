@@ -43,7 +43,8 @@ interface HeaderProps {
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
     sidMetadata?: SidHeaderMetadata,
-    rawSunVoxBuffer?: ArrayBuffer
+    rawSunVoxBuffer?: ArrayBuffer,
+    rawFamiTrackerBuffer?: ArrayBuffer
   ) => void;
   onLoadTrack?: (tracksJson: string, bpm: number) => void;
   trackTitle?: string | null;
@@ -418,7 +419,7 @@ export default function Header({
                id="player-tracker-file-file-btn"
                type="file" 
                className="hidden"
-               accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.sunvox,.sunsynth,.nsf,.gbs,.vgm,.spc,.ftm,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
+               accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.ftm,.0cc,.dnm,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.sunvox,.sunsynth,.nsf,.gbs,.vgm,.spc,.wav,.mp3,.json,${SOUNDFONT_ACCEPT_ATTR}`}
                onChange={(e) => {
                  unlockAudioContextSync();
                  const inputEl = e.target;
@@ -445,7 +446,8 @@ export default function Header({
                            result.fileName || file.name,
                            result.rawSidBuffer,
                            result.sidMetadata,
-                           result.rawSunVoxBuffer
+                           result.rawSunVoxBuffer,
+                           result.rawFamiTrackerBuffer
                          );
                          setIsPlaying(true);
                          addRecentSong({

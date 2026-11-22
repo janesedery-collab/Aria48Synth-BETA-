@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, RefreshCw, Upload, Cpu, CheckCircle2, AlertCircle } from 'lucide-react';
 import { MasterAudioRouter } from '../engines/MasterAudioRouter';
 import { FurnaceBridge } from '../engines/FurnaceBridge';
+import { NesWorkletEngine } from '../engines/NesWorkletEngine';
 import { WasmBundleSlot } from '../types';
 
 interface WasmEngineManagerModalProps {
@@ -13,6 +14,7 @@ export default function WasmEngineManagerModal({ isOpen, onClose }: WasmEngineMa
   const [bundles, setBundles] = useState<WasmBundleSlot[]>(() => MasterAudioRouter.getWasmBundles());
   const [busList, setBusList] = useState(() => MasterAudioRouter.getBusStatusList());
   const [customUrls, setCustomUrls] = useState<Record<string, { js: string; wasm: string }>>({
+    famitracker: { js: '/audio/nes-worklet.js', wasm: '/nes/nes_apu.wasm' },
     furnace: { js: '/wasm/aria_furnace_all.js', wasm: '/wasm/aria_furnace_all.wasm' },
     tinyrsid: { js: '/websid/tinyrsid.js', wasm: '/websid/websid.wasm' },
     sunvox: { js: '/sunvox/sunvox.js', wasm: '/sunvox/sunvox.wasm' },
@@ -30,31 +32,45 @@ export default function WasmEngineManagerModal({ isOpen, onClose }: WasmEngineMa
     refresh();
     const u1 = MasterAudioRouter.subscribe(refresh);
     const u2 = FurnaceBridge.subscribe(refresh);
+    const u3 = NesWorkletEngine.subscribe(refresh);
     return () => {
       u1();
       u2();
+      u3();
     };
   }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const handleLoadUrl = async (id: 'furnace' | 'tinyrsid' | 'sunvox') => {
+  const handleLoadUrl = async (id: WasmBundleSlot['id']) => {
     const entry = customUrls[id];
-    setFeedback(`Loading ${id} bundle from ${entry.js}...`);
-    const ok = await MasterAudioRouter.hotSwapWasmBundle(id, entry.js, entry.wasm, entry.js);
+    setFeedback(`Loading ${id} bundle from ${entry.wasm || entry.js}...`);
+    const ok = await MasterAudioRouter.hotSwapWasmBundle(id, entry.js, entry.wasm, entry.wasm || entry.js);
     setBundles(MasterAudioRouter.getWasmBundles());
     setFeedback(
       ok
         ? `Successfully loaded and activated ${id} WASM engine.`
-        : `Could not activate ${id} bundle at ${entry.js}. Upload compiled JS + WASM below.`
+        : `Could not activate ${id} bundle at ${entry.wasm || entry.js}. Upload compiled JS / WASM below.`
     );
   };
 
   const handleLocalFile = async (
-    id: 'furnace' | 'tinyrsid' | 'sunvox',
+    id: WasmBundleSlot['id'],
     kind: 'js' | 'wasm',
     file: File
   ) => {
+    if (id === 'famitracker' && kind === 'wasm') {
+      const buf = await file.arrayBuffer();
+      const ok = await NesWorkletEngine.loadWasmBuffer(buf, file.name);
+      setBundles(MasterAudioRouter.getWasmBundles());
+      setFeedback(
+        ok
+          ? `Hot-loaded ${file.name} into bitphase NES AudioWorklet engine.`
+          : `Staged ${file.name}. Initialize audio context first (click Play or Tracker).`
+      );
+      return;
+    }
+
     const blobUrl = URL.createObjectURL(file);
     uploadedBlobRef.current[id] = uploadedBlobRef.current[id] || {};
     if (kind === 'js') {
@@ -96,12 +112,12 @@ export default function WasmEngineManagerModal({ isOpen, onClose }: WasmEngineMa
           </button>
         </div>
 
-        {/* 5-Engine MasterAudioRouter Status Grid */}
+        {/* 6-Engine MasterAudioRouter Status Grid */}
         <div>
           <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-            MasterAudioRouter 5-Engine Bus
+            MasterAudioRouter 6-Engine Bus
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
             {busList.map((bus) => (
               <div
                 key={bus.kind}

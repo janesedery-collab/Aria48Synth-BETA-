@@ -9,6 +9,7 @@ import {
 } from '../utils/chiptuneExporters';
 import { getSoundFontBankInfo, getAvailableSoundFontInstruments, getGmProgramForPreset } from '../utils/soundFontEngine';
 import {
+  NesWorkletEngine,
   SunVoxBridge,
   TinyRsidBridge,
   WorkletSynthBridge,
@@ -22,6 +23,7 @@ import {
   SOUNDFONT_ACCEPT_ATTR,
   unlockAudioContextSync
 } from './AudioEngine';
+import { isFamiTrackerFileName } from '../lib/chips/nes/famitrackerParser';
 import {
   HvscCacheStats,
   HvscLookupResult,
@@ -57,7 +59,8 @@ interface FileConverterUIProps {
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
     sidMetadata?: SidHeaderMetadata,
-    rawSunVoxBuffer?: ArrayBuffer
+    rawSunVoxBuffer?: ArrayBuffer,
+    rawFamiTrackerBuffer?: ArrayBuffer
   ) => void;
 }
 
@@ -75,6 +78,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   const [parsedRawMidiBuffer, setParsedRawMidiBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedRawSidBuffer, setParsedRawSidBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedRawSunVoxBuffer, setParsedRawSunVoxBuffer] = useState<ArrayBuffer | null>(null);
+  const [parsedRawFamiTrackerBuffer, setParsedRawFamiTrackerBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedSidMetadata, setParsedSidMetadata] = useState<SidHeaderMetadata | null>(null);
   const [parsedHvscLookup, setParsedHvscLookup] = useState<HvscLookupResult | null>(null);
   const [parsedChannelSoundFonts, setParsedChannelSoundFonts] = useState<{ [ch: number]: string } | null>(null);
@@ -227,6 +231,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         setParsedRawMidiBuffer(result.rawMidiBuffer || null);
         setParsedRawSidBuffer(result.rawSidBuffer || null);
         setParsedRawSunVoxBuffer(result.rawSunVoxBuffer || null);
+        setParsedRawFamiTrackerBuffer(result.rawFamiTrackerBuffer || null);
         setParsedSidMetadata(result.sidMetadata || null);
         if (result.sidMetadata) {
           setParsedHvscLookup(lookupHvscForSid(result.sidMetadata, result.sidMetadata.startSong));
@@ -426,9 +431,35 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         `[SYSTEM] Loaded SunVox WASM project: '${incomingName}'`,
         ...res.log
       ]);
+      setParsedRawFamiTrackerBuffer(null);
+    } else if (isFamiTrackerFileName(incomingName)) {
+      setParsedRawSidBuffer(null);
+      setParsedRawSunVoxBuffer(null);
+      setParsedSidMetadata(null);
+      setParsedHvscLookup(null);
+      unlockAudioContextSync();
+      NesWorkletEngine.loadModule(buf.slice(0), incomingName);
+      const res = await parseChiptuneFileAsync(incomingName, buf);
+      setParsedPatterns(res.patterns);
+      setParsedAllPatterns(res.allPatterns || [res.patterns]);
+      setParsedAudioBuffer(null);
+      setParsedRawMidiBuffer(null);
+      setParsedRawFamiTrackerBuffer(res.rawFamiTrackerBuffer || buf.slice(0));
+      setParsedChannelSoundFonts(null);
+      setParsedBpm(res.bpm);
+      setParsedDuration(res.duration || '1:30');
+      setParsedTitle(res.title || incomingName);
+      setParsedChipType(res.chipType);
+      setParsedChannelsCount(res.channelsCount || 5);
+      setParsedOctaveRange(res.octaveRange || 'C-2 - B-6');
+      setConversionLog([
+        `[SYSTEM] Loaded FamiTracker / Dn-FamiTracker module: '${incomingName}'`,
+        ...res.log
+      ]);
     } else {
       setParsedRawSidBuffer(null);
       setParsedRawSunVoxBuffer(null);
+      setParsedRawFamiTrackerBuffer(null);
       setParsedSidMetadata(null);
       setParsedHvscLookup(null);
       setConversionLog([`[SYSTEM] Loaded document: '${incomingName}'`]);
@@ -489,7 +520,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
            Universal Music & SoundFont Station
          </h2>
          <p className="text-zinc-400 text-[11px] mt-1 font-sans">
-           Translate and play Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), SunVox (.sunvox, .sunsynth), Amiga ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .sfe, .dls), and Audio files.
+           Translate and play Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), FamiTracker / Dn-FT (.ftm, .0cc, .dnm), SunVox (.sunvox, .sunsynth), Amiga ProTracker (.mod), FastTracker (.xm), ScreamTracker (.s3m), Impulse Tracker (.it), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .sfe, .dls), and Audio files.
          </p>
        </div>
 
@@ -676,7 +707,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
               <input 
                 type="file" 
                 ref={fileInputRef} 
-                accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.ftm,.0cc,.dnm,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                 onChange={handleFileSelect} 
                 className="hidden" 
               />
@@ -698,7 +729,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                      Browse Files
                   </div>
                   <div className="text-[8.5px] text-zinc-500 mt-1.5 font-sans leading-relaxed max-w-xs">
-                     Accepts MIDI (.mid, .rmi, .kar, .xmf), MOD, XM, S3M, IT, C64 (.sid), SunVox (.sunvox), NES (.nsf), Game Boy (.gbs), Sega VGM, SNES SPC, SoundFonts (.sf2/.sf3/.dls/.sfe), WAV, MP3
+                     Accepts MIDI (.mid, .rmi, .kar, .xmf), FamiTracker (.ftm, .0cc, .dnm), MOD, XM, S3M, IT, C64 (.sid), SunVox (.sunvox), NES (.nsf), Game Boy (.gbs), Sega VGM, SNES SPC, SoundFonts (.sf2/.sf3/.dls/.sfe), WAV, MP3
                   </div>
                 </div>
               )}
@@ -1041,6 +1072,36 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                </button>
              )}
 
+             {parsedRawFamiTrackerBuffer && parsedPatterns && onImportSequence && !convertedFileUrl && (
+               <button
+                 id="famitracker-load-workstation-btn"
+                 onClick={() => {
+                   unlockAudioContextSync();
+                   onImportSequence(
+                     parsedPatterns,
+                     parsedBpm,
+                     parsedDuration,
+                     parsedTitle,
+                     parsedChipType,
+                     parsedOctaveRange,
+                     parsedChannelsCount,
+                     parsedAllPatterns || undefined,
+                     parsedAudioBuffer || undefined,
+                     parsedChannelSoundFonts || undefined,
+                     parsedRawMidiBuffer || undefined,
+                     file?.name,
+                     undefined,
+                     undefined,
+                     undefined,
+                     parsedRawFamiTrackerBuffer
+                   );
+                 }}
+                 className="w-full py-2.5 bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-500/50 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(244,63,94,0.22)] font-mono"
+               >
+                 <span>▶ PLAY IN FAMITRACKER / BITPHASE NES ENGINE</span>
+               </button>
+             )}
+
              {convertedFileUrl && (
                 <div className="flex flex-col gap-2.5">
                   <div className="bg-emerald-950/20 border-2 border-emerald-500/30 rounded-xl p-3 flex items-center justify-between animate-bounce">
@@ -1080,7 +1141,8 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                           file?.name,
                           parsedRawSidBuffer || undefined,
                           parsedSidMetadata || undefined,
-                          parsedRawSunVoxBuffer || undefined
+                          parsedRawSunVoxBuffer || undefined,
+                          parsedRawFamiTrackerBuffer || undefined
                         );
                       }}
                       className="w-full py-3 bg-cyan-950/60 hover:bg-cyan-900/70 text-cyan-400 border border-cyan-800/40 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(34,211,238,0.1)] font-mono duration-300"

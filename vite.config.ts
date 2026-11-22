@@ -174,6 +174,7 @@ export default defineConfig(() => {
           'favicon.ico',
           'apple-touch-icon.png',
           'icon.svg',
+          'audio/nes-worklet.js',
           'sunvox/sunvox.js',
           'sunvox/sunvox_lib_loader.js',
           'sunvox/sunvox.wasm',

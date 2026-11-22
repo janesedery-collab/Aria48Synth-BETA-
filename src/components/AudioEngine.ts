@@ -6,6 +6,11 @@ import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { TinyRsidBridge, TINYRSID_ENGINE_ID } from '../engines/tinyRsidBridge';
 import { SunVoxBridge, SUNVOX_ENGINE_ID } from '../engines/sunvoxBridge';
 import { FurnaceBridge, FURNACE_ENGINE_ID } from '../engines/FurnaceBridge';
+import {
+  NesWorkletEngine,
+  FamiTrackerEngine,
+  FAMITRACKER_ENGINE_ID
+} from '../engines/NesWorkletEngine';
 import { MasterAudioRouter } from '../engines/MasterAudioRouter';
 import { TinySynthBridge } from '../engines/TinySynthBridge';
 import { SpessaSynthAdapter } from '../engines/SpessaSynthBridge';
@@ -29,6 +34,7 @@ export { WorkletSynthBridge };
 export { TinyRsidBridge, TINYRSID_ENGINE_ID };
 export { SunVoxBridge, SUNVOX_ENGINE_ID };
 export { FurnaceBridge, FURNACE_ENGINE_ID };
+export { NesWorkletEngine, FamiTrackerEngine, FAMITRACKER_ENGINE_ID };
 export { MasterAudioRouter, TinySynthBridge, SpessaSynthAdapter };
 export {
   SpessaSynthCore,
@@ -346,6 +352,7 @@ export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
   tinyRSid: true,
   sunvox: true,
   furnace: true,
+  famitracker: true,
 };
 
 let activeEnginesConfig: SoundEnginesConfig = (() => {
@@ -361,6 +368,7 @@ let activeEnginesConfig: SoundEnginesConfig = (() => {
         tinyRSid: typeof parsed.tinyRSid === 'boolean' ? parsed.tinyRSid : DEFAULT_SOUND_ENGINES.tinyRSid,
         sunvox: typeof parsed.sunvox === 'boolean' ? parsed.sunvox : DEFAULT_SOUND_ENGINES.sunvox,
         furnace: typeof parsed.furnace === 'boolean' ? parsed.furnace : DEFAULT_SOUND_ENGINES.furnace,
+        famitracker: typeof parsed.famitracker === 'boolean' ? parsed.famitracker : DEFAULT_SOUND_ENGINES.famitracker,
       };
     }
   } catch (e) {}
@@ -371,6 +379,7 @@ if (typeof window !== 'undefined') {
   TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
   SunVoxBridge.setEngineEnabled(activeEnginesConfig.sunvox);
   FurnaceBridge.setEngineEnabled(activeEnginesConfig.furnace);
+  NesWorkletEngine.setEngineEnabled(activeEnginesConfig.famitracker);
 }
 
 const engineChangeListeners: ((config: SoundEnginesConfig) => void)[] = [];
@@ -388,6 +397,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
     tinyRSid: config.tinyRSid ?? activeEnginesConfig.tinyRSid,
     sunvox: config.sunvox ?? activeEnginesConfig.sunvox,
     furnace: config.furnace ?? activeEnginesConfig.furnace,
+    famitracker: config.famitracker ?? activeEnginesConfig.famitracker,
   };
   
   if (tinySynthMasterGain && audioCtx) {
@@ -404,8 +414,10 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
   TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
   SunVoxBridge.setEngineEnabled(activeEnginesConfig.sunvox);
   FurnaceBridge.setEngineEnabled(activeEnginesConfig.furnace);
+  NesWorkletEngine.setEngineEnabled(activeEnginesConfig.famitracker);
   TinySynthBridge.setEnabled(activeEnginesConfig.tinySynth);
   MasterAudioRouter.setEngineEnabled('FURNACE', activeEnginesConfig.furnace);
+  MasterAudioRouter.setEngineEnabled('FAMITRACKER', activeEnginesConfig.famitracker);
   MasterAudioRouter.setEngineEnabled('TINYSYNTH', activeEnginesConfig.tinySynth);
   MasterAudioRouter.setEngineEnabled('SF2/SFE', activeEnginesConfig.spessaSynth || activeEnginesConfig.spessaSynthCore);
   MasterAudioRouter.setEngineEnabled('TINYRSID', activeEnginesConfig.tinyRSid);
@@ -561,6 +573,7 @@ export function syncChannelMuteSolo(channels: Channel[]) {
   }
   TinyRsidBridge.syncChannelStates(channels);
   SunVoxBridge.syncChannelStates(channels);
+  NesWorkletEngine.syncChannelStates(channels);
 }
 
 /**
@@ -1051,6 +1064,7 @@ export function playMidiBuffer(
   try {
     SunVoxBridge.stop();
     TinyRsidBridge.stop();
+    NesWorkletEngine.pause();
     stopMidiPlayback();
     stopDirectAudio();
 
@@ -1387,7 +1401,8 @@ export function playNote(
   duration = 0.22, 
   volume = 80, 
   pan = 50,
-  soundFontPreset?: string
+  soundFontPreset?: string,
+  instrumentIndex?: number
 ) {
   try {
     const ctx = getAudioContext();
@@ -1419,6 +1434,23 @@ export function playNote(
     const durMs = Math.max(30, Math.round(duration * 1000));
 
     const targetEngine = MasterAudioRouter.detectEngineForChannel({ chip, soundFontPreset });
+
+    if (targetEngine === 'FAMITRACKER') {
+      if (activeEnginesConfig.famitracker) {
+        const famBus = MasterAudioRouter.getEngineInput('FAMITRACKER') || ctx.destination;
+        void NesWorkletEngine.attachToMasterRouter(ctx, famBus).then(() => {
+          void NesWorkletEngine.previewNote(
+            Math.max(0, channelId - 1),
+            midiNum,
+            volNorm,
+            chip,
+            duration,
+            typeof instrumentIndex === 'number' && !Number.isNaN(instrumentIndex) ? instrumentIndex : -1
+          );
+        });
+      }
+      return;
+    }
 
     // Strict Furnace WASM / retro-chip isolation:
     // Never replace Furnace's retro sound chips with generic Web Audio OscillatorNode fallbacks!
@@ -1494,6 +1526,7 @@ export function playNote(
 export function stopChannelSound(channelId: number) {
   const chIdx = (channelId - 1) % 16;
   const workletChIdx = Math.max(0, Math.min(47, channelId - 1));
+  NesWorkletEngine.stopPreviewChannel(workletChIdx);
   FurnaceBridge.noteOff(workletChIdx);
   SpessaSynth.noteOff(chIdx);
   for (let n = 0; n < 128; n++) {
@@ -1520,6 +1553,7 @@ export function stopAllChannelsSound() {
   stopMidiPlayback();
   TinyRsidBridge.pause();
   SunVoxBridge.pause();
+  NesWorkletEngine.pause();
   for (let ch = 0; ch < 48; ch++) {
     FurnaceBridge.noteOff(ch);
   }
@@ -1541,6 +1575,7 @@ export async function playSidBuffer(
 ): Promise<boolean> {
   try {
     SunVoxBridge.stop();
+    NesWorkletEngine.pause();
     stopDirectAudio();
     stopMidiPlayback();
     cancelAllScheduledNotesAndSilence();
@@ -1592,6 +1627,7 @@ export async function playSunVoxBuffer(
 ): Promise<boolean> {
   try {
     TinyRsidBridge.stop();
+    NesWorkletEngine.pause();
     stopDirectAudio();
     stopMidiPlayback();
     cancelAllScheduledNotesAndSilence();
@@ -1630,6 +1666,61 @@ export function getSunVoxPlaybackProgress() {
 }
 
 /**
+ * FamiTracker (.ftm / .0cc / .dnm) & bitphase nes_apu.wasm AudioWorklet Playback Controls
+ */
+export async function playFamiTrackerBuffer(
+  arrayBuffer: ArrayBuffer,
+  fileName: string,
+  options?: { seekRatio?: number }
+): Promise<boolean> {
+  try {
+    SunVoxBridge.stop();
+    TinyRsidBridge.stop();
+    stopDirectAudio();
+    stopMidiPlayback();
+    cancelAllScheduledNotesAndSilence();
+
+    const ctx = unlockAudioContextSync();
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch {}
+    }
+
+    const famBus = MasterAudioRouter.getEngineInput('FAMITRACKER') || ctx.destination;
+    await NesWorkletEngine.attachToMasterRouter(ctx, famBus);
+
+    if (!NesWorkletEngine.getState().hasModuleLoaded) {
+      NesWorkletEngine.loadModule(arrayBuffer, fileName);
+    }
+    if (options?.seekRatio && options.seekRatio > 0) {
+      const dur = NesWorkletEngine.getState().estimatedDurationSeconds || 60;
+      NesWorkletEngine.seekSeconds(options.seekRatio * dur);
+    }
+    NesWorkletEngine.play();
+    return true;
+  } catch (err) {
+    console.warn('FamiTracker playback error:', err);
+    return false;
+  }
+}
+
+export function pauseFamiTrackerPlayback() {
+  NesWorkletEngine.pause();
+}
+
+export function stopFamiTrackerPlayback() {
+  NesWorkletEngine.stop();
+}
+
+export function seekFamiTrackerPlayback(targetSeconds: number) {
+  NesWorkletEngine.seekSeconds(targetSeconds);
+}
+
+export function getFamiTrackerPlaybackProgress() {
+  return NesWorkletEngine.getProgress();
+}
+
+/**
  * Play decoded direct audio stream (WAV, MP3, OGG)
  * Routes through native Web Audio master gain and feeds the 16-channel WebScope visualizer
  */
@@ -1641,6 +1732,7 @@ export function playDirectAudio(buffer: AudioBuffer, startOffset = 0, onEnded?: 
 
     SunVoxBridge.stop();
     TinyRsidBridge.stop();
+    NesWorkletEngine.pause();
     stopDirectAudio();
 
     const safeOffset = Math.max(0, Math.min(Math.max(0, buffer.duration - 0.05), startOffset));

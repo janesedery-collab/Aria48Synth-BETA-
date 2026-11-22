@@ -16,11 +16,14 @@ import {
   SunVoxBridge,
   TinyRsidBridge,
   FurnaceBridge,
+  NesWorkletEngine,
   MasterAudioRouter,
   getAudioContext,
   unlockAudioContextSync
 } from './AudioEngine';
 import { SidChipOverride, SidClockOverride } from '../engines/tinyRsidBridge';
+import { NesMachineStandard } from '../lib/chips/nes/types';
+import { describeDnFamiTrackerEffect } from '../lib/chips/nes/dnEffects';
 import { SidHeaderMetadata, formatTimeMsPrecise } from '../utils/hvscManager';
 import { SpessaSynth, SpessaSoundFont } from '../engines/spressasynthLib';
 import {
@@ -79,7 +82,8 @@ interface TrackerEditorProps {
     fileName?: string,
     rawSidBuffer?: ArrayBuffer,
     sidMetadata?: SidHeaderMetadata,
-    rawSunVoxBuffer?: ArrayBuffer
+    rawSunVoxBuffer?: ArrayBuffer,
+    rawFamiTrackerBuffer?: ArrayBuffer
   ) => void;
 }
 
@@ -110,6 +114,7 @@ export default function TrackerEditor({
   onImportTrack 
 }: TrackerEditorProps) {
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number; field: 'note' | 'inst' | 'vol' | 'fx'; fxIndex?: number } | null>(null);
+  const [selectedOctave, setSelectedOctave] = useState<number | 'all'>(4);
   const [selectedBank, setSelectedBank] = useState<ChannelBank>('1-8');
   const [showActiveOnly, setShowActiveOnly] = useState<boolean>(false);
   const [fxColumnsCount, setFxColumnsCount] = useState<number>(2);
@@ -135,6 +140,7 @@ export default function TrackerEditor({
 
   const [sunvoxState, setSunvoxState] = useState(() => SunVoxBridge.getState());
   const [furnaceState, setFurnaceState] = useState(() => FurnaceBridge.getState());
+  const [famiTrackerState, setFamiTrackerState] = useState(() => NesWorkletEngine.getState());
 
   useEffect(() => {
     setTrackerBpmText((bpm || 125).toString());
@@ -167,6 +173,9 @@ export default function TrackerEditor({
     const unsubFurnace = FurnaceBridge.subscribe((nextFur) => {
       setFurnaceState(nextFur);
     });
+    const unsubNes = NesWorkletEngine.subscribe((nextNes) => {
+      setFamiTrackerState(nextNes);
+    });
     return () => {
       unsubSf();
       unsubEngines();
@@ -175,6 +184,7 @@ export default function TrackerEditor({
       unsubSid();
       unsubSunVox();
       unsubFurnace();
+      unsubNes();
     };
   }, []);
 
@@ -192,7 +202,8 @@ export default function TrackerEditor({
       spessaSynthCore: true,
       tinyRSid: true,
       sunvox: true,
-      furnace: true
+      furnace: true,
+      famitracker: true
     });
   };
 
@@ -203,7 +214,8 @@ export default function TrackerEditor({
     enginesConfig.spessaSynthCore,
     enginesConfig.tinyRSid,
     enginesConfig.sunvox,
-    enginesConfig.furnace
+    enginesConfig.furnace,
+    enginesConfig.famitracker
   ].filter(Boolean).length;
 
   const handleTogglePatternChannelMute = (chId: number) => {
@@ -329,7 +341,8 @@ export default function TrackerEditor({
               result.fileName || selected.name,
               result.rawSidBuffer,
               result.sidMetadata,
-              result.rawSunVoxBuffer
+              result.rawSunVoxBuffer,
+              result.rawFamiTrackerBuffer
             );
           }
           addRecentSong({
@@ -471,23 +484,30 @@ export default function TrackerEditor({
     }
   }, [activeRow, isPlaying]);
 
-  const selectNoteList = [
-    "C-2", "D-2", "E-2", "F-2", "G-2", "A-2", "B-2",
-    "C-3", "D-3", "E-3", "F-3", "G-3", "A-3", "B-3",
-    "C-4", "D-4", "E-4", "F-4", "G-4", "A-4", "B-4",
-    "C-5", "D-5", "E-5", "F-5", "G-5", "A-5", "B-5",
-    "===", "---"
-  ];
+  const selectNoteList = useMemo(() => {
+    const chrom = ['C-', 'C#', 'D-', 'D#', 'E-', 'F-', 'F#', 'G-', 'G#', 'A-', 'A#', 'B-'];
+    const notes: string[] = [];
+    const startOct = selectedOctave === 'all' ? 0 : selectedOctave;
+    const endOct = selectedOctave === 'all' ? 7 : selectedOctave;
+    for (let oct = startOct; oct <= endOct; oct++) {
+      for (const n of chrom) {
+        notes.push(`${n}${oct}`);
+      }
+    }
+    notes.push('===', 'OFF', '---');
+    return notes;
+  }, [selectedOctave]);
 
   const handleCellClick = (rowIndex: number, chId: number, field: 'note' | 'inst' | 'vol' | 'fx', fxIndex?: number) => {
     setSelectedCell({ row: rowIndex, col: chId, field, fxIndex });
     
     // Play pitch instantly on click to preview
     const cellValue = currentPatternRows[rowIndex]?.[chId];
-    if (cellValue && cellValue.note !== "---" && cellValue.note !== "===" && field === 'note') {
+    if (cellValue && cellValue.note !== "---" && cellValue.note !== "===" && cellValue.note !== "OFF" && field === 'note') {
       const ch = channels.find(c => c.id === chId);
       if (ch) {
-        playNote(chId, ch.chip, cellValue.note, 0.25, ch.volume, ch.pan, ch.soundFontPreset);
+        const parsedInst = cellValue.inst && cellValue.inst !== '..' ? parseInt(cellValue.inst, 16) : -1;
+        playNote(chId, ch.chip, cellValue.note, 0.25, ch.volume, ch.pan, ch.soundFontPreset, Number.isNaN(parsedInst) ? -1 : parsedInst);
       }
     }
   };
@@ -549,10 +569,12 @@ export default function TrackerEditor({
       setPatterns(prev => updatePat(prev));
     }
 
-    if (newNote !== '---' && newNote !== '===') {
+    if (newNote !== '---' && newNote !== '===' && newNote !== 'OFF') {
       const ch = channels.find(c => c.id === chId);
       if (ch) {
-        playNote(chId, ch.chip, newNote, 0.25, ch.volume, ch.pan, ch.soundFontPreset);
+        const cellInst = currentPatternRows[rowIndex]?.[chId]?.inst;
+        const parsedInst = cellInst && cellInst !== '..' ? parseInt(cellInst, 16) : -1;
+        playNote(chId, ch.chip, newNote, 0.25, ch.volume, ch.pan, ch.soundFontPreset, Number.isNaN(parsedInst) ? -1 : parsedInst);
       }
     }
   };
@@ -953,12 +975,39 @@ export default function TrackerEditor({
             <span>Furnace WASM</span>
           </button>
 
+          {/* FamiTracker / Dn-FamiTracker + bitphase nes_apu.wasm Engine */}
+          <button
+            id="engine-toggle-famitracker"
+            onClick={() => handleToggleEngine('famitracker')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.famitracker
+                ? 'bg-rose-950/75 border-rose-500/70 text-rose-200 shadow-[0_0_8px_rgba(244,63,94,0.28)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={
+              famiTrackerState.wasmLoaded
+                ? 'FamiTracker / Dn-FamiTracker (nes_apu.wasm): READY. Click to mute.'
+                : 'FamiTracker / Dn-FamiTracker (2A03 + VRC6/VRC7/FDS/MMC5/N163/5B Worklet DSP): ACTIVE. Click to mute.'
+            }
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                enginesConfig.famitracker
+                  ? famiTrackerState.wasmLoaded
+                    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]'
+                    : 'bg-rose-400 shadow-[0_0_6px_rgba(251,113,133,0.9)]'
+                  : 'bg-zinc-600'
+              }`}
+            />
+            <span>FamiTracker (NES)</span>
+          </button>
+
           <button
             id="tracker-wasm-manager-btn"
             type="button"
             onClick={() => setIsWasmManagerOpen(true)}
             className="px-2 py-1 rounded text-[10px] font-semibold bg-zinc-900 hover:bg-zinc-800 text-cyan-300 border border-zinc-700 cursor-pointer"
-            title="Inspect and hot-swap WASM engine bundles (aria_furnace_all.js, tinyrsid.js, sunvox.js)"
+            title="Inspect and hot-swap WASM engine bundles (nes_apu.wasm, aria_furnace_all.js, tinyrsid.js, sunvox.js)"
           >
             WASM Manager
           </button>
@@ -1108,10 +1157,129 @@ export default function TrackerEditor({
           </button>
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-500 font-sans">
-            <strong className="text-zinc-300">{activeEnginesCount}</strong>/7 Active
+            <strong className="text-zinc-300">{activeEnginesCount}</strong>/8 Active
           </span>
         </div>
       </div>
+
+      {/* LIVE FAMITRACKER / DN-FAMITRACKER + BITPHASE NES_APU TELEMETRY PANEL */}
+      {famiTrackerState.hasModuleLoaded && (
+        <div
+          id="famitracker-live-telemetry-panel"
+          className="mb-2 px-3 py-2 bg-zinc-950/90 border border-rose-500/35 rounded-lg text-xs flex flex-col gap-2"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-500/60 text-rose-200 font-bold text-[9.5px] uppercase tracking-wider">
+                {famiTrackerState.moduleFormat?.toUpperCase() || 'FTM'} · Dn-FamiTracker
+              </span>
+              <span className="font-bold text-white text-[11px] truncate max-w-[200px]">
+                {famiTrackerState.moduleTitle}
+              </span>
+              <span className="text-[9.5px] text-zinc-400 font-sans">
+                by {famiTrackerState.moduleAuthor || 'Unknown'}
+              </span>
+              <span
+                className={`px-1.5 py-0.5 rounded text-[9px] font-mono border ${
+                  famiTrackerState.wasmLoaded
+                    ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-300'
+                    : 'bg-zinc-900 border-zinc-700 text-amber-300'
+                }`}
+                title={famiTrackerState.wasmSource}
+              >
+                {famiTrackerState.wasmLoaded ? 'bitphase nes_apu.wasm' : '2A03 + Dn-FT Worklet DSP'}
+              </span>
+              <div className="flex items-center gap-1">
+                {famiTrackerState.expansions.map((exp) => (
+                  <span
+                    key={exp}
+                    className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-cyan-300 text-[9px] font-bold"
+                  >
+                    {exp}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Subsong Selector */}
+              {famiTrackerState.subsongsCount > 1 && (
+                <select
+                  id="famitracker-subsong-select"
+                  value={famiTrackerState.activeSongIndex}
+                  onChange={(e) => {
+                    unlockAudioContextSync();
+                    NesWorkletEngine.setSubsong(parseInt(e.target.value, 10) || 0);
+                  }}
+                  className="bg-black border border-rose-700/60 rounded px-2 py-0.5 text-[9.5px] font-bold text-rose-200 cursor-pointer"
+                >
+                  {famiTrackerState.subsongNames.map((sName, idx) => (
+                    <option key={idx} value={idx} className="bg-zinc-950 text-zinc-200">
+                      Track {idx + 1}: {sName}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {/* Machine Timing Selector (NTSC / PAL / Dendy) */}
+              <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded p-0.5 text-[9px] font-bold">
+                {(['NTSC', 'PAL', 'Dendy'] as NesMachineStandard[]).map((std) => (
+                  <button
+                    key={std}
+                    type="button"
+                    onClick={() => NesWorkletEngine.setMachine(std)}
+                    className={`px-1.5 py-0.5 rounded transition cursor-pointer ${
+                      famiTrackerState.machine === std
+                        ? 'bg-rose-600 text-white'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {std}
+                  </button>
+                ))}
+              </div>
+
+              <span className="px-2 py-0.5 rounded bg-black border border-zinc-800 text-[9.5px] font-mono text-amber-300 tabular-nums">
+                Ord {(famiTrackerState.currentOrder + 1).toString().padStart(2, '0')}/{famiTrackerState.totalOrders.toString().padStart(2, '0')} · Row {famiTrackerState.currentRow.toString(16).toUpperCase().padStart(2, '0')}
+              </span>
+            </div>
+          </div>
+
+          {/* Live Per-Channel Activity Meters (Pulse 1, Pulse 2, Triangle, Noise, DPCM, Expansion Chips) */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-1.5">
+            {famiTrackerState.channels.map((ch) => {
+              const pct = Math.min(100, Math.round(ch.level * 100));
+              const isMuted = ch.muted;
+              return (
+                <button
+                  key={ch.index}
+                  type="button"
+                  onClick={() => handleTogglePatternChannelMute(ch.index + 1)}
+                  title={`${ch.name} (${ch.chip}) · Click to ${isMuted ? 'unmute' : 'mute'}`}
+                  className={`px-2 py-1 rounded border text-left transition cursor-pointer ${
+                    isMuted
+                      ? 'bg-red-950/25 border-red-800/50 opacity-60'
+                      : 'bg-zinc-900/90 border-zinc-800 hover:border-rose-500/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-[9px] font-mono">
+                    <span className="font-bold text-zinc-200 truncate">{ch.shortName}</span>
+                    <span className={ch.activeNote !== '---' ? 'text-emerald-400 font-bold' : 'text-zinc-600'}>
+                      {ch.activeNote}
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 bg-black rounded-full overflow-hidden mt-1">
+                    <div
+                      className="h-full bg-gradient-to-r from-rose-500 via-amber-400 to-emerald-400 transition-[width] duration-75"
+                      style={{ width: `${isMuted ? 0 : pct}%` }}
+                    />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* LIVE SUNVOX EFFECTS USAGE & DYNAMIC BRIGHTNESS MATRIX */}
       {sunvoxState.hasSunVoxLoaded && sunvoxState.effectsActivity.length > 0 && (
@@ -1387,13 +1555,20 @@ export default function TrackerEditor({
         </div>
       </div>
 
-      {/* LIVE FURNACE EFFECT STATUS-BAR TOOLTIP */}
+      {/* LIVE FURNACE & DN-FAMITRACKER EFFECT STATUS-BAR TOOLTIP */}
       {(() => {
         const selectedFxVal =
           selectedCell?.field === 'fx'
             ? currentPatternRows[selectedCell.row]?.[selectedCell.col]?.fx?.[selectedCell.fxIndex ?? 0]
             : undefined;
-        const info = describeFurnaceEffect(hoveredFxToken ?? selectedFxVal ?? null);
+        const activeToken = hoveredFxToken ?? selectedFxVal ?? null;
+        const tokTrim = (activeToken || '').trim().toUpperCase();
+        const useDnDoc =
+          famiTrackerState.hasModuleLoaded ||
+          (tokTrim.length > 0 && tokTrim !== '....' && /^[=NKJGHILMOPQRSTVWXYZ]/.test(tokTrim));
+        const info = useDnDoc
+          ? describeDnFamiTrackerEffect(activeToken)
+          : describeFurnaceEffect(activeToken);
         return (
           <div
             id="tracker-effect-status-bar"
@@ -1405,7 +1580,7 @@ export default function TrackerEditor({
               <span className="text-zinc-400 truncate font-sans">{info.detail}</span>
             </div>
             <span className="text-[10px] text-zinc-500 tabular-nums shrink-0">
-              FX1–FX{fxColumnsCount} Furnace Engine
+              {useDnDoc ? `Dn-FamiTracker FX1–FX${fxColumnsCount}` : `FX1–FX${fxColumnsCount} Furnace Engine`}
             </span>
           </div>
         );
@@ -1651,13 +1826,32 @@ export default function TrackerEditor({
               </div>
 
               <div>
-                <label className="text-[10px] text-zinc-400 block mb-1.5">Map Tone Pitch:</label>
-                <div className="grid grid-cols-4 gap-1 max-h-[190px] overflow-y-auto pr-1 text-[10.5px] custom-scrollbar">
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <label className="text-[10px] text-zinc-400">Map Tone Pitch (Oct 0–7):</label>
+                  <div className="flex items-center gap-0.5">
+                    {([0, 1, 2, 3, 4, 5, 6, 7, 'all'] as const).map((oct) => (
+                      <button
+                        key={String(oct)}
+                        type="button"
+                        onClick={() => setSelectedOctave(oct)}
+                        className={`px-1 py-0.5 rounded text-[9px] font-bold border transition cursor-pointer ${
+                          selectedOctave === oct
+                            ? 'bg-cyan-500/25 border-cyan-500 text-cyan-300'
+                            : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-white'
+                        }`}
+                        title={oct === 'all' ? 'Show all octaves 0–7' : `Octave ${oct}`}
+                      >
+                        {oct === 'all' ? 'All' : oct}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-4 gap-1 max-h-[200px] overflow-y-auto pr-1 text-[10.5px] custom-scrollbar">
                   {selectNoteList.map(not => (
                     <button 
                       key={not}
                       onClick={() => updateCellNote(selectedCell.row, selectedCell.col, not)}
-                      className={`p-1 rounded border text-center transition-all ${
+                      className={`p-1 rounded border text-center transition-all cursor-pointer ${
                         currentPatternRows[selectedCell.row]?.[selectedCell.col]?.note === not
                           ? 'bg-cyan-500/25 border-cyan-500 text-cyan-300 font-bold'
                           : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900 text-zinc-400 hover:text-white'
@@ -1775,7 +1969,7 @@ export default function TrackerEditor({
                   type="file"
                   ref={fileInputRef2}
                   onChange={handleFileImport}
-                  accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                  accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.ftm,.0cc,.dnm,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                   className="hidden"
                 />
                 <Disc3 size={28} className="text-cyan-400 animate-spin-slow" />
@@ -1783,7 +1977,7 @@ export default function TrackerEditor({
                   Choose Music or SoundFont File
                 </span>
                 <span className="text-[9px] text-zinc-500 font-sans max-w-sm leading-normal">
-                  Furnace (.fur, .fui, .fuw, .dmp, .opm), MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), SunVox (.sunvox), C64 (.sid), NES (.nsf/.dmc), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc/.brr), SoundFonts (.sf2, .sf3, .dls, .sfe), WAV, MP3, and JSON.
+                  FamiTracker / Dn-FT (.ftm, .0cc, .dnm), Furnace (.fur, .fui, .fuw, .dmp, .opm), MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), SunVox (.sunvox), C64 (.sid), NES (.nsf/.dmc), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc/.brr), SoundFonts (.sf2, .sf3, .dls, .sfe), WAV, MP3, and JSON.
                 </span>
               </div>
 
