@@ -5,6 +5,10 @@ import { SpessaSynth, SPRESSASYNTH_ENGINE_ID } from '../engines/spressasynthLib'
 import { WorkletSynthBridge } from '../engines/workletSynthBridge';
 import { TinyRsidBridge, TINYRSID_ENGINE_ID } from '../engines/tinyRsidBridge';
 import { SunVoxBridge, SUNVOX_ENGINE_ID } from '../engines/sunvoxBridge';
+import { FurnaceBridge, FURNACE_ENGINE_ID } from '../engines/FurnaceBridge';
+import { MasterAudioRouter } from '../engines/MasterAudioRouter';
+import { TinySynthBridge } from '../engines/TinySynthBridge';
+import { SpessaSynthAdapter } from '../engines/SpessaSynthBridge';
 import { onInterpolationModeChange } from '../engines/soundFontInterpolation';
 import { BasicMIDI } from 'spessasynth_core';
 import { WebScope, WEBSCOPE_ENGINE_ID, WEBSCOPE_PRESETS } from '../engines/webscopeOscilloscope';
@@ -24,6 +28,8 @@ export { SpessaSynth, SPRESSASYNTH_ENGINE_ID };
 export { WorkletSynthBridge };
 export { TinyRsidBridge, TINYRSID_ENGINE_ID };
 export { SunVoxBridge, SUNVOX_ENGINE_ID };
+export { FurnaceBridge, FURNACE_ENGINE_ID };
+export { MasterAudioRouter, TinySynthBridge, SpessaSynthAdapter };
 export {
   SpessaSynthCore,
   SPRESSASYNTH_CORE_ENGINE_ID,
@@ -335,10 +341,11 @@ if (typeof window !== 'undefined') {
 export const DEFAULT_SOUND_ENGINES: SoundEnginesConfig = {
   spessaSynth: true,
   tinySynth: true,
-  syntheticOsc: true,
+  syntheticOsc: false,
   spessaSynthCore: true,
   tinyRSid: true,
   sunvox: true,
+  furnace: true,
 };
 
 let activeEnginesConfig: SoundEnginesConfig = (() => {
@@ -353,6 +360,7 @@ let activeEnginesConfig: SoundEnginesConfig = (() => {
         spessaSynthCore: typeof parsed.spessaSynthCore === 'boolean' ? parsed.spessaSynthCore : DEFAULT_SOUND_ENGINES.spessaSynthCore,
         tinyRSid: typeof parsed.tinyRSid === 'boolean' ? parsed.tinyRSid : DEFAULT_SOUND_ENGINES.tinyRSid,
         sunvox: typeof parsed.sunvox === 'boolean' ? parsed.sunvox : DEFAULT_SOUND_ENGINES.sunvox,
+        furnace: typeof parsed.furnace === 'boolean' ? parsed.furnace : DEFAULT_SOUND_ENGINES.furnace,
       };
     }
   } catch (e) {}
@@ -362,6 +370,7 @@ let activeEnginesConfig: SoundEnginesConfig = (() => {
 if (typeof window !== 'undefined') {
   TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
   SunVoxBridge.setEngineEnabled(activeEnginesConfig.sunvox);
+  FurnaceBridge.setEngineEnabled(activeEnginesConfig.furnace);
 }
 
 const engineChangeListeners: ((config: SoundEnginesConfig) => void)[] = [];
@@ -378,6 +387,7 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
     spessaSynthCore: config.spessaSynthCore ?? activeEnginesConfig.spessaSynthCore,
     tinyRSid: config.tinyRSid ?? activeEnginesConfig.tinyRSid,
     sunvox: config.sunvox ?? activeEnginesConfig.sunvox,
+    furnace: config.furnace ?? activeEnginesConfig.furnace,
   };
   
   if (tinySynthMasterGain && audioCtx) {
@@ -393,6 +403,13 @@ export function setSoundEnginesConfig(config: Partial<SoundEnginesConfig>) {
   WorkletSynthBridge.setMasterVolumeGain(activeEnginesConfig.spessaSynth ? 0.85 : 0);
   TinyRsidBridge.setEngineEnabled(activeEnginesConfig.tinyRSid);
   SunVoxBridge.setEngineEnabled(activeEnginesConfig.sunvox);
+  FurnaceBridge.setEngineEnabled(activeEnginesConfig.furnace);
+  TinySynthBridge.setEnabled(activeEnginesConfig.tinySynth);
+  MasterAudioRouter.setEngineEnabled('FURNACE', activeEnginesConfig.furnace);
+  MasterAudioRouter.setEngineEnabled('TINYSYNTH', activeEnginesConfig.tinySynth);
+  MasterAudioRouter.setEngineEnabled('SF2/SFE', activeEnginesConfig.spessaSynth || activeEnginesConfig.spessaSynthCore);
+  MasterAudioRouter.setEngineEnabled('TINYRSID', activeEnginesConfig.tinyRSid);
+  MasterAudioRouter.setEngineEnabled('SUNVOX', activeEnginesConfig.sunvox);
 
   if (!activeEnginesConfig.syntheticOsc) {
     activeSyntheticVoices.forEach(v => { try { v.stop(); } catch(e) {} });
@@ -715,8 +732,9 @@ export function initTinySynth(ctx: AudioContext) {
       tinySynthLimiter.attack.setValueAtTime(0.001, ctx.currentTime);
       tinySynthLimiter.release.setValueAtTime(0.08, ctx.currentTime);
 
+      const tinyBus = MasterAudioRouter.getEngineInput('TINYSYNTH');
       tinySynthMasterGain.connect(tinySynthLimiter);
-      tinySynthLimiter.connect(ctx.destination);
+      tinySynthLimiter.connect(tinyBus || ctx.destination);
     }
     if (!tinySynthInstance && typeof WebAudioTinySynth !== 'undefined') {
       const w = window as any;
@@ -738,6 +756,7 @@ export function initTinySynth(ctx: AudioContext) {
       tinySynthInstance.setMasterVol(0.55);
       shapeTinySynthNoiseBuffer(tinySynthInstance, ctx.sampleRate);
       hookTinySynthEvents(tinySynthInstance);
+      TinySynthBridge.bindExisting(tinySynthInstance, tinySynthMasterGain, ctx, MasterAudioRouter.getEngineInput('TINYSYNTH') || undefined);
     }
   } catch (err) {
     console.warn("TinySynth initialization note:", err);
@@ -758,12 +777,12 @@ export function initSyntheticEngine(ctx: AudioContext) {
       syntheticLimiter.release.setValueAtTime(0.08, ctx.currentTime);
 
       syntheticMasterGain.connect(syntheticLimiter);
-      syntheticLimiter.connect(ctx.destination);
+      syntheticLimiter.connect(MasterAudioRouter.getMasterAnalyser() ? (MasterAudioRouter.getEngineInput('TINYSYNTH') || ctx.destination) : ctx.destination);
     }
     if (!directAudioMasterGain) {
       directAudioMasterGain = ctx.createGain();
       directAudioMasterGain.gain.setValueAtTime(0.85, ctx.currentTime);
-      directAudioMasterGain.connect(ctx.destination);
+      directAudioMasterGain.connect(MasterAudioRouter.getEngineInput('SF2/SFE') || ctx.destination);
     }
     WebScope.initDirectAudioMatrix(ctx);
   } catch (e) {}
@@ -775,6 +794,7 @@ export function getAudioContext(): AudioContext | null {
     if (AudioContextClass) {
       audioCtx = new AudioContextClass();
       (window as any)._gPlayerAudioCtx = audioCtx;
+      MasterAudioRouter.init(audioCtx);
       SpessaSynth.init(audioCtx);
       void WorkletSynthBridge.init(audioCtx);
       initTinySynth(audioCtx);
@@ -1398,28 +1418,46 @@ export function playNote(
     const noteGen = midiPlaybackGeneration;
     const durMs = Math.max(30, Math.round(duration * 1000));
 
-    // 1. SpessaSynth Lib (WorkletSynthesizer) & spressasynth_core (PCM Sample Resolver)
-    if (activeEnginesConfig.spessaSynth && shouldUseWorkletPrimary()) {
-      if (soundFontPreset && !WorkletSynthBridge.getChannelState(workletChIdx).presetLocked) {
-        WorkletSynthBridge.programChange(workletChIdx, gmProg);
+    const targetEngine = MasterAudioRouter.detectEngineForChannel({ chip, soundFontPreset });
+
+    // Strict Furnace WASM / retro-chip isolation:
+    // Never replace Furnace's retro sound chips with generic Web Audio OscillatorNode fallbacks!
+    if (targetEngine === 'FURNACE' || targetEngine === 'TINYRSID') {
+      if (activeEnginesConfig.furnace && FurnaceBridge.isWasmReady()) {
+        FurnaceBridge.noteOn(Math.max(0, channelId - 1), midiNum, volNorm);
+        const furOffTimer = setTimeout(() => {
+          scheduledNoteOffTimers.delete(furOffTimer);
+          if (noteGen !== midiPlaybackGeneration) return;
+          FurnaceBridge.noteOff(Math.max(0, channelId - 1));
+        }, durMs);
+        scheduledNoteOffTimers.add(furOffTimer);
       }
-      // Trigger immediately and schedule noteOff in generation-guarded JS timer so Pause/Seek cancels cleanly
-      WorkletSynthBridge.noteOn(workletChIdx, midiNum, volNorm);
-      const offTimer = setTimeout(() => {
-        scheduledNoteOffTimers.delete(offTimer);
-        if (noteGen !== midiPlaybackGeneration) return;
-        WorkletSynthBridge.noteOff(workletChIdx, midiNum);
-      }, durMs);
-      scheduledNoteOffTimers.add(offTimer);
-    } else if (activeEnginesConfig.spessaSynthCore) {
-      if (soundFontPreset) {
-        SpessaSynth.setChannelProgram(chIdx, gmProg);
-      }
-      SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
+      return;
     }
 
-    // 2. WebAudio TinySynth Engine (suppress hook forwarding so SpessaSynth isn't double-triggered)
-    if (activeEnginesConfig.tinySynth && tinySynthInstance) {
+    // 1. SpessaSynth Lib (WorkletSynthesizer) & spressasynth_core (PCM Sample Resolver) for SF2/SFE / GM
+    if (targetEngine === 'SF2/SFE') {
+      if (activeEnginesConfig.spessaSynth && shouldUseWorkletPrimary()) {
+        if (soundFontPreset && !WorkletSynthBridge.getChannelState(workletChIdx).presetLocked) {
+          WorkletSynthBridge.programChange(workletChIdx, gmProg);
+        }
+        WorkletSynthBridge.noteOn(workletChIdx, midiNum, volNorm);
+        const offTimer = setTimeout(() => {
+          scheduledNoteOffTimers.delete(offTimer);
+          if (noteGen !== midiPlaybackGeneration) return;
+          WorkletSynthBridge.noteOff(workletChIdx, midiNum);
+        }, durMs);
+        scheduledNoteOffTimers.add(offTimer);
+      } else if (activeEnginesConfig.spessaSynthCore) {
+        if (soundFontPreset) {
+          SpessaSynth.setChannelProgram(chIdx, gmProg);
+        }
+        SpessaSynth.noteOn(chIdx, midiNum, volNorm, duration, targetTime);
+      }
+    }
+
+    // 2. WebAudio TinySynth Engine (preserves TinySynth's native oscillators for General MIDI)
+    if ((targetEngine === 'TINYSYNTH' || targetEngine === 'SF2/SFE') && activeEnginesConfig.tinySynth && tinySynthInstance) {
       try {
         suppressHookForward = true;
         if (soundFontPreset) {
@@ -1443,8 +1481,8 @@ export function playNote(
       }
     }
 
-    // 3. Redundant Synthetic Oscillators Layer
-    if (activeEnginesConfig.syntheticOsc) {
+    // 3. Optional Synthetic Layer (only when explicitly enabled by user AND non-Furnace channel)
+    if (activeEnginesConfig.syntheticOsc && targetEngine !== 'SF2/SFE') {
       playSyntheticOscillator(ctx, channelId, chip, freq, targetTime, duration, volume / 100, pan);
     }
 
@@ -1456,6 +1494,7 @@ export function playNote(
 export function stopChannelSound(channelId: number) {
   const chIdx = (channelId - 1) % 16;
   const workletChIdx = Math.max(0, Math.min(47, channelId - 1));
+  FurnaceBridge.noteOff(workletChIdx);
   SpessaSynth.noteOff(chIdx);
   for (let n = 0; n < 128; n++) {
     // Only turn off active sounding notes tracked on this WorkletSynthesizer channel
@@ -1481,6 +1520,9 @@ export function stopAllChannelsSound() {
   stopMidiPlayback();
   TinyRsidBridge.pause();
   SunVoxBridge.pause();
+  for (let ch = 0; ch < 48; ch++) {
+    FurnaceBridge.noteOff(ch);
+  }
   cancelAllScheduledNotesAndSilence();
 }
 

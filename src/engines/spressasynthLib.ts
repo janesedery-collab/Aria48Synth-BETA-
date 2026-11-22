@@ -344,6 +344,18 @@ class SpessaSynthEngine {
     return this.masterGain;
   }
 
+  public routeOutputTo(dest: AudioNode) {
+    if (!this.masterLimiter && !this.masterGain) this.init();
+    const out = this.masterLimiter || this.masterGain;
+    if (!out) return;
+    try {
+      out.disconnect();
+    } catch {}
+    try {
+      out.connect(dest);
+    } catch {}
+  }
+
   public getChannelGain(channelIndex: number): GainNode | null {
     if (this.channelGains.length === 0) this.init();
     if (channelIndex >= 0 && channelIndex < this.channelGains.length) {

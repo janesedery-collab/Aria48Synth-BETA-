@@ -47,13 +47,16 @@ export interface OscilloscopeConfig {
   phaseSync: boolean; // Stabilize waveform at zero-crossing (true) or free-drifting phase (false)
 }
 
+export type EngineKind = 'FURNACE' | 'SF2/SFE' | 'TINYRSID' | 'SUNVOX' | 'TINYSYNTH';
+
 export interface SoundEnginesConfig {
   spessaSynth: boolean;     // SpessaSynth (WorkletSynthesizer SF2/SF3/DLS/SFe & 16-channel MIDI)
   tinySynth: boolean;       // WebAudio TinySynth (GM FM Synthesis)
   syntheticOsc: boolean;    // Hardware Synthetic Oscillators (YM2612, SID, Paula, DMG, AY-3)
   spessaSynthCore: boolean; // spressasynth_core (SoundFont Core, PCM Voice Resolver & MOD/XM/S3M)
   tinyRSid: boolean;        // TinyRSid / WebSID (WASM C64 MOS6581/MOS8580 multi-SID emulator)
-  sunvox: boolean;          // SunVox WASM (Modular tracker engine via jsDelivr CDN for .sunvox)
+  sunvox: boolean;          // SunVox WASM (Modular tracker engine for .sunvox)
+  furnace: boolean;         // Furnace WASM (Cycle-accurate headless DivEngine chip cores)
 }
 
 export type SoundFontInterpolationMode =
@@ -62,6 +65,27 @@ export type SoundFontInterpolationMode =
   | 'cubic'
   | 'poly4'
   | 'sinc';
+
+export interface PatternCellData {
+  note: string;
+  inst: string;
+  vol: string;
+  delay?: string;
+  fx?: string[]; // Up to 4 Furnace effect columns (e.g. ["0037", "0448", "EC06", "0880"])
+}
+
+export type WasmBundleStatus = 'unloaded' | 'loading' | 'ready' | 'error';
+
+export interface WasmBundleSlot {
+  id: 'furnace' | 'tinyrsid' | 'sunvox';
+  label: string;
+  defaultJsUrl: string;
+  defaultWasmUrl: string;
+  customJsName?: string;
+  customWasmName?: string;
+  status: WasmBundleStatus;
+  error?: string | null;
+}
 
 export interface ChatMessage {
   id: string;
@@ -96,6 +120,7 @@ export const CHIPS = [
   'RP2A03 (NES APU)',
   'DMG-01 (Game Boy)',
   'SPC700 (SNES DSP)',
+  'Furnace (WASM Chip Core)',
   'General MIDI (SoundFont)',
   'Virtual DAC',
   'Physical Chip (USB)'

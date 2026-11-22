@@ -485,6 +485,17 @@ class WorkletSynthController {
     } catch {}
   }
 
+  public routeOutputTo(dest: AudioNode) {
+    if (!this.limiter && !this.masterGain) return;
+    const out = this.limiter || this.masterGain!;
+    try {
+      out.disconnect();
+    } catch {}
+    try {
+      out.connect(dest);
+    } catch {}
+  }
+
   public async init(externalCtx?: AudioContext): Promise<WorkletSynthesizer | null> {
     if (typeof window === 'undefined') return null;
 

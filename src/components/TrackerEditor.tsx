@@ -15,6 +15,8 @@ import {
   deleteSavedSoundFont,
   SunVoxBridge,
   TinyRsidBridge,
+  FurnaceBridge,
+  MasterAudioRouter,
   getAudioContext,
   unlockAudioContextSync
 } from './AudioEngine';
@@ -30,8 +32,14 @@ import {
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { parseChiptuneFileAsync } from '../utils/chiptuneParsers';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
+import {
+  FURNACE_EFFECT_SPECS,
+  describeFurnaceEffect,
+  normalizeEffectToken
+} from '../engines/FurnaceEffectTable';
 import ExportStudioModal from './ExportStudioModal';
 import SpessaMidiMixerPanel from './SpessaMidiMixerPanel';
+import WasmEngineManagerModal from './WasmEngineManagerModal';
 import { SequenceMetadataStrip } from './WebMidiDeckPanel';
 import { addRecentSong } from '../utils/recentSongsManager';
 
@@ -101,9 +109,12 @@ export default function TrackerEditor({
   onSelectSidSubtune,
   onImportTrack 
 }: TrackerEditorProps) {
-  const [selectedCell, setSelectedCell] = useState<{ row: number; col: number; field: 'note' | 'inst' | 'vol' } | null>(null);
+  const [selectedCell, setSelectedCell] = useState<{ row: number; col: number; field: 'note' | 'inst' | 'vol' | 'fx'; fxIndex?: number } | null>(null);
   const [selectedBank, setSelectedBank] = useState<ChannelBank>('1-8');
   const [showActiveOnly, setShowActiveOnly] = useState<boolean>(false);
+  const [fxColumnsCount, setFxColumnsCount] = useState<number>(2);
+  const [hoveredFxToken, setHoveredFxToken] = useState<string | null>(null);
+  const [isWasmManagerOpen, setIsWasmManagerOpen] = useState<boolean>(false);
   const [soundFontInstruments, setSoundFontInstruments] = useState<SoundFontInstrument[]>([]);
   
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -123,6 +134,7 @@ export default function TrackerEditor({
   const [trackerBpmText, setTrackerBpmText] = useState((bpm || 125).toString());
 
   const [sunvoxState, setSunvoxState] = useState(() => SunVoxBridge.getState());
+  const [furnaceState, setFurnaceState] = useState(() => FurnaceBridge.getState());
 
   useEffect(() => {
     setTrackerBpmText((bpm || 125).toString());
@@ -152,6 +164,9 @@ export default function TrackerEditor({
     const unsubSunVox = SunVoxBridge.subscribe((nextSv) => {
       setSunvoxState(nextSv);
     });
+    const unsubFurnace = FurnaceBridge.subscribe((nextFur) => {
+      setFurnaceState(nextFur);
+    });
     return () => {
       unsubSf();
       unsubEngines();
@@ -159,6 +174,7 @@ export default function TrackerEditor({
       unsubDefSf();
       unsubSid();
       unsubSunVox();
+      unsubFurnace();
     };
   }, []);
 
@@ -175,7 +191,8 @@ export default function TrackerEditor({
       syntheticOsc: true,
       spessaSynthCore: true,
       tinyRSid: true,
-      sunvox: true
+      sunvox: true,
+      furnace: true
     });
   };
 
@@ -185,7 +202,8 @@ export default function TrackerEditor({
     enginesConfig.syntheticOsc,
     enginesConfig.spessaSynthCore,
     enginesConfig.tinyRSid,
-    enginesConfig.sunvox
+    enginesConfig.sunvox,
+    enginesConfig.furnace
   ].filter(Boolean).length;
 
   const handleTogglePatternChannelMute = (chId: number) => {
@@ -461,8 +479,8 @@ export default function TrackerEditor({
     "===", "---"
   ];
 
-  const handleCellClick = (rowIndex: number, chId: number, field: 'note' | 'inst' | 'vol') => {
-    setSelectedCell({ row: rowIndex, col: chId, field });
+  const handleCellClick = (rowIndex: number, chId: number, field: 'note' | 'inst' | 'vol' | 'fx', fxIndex?: number) => {
+    setSelectedCell({ row: rowIndex, col: chId, field, fxIndex });
     
     // Play pitch instantly on click to preview
     const cellValue = currentPatternRows[rowIndex]?.[chId];
@@ -471,6 +489,39 @@ export default function TrackerEditor({
       if (ch) {
         playNote(chId, ch.chip, cellValue.note, 0.25, ch.volume, ch.pan, ch.soundFontPreset);
       }
+    }
+  };
+
+  const updateCellEffect = (rowIndex: number, chId: number, fxIndex: number, rawToken: string) => {
+    const token = normalizeEffectToken(rawToken);
+    const updatePat = (prevPat: any[]) => {
+      const updated = [...prevPat];
+      const prevCell = updated[rowIndex]?.[chId] || { note: '---', inst: '..', vol: '..', delay: '000' };
+      const fxArr = Array.isArray(prevCell.fx) ? [...prevCell.fx] : ['....', '....', '....', '....'];
+      while (fxArr.length < 4) fxArr.push('....');
+      fxArr[fxIndex] = token;
+      updated[rowIndex] = {
+        ...updated[rowIndex],
+        [chId]: {
+          ...prevCell,
+          fx: fxArr,
+        }
+      };
+      return updated;
+    };
+
+    if (songPatterns && setSongPatterns) {
+      setSongPatterns(prev => {
+        const copy = [...prev];
+        copy[currentPatternIndex] = updatePat(copy[currentPatternIndex]);
+        return copy;
+      });
+    } else {
+      setPatterns(prev => updatePat(prev));
+    }
+
+    if (token !== '....') {
+      MasterAudioRouter.routeEffect(chId, token, 'FURNACE');
     }
   };
 
@@ -883,6 +934,35 @@ export default function TrackerEditor({
             <span>SunVox {sunvoxState.engineVersion || '2.1.4'}</span>
           </button>
 
+          {/* Furnace Headless WASM Engine */}
+          <button
+            id="engine-toggle-furnace"
+            onClick={() => handleToggleEngine('furnace')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1.5 transition cursor-pointer border ${
+              enginesConfig.furnace
+                ? 'bg-teal-950/75 border-teal-500/70 text-teal-300 shadow-[0_0_8px_rgba(20,184,166,0.28)]'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300 opacity-60'
+            }`}
+            title={
+              furnaceState.wasmStatus === 'ready'
+                ? 'Furnace WASM DivEngine: READY. Click to mute.'
+                : 'Furnace WASM DivEngine: Enable/open WASM Manager to attach aria_furnace_all.js'
+            }
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${enginesConfig.furnace ? (furnaceState.wasmStatus === 'ready' ? 'bg-teal-400' : 'bg-amber-400') : 'bg-zinc-600'}`} />
+            <span>Furnace WASM</span>
+          </button>
+
+          <button
+            id="tracker-wasm-manager-btn"
+            type="button"
+            onClick={() => setIsWasmManagerOpen(true)}
+            className="px-2 py-1 rounded text-[10px] font-semibold bg-zinc-900 hover:bg-zinc-800 text-cyan-300 border border-zinc-700 cursor-pointer"
+            title="Inspect and hot-swap WASM engine bundles (aria_furnace_all.js, tinyrsid.js, sunvox.js)"
+          >
+            WASM Manager
+          </button>
+
           {(sunvoxState.hasSunVoxLoaded || sunvoxState.isLoading || sunvoxState.error) && (
             <div
               id="sunvox-status-badge"
@@ -1028,7 +1108,7 @@ export default function TrackerEditor({
           </button>
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-500 font-sans">
-            <strong className="text-zinc-300">{activeEnginesCount}</strong>/6 Active
+            <strong className="text-zinc-300">{activeEnginesCount}</strong>/7 Active
           </span>
         </div>
       </div>
@@ -1273,7 +1353,24 @@ export default function TrackerEditor({
           ))}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded p-0.5 text-[10px]">
+            <span className="text-zinc-500 px-1.5 font-semibold">FX Cols:</span>
+            {[1, 2, 3, 4].map((cnt) => (
+              <button
+                key={cnt}
+                type="button"
+                onClick={() => setFxColumnsCount(cnt)}
+                className={`px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer ${
+                  fxColumnsCount === cnt ? 'bg-cyan-600 text-white' : 'text-zinc-400 hover:text-white'
+                }`}
+                title={`Display ${cnt} Furnace effect column${cnt > 1 ? 's' : ''} (FX1${cnt > 1 ? `-FX${cnt}` : ''})`}
+              >
+                {cnt}
+              </button>
+            ))}
+          </div>
+
           <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 cursor-pointer">
             <input 
               type="checkbox"
@@ -1289,6 +1386,30 @@ export default function TrackerEditor({
           </div>
         </div>
       </div>
+
+      {/* LIVE FURNACE EFFECT STATUS-BAR TOOLTIP */}
+      {(() => {
+        const selectedFxVal =
+          selectedCell?.field === 'fx'
+            ? currentPatternRows[selectedCell.row]?.[selectedCell.col]?.fx?.[selectedCell.fxIndex ?? 0]
+            : undefined;
+        const info = describeFurnaceEffect(hoveredFxToken ?? selectedFxVal ?? null);
+        return (
+          <div
+            id="tracker-effect-status-bar"
+            className="mb-2 px-3 py-1 bg-zinc-950 border border-zinc-800 rounded flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-mono"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-cyan-400 font-bold shrink-0">{info.title}</span>
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-400 truncate font-sans">{info.detail}</span>
+            </div>
+            <span className="text-[10px] text-zinc-500 tabular-nums shrink-0">
+              FX1–FX{fxColumnsCount} Furnace Engine
+            </span>
+          </div>
+        );
+      })()}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 flex-1 min-h-0">
         
@@ -1309,10 +1430,18 @@ export default function TrackerEditor({
             {visibleChannels.map(ch => {
               const anySolo = channels.some(c => c.enabled && c.solo);
               const isMutedEff = ch.mute || (anySolo && !ch.solo);
+              const colWidthClass =
+                fxColumnsCount === 1
+                  ? 'w-52'
+                  : fxColumnsCount === 2
+                    ? 'w-60'
+                    : fxColumnsCount === 3
+                      ? 'w-72'
+                      : 'w-80';
               return (
                 <div 
                   key={ch.id} 
-                  className={`w-44 flex-shrink-0 border-r border-zinc-800 p-1.5 text-center transition-colors ${
+                  className={`${colWidthClass} flex-shrink-0 border-r border-zinc-800 p-1.5 text-center transition-colors ${
                     ch.solo
                       ? 'bg-amber-950/35'
                       : isMutedEff
@@ -1402,11 +1531,20 @@ export default function TrackerEditor({
               {visibleChannels.map(ch => {
                 const cell = currentPatternRows[rowIndex]?.[ch.id] || { note: '---', inst: '..', vol: '..' };
                 const isSelected = selectedCell?.row === rowIndex && selectedCell?.col === ch.id;
+                const fxArr: string[] = Array.isArray(cell.fx) ? cell.fx : [];
+                const colWidthClass =
+                  fxColumnsCount === 1
+                    ? 'w-52'
+                    : fxColumnsCount === 2
+                      ? 'w-60'
+                      : fxColumnsCount === 3
+                        ? 'w-72'
+                        : 'w-80';
 
                 return (
                   <div 
                     key={ch.id} 
-                    className={`w-44 flex-shrink-0 border-r border-zinc-900/60 flex items-center justify-between text-[11px] px-2.5 py-1.5 font-semibold group cursor-pointer ${
+                    className={`${colWidthClass} flex-shrink-0 border-r border-zinc-900/60 flex items-center justify-between gap-1 text-[10.5px] px-2 py-1.5 font-semibold group cursor-pointer ${
                       isSelected 
                         ? 'bg-cyan-900/40 ring-1 ring-cyan-500/50' 
                         : 'hover:bg-zinc-850/40'
@@ -1440,6 +1578,32 @@ export default function TrackerEditor({
                     >
                       {cell.vol}
                     </span>
+
+                    <div className="flex items-center gap-1 ml-1">
+                      {Array.from({ length: fxColumnsCount }, (_, fxIdx) => {
+                        const tok = fxArr[fxIdx] || '....';
+                        const isFxSelected =
+                          isSelected && selectedCell?.field === 'fx' && selectedCell?.fxIndex === fxIdx;
+                        return (
+                          <span
+                            key={fxIdx}
+                            onMouseEnter={() => setHoveredFxToken(tok)}
+                            onMouseLeave={() => setHoveredFxToken(null)}
+                            onClick={() => handleCellClick(rowIndex, ch.id, 'fx', fxIdx)}
+                            className={`text-[9.5px] font-mono px-1 rounded transition-colors ${
+                              isFxSelected
+                                ? 'bg-amber-500/30 text-amber-200 ring-1 ring-amber-400'
+                                : tok !== '....'
+                                  ? 'text-amber-300'
+                                  : 'text-zinc-700 hover:text-zinc-400'
+                            }`}
+                            title={describeFurnaceEffect(tok).title}
+                          >
+                            {tok}
+                          </span>
+                        );
+                      })}
+                    </div>
                   </div>
                 );
               })}
@@ -1502,6 +1666,45 @@ export default function TrackerEditor({
                       {not}
                     </button>
                   ))}
+                </div>
+              </div>
+
+              {/* Furnace Effect Slot Programmer (FX1-FX4) */}
+              <div className="bg-black/40 border border-zinc-800 rounded p-2 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-[10px] text-zinc-400">
+                  <span>Furnace Effect (FX{(selectedCell.fxIndex ?? 0) + 1}):</span>
+                  <span className="font-mono text-amber-300">
+                    {currentPatternRows[selectedCell.row]?.[selectedCell.col]?.fx?.[selectedCell.fxIndex ?? 0] || '....'}
+                  </span>
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    placeholder="e.g. 0448"
+                    value={currentPatternRows[selectedCell.row]?.[selectedCell.col]?.fx?.[selectedCell.fxIndex ?? 0] || ''}
+                    onChange={(e) =>
+                      updateCellEffect(selectedCell.row, selectedCell.col, selectedCell.fxIndex ?? 0, e.target.value)
+                    }
+                    className="w-20 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-[11px] font-mono text-amber-300 uppercase focus:outline-none focus:border-amber-500"
+                  />
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        updateCellEffect(selectedCell.row, selectedCell.col, selectedCell.fxIndex ?? 0, e.target.value);
+                      }
+                    }}
+                    className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-1.5 py-1 text-[10px] text-zinc-300 cursor-pointer"
+                  >
+                    <option value="">Insert Command...</option>
+                    {FURNACE_EFFECT_SPECS.map((spec) => (
+                      <option key={spec.code} value={`${spec.code}00`}>
+                        {spec.syntax} · {spec.name}
+                      </option>
+                    ))}
+                    <option value="....">Clear FX</option>
+                  </select>
                 </div>
               </div>
 
@@ -1572,7 +1775,7 @@ export default function TrackerEditor({
                   type="file"
                   ref={fileInputRef2}
                   onChange={handleFileImport}
-                  accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                  accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                   className="hidden"
                 />
                 <Disc3 size={28} className="text-cyan-400 animate-spin-slow" />
@@ -1580,7 +1783,7 @@ export default function TrackerEditor({
                   Choose Music or SoundFont File
                 </span>
                 <span className="text-[9px] text-zinc-500 font-sans max-w-sm leading-normal">
-                  Standard MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), SunVox (.sunvox), C64 (.sid), NES (.nsf), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc), SoundFonts (.sf2, .sf3, .dls, .sfe, .sfz, .sbk, .gig, .pat), WAV, MP3, and JSON.
+                  Furnace (.fur, .fui, .fuw, .dmp, .opm), MIDI (.mid, .midi, .rmi, .kar, .xmf), Amiga/PC Tracker Modules (.mod, .xm, .s3m, .it), SunVox (.sunvox), C64 (.sid), NES (.nsf/.dmc), Game Boy (.gbs), Sega VGM (.vgm), SNES (.spc/.brr), SoundFonts (.sf2, .sf3, .dls, .sfe), WAV, MP3, and JSON.
                 </span>
               </div>
 
@@ -1632,6 +1835,12 @@ export default function TrackerEditor({
         currentMode={currentChiptuneMode || 'mod'}
         isPlaying={isPlaying}
         onTriggerPlay={() => setIsPlaying?.(true)}
+      />
+
+      {/* WASM ENGINE MANAGER MODAL */}
+      <WasmEngineManagerModal
+        isOpen={isWasmManagerOpen}
+        onClose={() => setIsWasmManagerOpen(false)}
       />
     </div>
   );

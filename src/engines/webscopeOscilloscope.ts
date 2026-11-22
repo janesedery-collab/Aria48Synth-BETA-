@@ -9,6 +9,7 @@ import { SpessaSynth } from './spressasynthLib';
 import { WorkletSynthBridge } from './workletSynthBridge';
 import { TinyRsidBridge } from './tinyRsidBridge';
 import { SunVoxBridge } from './sunvoxBridge';
+import { FurnaceBridge } from './FurnaceBridge';
 
 export const WEBSCOPE_ENGINE_ID = "webscope-oscilloscope-master.zip";
 
@@ -85,6 +86,7 @@ class WebScopeEngine {
   private directAudioScratchBuffer = new Float32Array(1024);
   private sidScratchBuffer = new Float32Array(1024);
   private sunvoxScratchBuffer = new Float32Array(1024);
+  private furnaceScratchBuffer = new Float32Array(1024);
   private directAudioAnalysers: AnalyserNode[] = [];
   private directAudioPlaying = false;
 
@@ -215,6 +217,7 @@ class WebScopeEngine {
     if (isPlaying) {
       const sidState = TinyRsidBridge.getState();
       const sunvoxState = SunVoxBridge.getState();
+      const furnaceState = FurnaceBridge.getState();
       const useSidTrace =
         sidState.hasSidLoaded &&
         sidState.isPlaying &&
@@ -225,6 +228,11 @@ class WebScopeEngine {
         sunvoxState.hasSunVoxLoaded &&
         sunvoxState.isPlaying &&
         sunvoxState.engineEnabled;
+      const useFurnaceTrace =
+        !useSidTrace &&
+        !useSunVoxTrace &&
+        furnaceState.engineEnabled &&
+        FurnaceBridge.isWasmReady();
 
       if (useSidTrace) {
         const sidRes = TinyRsidBridge.getVoiceScopeSamples(channelIndex, this.sidScratchBuffer);
@@ -242,7 +250,17 @@ class WebScopeEngine {
           sumSquares = svRes.sumSq;
           hasSignal = true;
         }
-      } else {
+      } else if (useFurnaceTrace) {
+        const furRes = FurnaceBridge.getChannelScopeSamples(channelIndex, this.furnaceScratchBuffer);
+        if (furRes.hasData) {
+          this.timeDomainBuffer.set(this.furnaceScratchBuffer);
+          peakLevel = furRes.peak;
+          sumSquares = furRes.sumSq;
+          hasSignal = true;
+        }
+      }
+
+      if (!hasSignal) {
         const workletRes = readAnalyser(WorkletSynthBridge.getChannelAnalyser(channelIndex), this.workletScratchBuffer);
         const spessaRes = readAnalyser(SpessaSynth.getChannelAnalyser(channelIndex), this.spessaScratchBuffer);
         const directRes = readAnalyser(this.getDirectAudioAnalyser(channelIndex), this.directAudioScratchBuffer);

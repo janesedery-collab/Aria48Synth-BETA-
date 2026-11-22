@@ -676,7 +676,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
               <input 
                 type="file" 
                 ref={fileInputRef} 
-                accept={`.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
+                accept={`.fur,.fui,.fuw,.dmp,.opm,.dmc,.brr,.mid,.midi,.rmi,.kar,.xmf,.mod,.xm,.s3m,.it,.sid,.nsf,.nsfe,.gbs,.vgm,.vgz,.spc,.ftm,.sunvox,.sunsynth,${SOUNDFONT_ACCEPT_ATTR},.wav,.mp3,.ogg,.flac,.json`}
                 onChange={handleFileSelect} 
                 className="hidden" 
               />

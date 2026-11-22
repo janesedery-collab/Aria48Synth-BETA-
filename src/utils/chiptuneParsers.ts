@@ -2,6 +2,7 @@ import { INITIAL_PATTERNS } from '../initialPatterns';
 import { getAudioContext, loadSoundFontIntoCoreAndLib } from '../components/AudioEngine';
 import { isSoundFontFileName } from '../engines/spressasynthCore';
 import { LoadedSequenceMetadata, WorkletSynthBridge } from '../engines/workletSynthBridge';
+import { FurnaceBridge } from '../engines/FurnaceBridge';
 import {
   SidHeaderMetadata,
   formatHexAddr,
@@ -189,6 +190,46 @@ export function parseChiptuneFile(
     result = parseSPC(arrayBuffer, logs);
   } else if (extension === '.sunvox' || extension === '.sunsynth') {
     result = parseSunVox(arrayBuffer, logs, fileName);
+  } else if (extension === '.fur') {
+    result = parseFurnaceModulePlaceholder(fileName, arrayBuffer, logs);
+  } else if (extension === '.fui' || extension === '.dmp' || extension === '.opm') {
+    if (extension === '.fui') FurnaceBridge.importFUI(arrayBuffer, fileName);
+    else if (extension === '.dmp') FurnaceBridge.importDMP(arrayBuffer, fileName);
+    else FurnaceBridge.importOPM(new TextDecoder().decode(new Uint8Array(arrayBuffer)), fileName);
+    result = {
+      patterns: createEmptyPattern(8),
+      allPatterns: [createEmptyPattern(8)],
+      bpm: 125,
+      chipType: 'Furnace (WASM Chip Core)',
+      title: `Preset: ${fileName.replace(/\.[^/.]+$/, '')}`,
+      duration: '0:32',
+      channelsCount: 6,
+      log: [...logs, `[FURNACE] Loaded ${extension.toUpperCase()} FM instrument preset into Furnace Control Deck.`],
+    };
+  } else if (extension === '.fuw') {
+    FurnaceBridge.importFUW(arrayBuffer, fileName);
+    result = {
+      patterns: createEmptyPattern(8),
+      allPatterns: [createEmptyPattern(8)],
+      bpm: 125,
+      chipType: 'Furnace (WASM Chip Core)',
+      title: `Wavetable: ${fileName.replace(/\.[^/.]+$/, '')}`,
+      duration: '0:32',
+      channelsCount: 6,
+      log: [...logs, `[FURNACE] Loaded .FUW wavetable into Furnace Control Deck.`],
+    };
+  } else if (extension === '.dmc' || extension === '.brr') {
+    FurnaceBridge.importSampleFile(arrayBuffer, fileName);
+    result = {
+      patterns: createEmptyPattern(8),
+      allPatterns: [createEmptyPattern(8)],
+      bpm: 125,
+      chipType: 'Furnace (WASM Chip Core)',
+      title: `Sample: ${fileName.replace(/\.[^/.]+$/, '')}`,
+      duration: '0:16',
+      channelsCount: 4,
+      log: [...logs, `[FURNACE] Decoded ${extension.toUpperCase()} hardware sample into Furnace Sample Editor.`],
+    };
   } else if (extension === '.wav' || extension === '.mp3' || extension === '.ogg' || extension === '.flac') {
     result = parseAudioStream(fileName, arrayBuffer, logs);
   } else if (isSoundFontFileName(fileName)) {
@@ -257,7 +298,18 @@ export async function parseChiptuneFileAsync(
   const dotIdx = fileName.lastIndexOf('.');
   const extension = dotIdx >= 0 ? fileName.substring(dotIdx).toLowerCase() : '';
 
-  if (
+  if (extension === '.fur') {
+    try {
+      const furInfo = await FurnaceBridge.loadFurBuffer(arrayBuffer, fileName);
+      result.title = furInfo.title;
+      result.bpm = furInfo.bpm;
+      result.channelsCount = furInfo.channelsCount;
+      result.chipType = 'Furnace (WASM Chip Core)';
+      result.log.push(`[FURNACE] Decoded .fur module "${furInfo.title}" (${furInfo.channelsCount} ch)`);
+    } catch (err: any) {
+      result.log.push(`[FURNACE] .fur decode note: ${err?.message || 'Metadata fallback'}`);
+    }
+  } else if (
     (extension === '.wav' || extension === '.mp3' || extension === '.ogg' || extension === '.flac') &&
     !result.audioBuffer
   ) {
@@ -278,6 +330,25 @@ export async function parseChiptuneFileAsync(
   }
 
   return result;
+}
+
+function parseFurnaceModulePlaceholder(
+  fileName: string,
+  _arrayBuffer: ArrayBuffer,
+  logs: string[]
+): ChiptuneImportResult {
+  const pat = createEmptyPattern(10);
+  const title = fileName.replace(/\.[^/.]+$/, '') || 'Furnace Module';
+  return {
+    patterns: pat,
+    allPatterns: [pat],
+    bpm: 125,
+    chipType: 'Furnace (WASM Chip Core)',
+    title,
+    duration: '2:00',
+    channelsCount: 10,
+    log: [...logs, `[FURNACE] Registered .FUR module "${title}" for DivEngine WASM playback.`],
+  };
 }
 
 /**

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Play, Square, Settings, Cpu, AlertTriangle, 
   Download, Upload, Music, Radio, Monitor, Cable, Activity,
-  Save, FileAudio, Car, Share2, Users
+  Save, FileAudio, Car, Share2, Users, Sliders
 } from 'lucide-react';
 
 import { Channel, MAX_CHANNELS, OscilloscopeConfig } from './types';
@@ -11,6 +11,7 @@ import Header from './components/Header';
 import TimeBar from './components/TimeBar';
 import TrackerEditor from './components/TrackerEditor';
 import ChipConfigurator from './components/ChipConfigurator';
+import FurnaceControlDeck from './components/FurnaceControlDeck';
 import MixerEQ from './components/MixerEQ';
 import FileConverterUI from './components/FileConverterUI';
 import HardwareConnectionScript from './components/HardwareConnectionScript';
@@ -36,6 +37,7 @@ import {
   getSunVoxPlaybackProgress,
   SunVoxBridge,
   TinyRsidBridge,
+  MasterAudioRouter,
   setSoundEnginesConfig,
   syncChannelMuteSolo,
   stopAllChannelsSound,
@@ -540,19 +542,28 @@ export default function App() {
         for (let chId = 1; chId <= MAX_CHANNELS; chId++) {
           const cell = rowData[chId];
           const ch = channels.find(c => c.id === chId);
-          if (ch && ch.enabled && !ch.mute && (!anySolo || ch.solo) && cell && cell.note && cell.note !== '---') {
-            if (cell.note === '===' || cell.note === 'OFF') {
-              stopChannelSound(chId);
-            } else {
-              let sustainRows = 1;
-              for (let r = activeRow + 1; r < 64 && sustainRows < 16; r++) {
-                const nextNote = activePat[r]?.[chId]?.note;
-                if (nextNote && nextNote !== '---') break;
-                sustainRows++;
+          if (ch && ch.enabled && !ch.mute && (!anySolo || ch.solo) && cell) {
+            if (Array.isArray(cell.fx)) {
+              for (const fxTok of cell.fx) {
+                if (fxTok && fxTok !== '....') {
+                  MasterAudioRouter.routeEffect(chId, fxTok, 'FURNACE');
+                }
               }
-              const noteDuration = Math.max(0.24, Math.min(3.5, stepSec * sustainRows));
-              const vol = cell.vol && cell.vol !== '..' ? parseInt(cell.vol, 16) : ch.volume;
-              playNote(chId, ch.chip, cell.note, noteDuration, vol, ch.pan, ch.soundFontPreset);
+            }
+            if (cell.note && cell.note !== '---') {
+              if (cell.note === '===' || cell.note === 'OFF') {
+                stopChannelSound(chId);
+              } else {
+                let sustainRows = 1;
+                for (let r = activeRow + 1; r < 64 && sustainRows < 16; r++) {
+                  const nextNote = activePat[r]?.[chId]?.note;
+                  if (nextNote && nextNote !== '---') break;
+                  sustainRows++;
+                }
+                const noteDuration = Math.max(0.24, Math.min(3.5, stepSec * sustainRows));
+                const vol = cell.vol && cell.vol !== '..' ? parseInt(cell.vol, 16) : ch.volume;
+                playNote(chId, ch.chip, cell.note, noteDuration, vol, ch.pan, ch.soundFontPreset);
+              }
             }
           }
         }
@@ -765,11 +776,39 @@ export default function App() {
     reader.onload = async (ev) => {
       const buf = ev.target?.result;
       if (!(buf instanceof ArrayBuffer)) return;
+      const lowerName = dropped.name.toLowerCase();
       if (isSoundFontFileName(dropped.name)) {
         try {
           await loadSoundFontIntoCoreAndLib(buf, dropped.name);
         } catch (err) {
           console.warn('Global SoundFont drop error:', err);
+        }
+        return;
+      }
+      if (
+        lowerName.endsWith('.fui') ||
+        lowerName.endsWith('.fuw') ||
+        lowerName.endsWith('.dmp') ||
+        lowerName.endsWith('.opm') ||
+        lowerName.endsWith('.dmc') ||
+        lowerName.endsWith('.brr')
+      ) {
+        try {
+          const { FurnaceBridge } = await import('./engines/FurnaceBridge');
+          if (lowerName.endsWith('.fui')) {
+            FurnaceBridge.importFUI(buf, dropped.name);
+          } else if (lowerName.endsWith('.dmp')) {
+            FurnaceBridge.importDMP(buf, dropped.name);
+          } else if (lowerName.endsWith('.opm')) {
+            FurnaceBridge.importOPM(new TextDecoder().decode(buf), dropped.name);
+          } else if (lowerName.endsWith('.fuw')) {
+            FurnaceBridge.importFUW(buf, dropped.name);
+          } else if (lowerName.endsWith('.dmc') || lowerName.endsWith('.brr')) {
+            FurnaceBridge.importSampleFile(buf, dropped.name);
+          }
+          setActiveTab('furnace');
+        } catch (err) {
+          console.warn('Global Furnace resource drop error:', err);
         }
         return;
       }
@@ -930,6 +969,14 @@ export default function App() {
               disabled={driveMode} 
             />
             <NavBtn 
+              icon={<Sliders />} 
+              tab="furnace" 
+              active={activeTab} 
+              setTab={setActiveTab} 
+              label="Furnace" 
+              disabled={driveMode} 
+            />
+            <NavBtn 
               icon={<Settings />} 
               tab="mixer" 
               active={activeTab} 
@@ -1060,6 +1107,9 @@ export default function App() {
                   setChannels={setChannels} 
                   hardwareConnected={hardwareConnected} 
                 />
+              )}
+              {activeTab === 'furnace' && (
+                <FurnaceControlDeck />
               )}
               {activeTab === 'mixer' && (
                 <MixerEQ 
