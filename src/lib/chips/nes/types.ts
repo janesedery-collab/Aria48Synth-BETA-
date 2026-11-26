@@ -1,7 +1,7 @@
 /**
  * src/lib/chips/nes/types.ts
  * Clean strict TypeScript interfaces for FamiTracker (.ftm), 0CC-FamiTracker (.0cc),
- * Dn-FamiTracker (.dnm), Dn-help expansion audio chips, and bitphase nes_apu.wasm bindings.
+ * and Dn-FamiTracker (.dnm) module parsing (played through Furnace Tracker engine).
  */
 
 export const FAMITRACKER_EXPANSION = {
@@ -119,64 +119,3 @@ export interface FamiTrackerModule {
   parseNotes: string[];
 }
 
-export interface NesChannelLiveState {
-  index: number;
-  name: string;
-  shortName: string;
-  chip: ExpansionChipName;
-  enabled: boolean;
-  muted: boolean;
-  solo: boolean;
-  activeNote: string;
-  activeInstrument: number;
-  volume: number;   // 0..15
-  level: number;    // 0..1 peak meter for UI
-  triggerAge: number;
-}
-
-export interface NesPlaybackState {
-  isReady: boolean;
-  wasmLoaded: boolean;
-  wasmSource: string;
-  wasmError: string | null;
-  hasModuleLoaded: boolean;
-  moduleTitle: string;
-  moduleAuthor: string;
-  moduleFormat: 'ftm' | '0cc' | 'dnm' | null;
-  isPlaying: boolean;
-  isPaused: boolean;
-  activeSongIndex: number;
-  subsongsCount: number;
-  subsongNames: string[];
-  currentOrder: number;
-  totalOrders: number;
-  currentRow: number;
-  rowsPerPattern: number;
-  bpm: number;
-  baseBpm: number;
-  speed: number;
-  machine: NesMachineStandard;
-  expansionMask: number;
-  expansions: ExpansionChipName[];
-  elapsedSeconds: number;
-  estimatedDurationSeconds: number;
-  masterVolume: number; // 0..1.5
-  instruments: { index: number; name: string; chip: ExpansionChipName }[];
-  channels: NesChannelLiveState[];
-}
-
-/**
- * WebAssembly exports interface matching paator/bitphase `public/nes/nes_apu.wasm` (Emscripten / nsfplug).
- */
-export interface BitphaseNesWasmExports {
-  memory: WebAssembly.Memory;
-  _malloc?: (size: number) => number;
-  _free?: (ptr: number) => void;
-  _nes_init?: (sampleRate: number, machineMode: number, expansionMask: number) => number;
-  _nes_reset?: () => void;
-  _nes_write_reg?: (addr: number, val: number) => void;
-  _nes_set_dmc_sample?: (addr: number, dataPtr: number, length: number) => void;
-  _nes_render?: (outLeftPtr: number, outRightPtr: number, frames: number) => number;
-  _nes_get_channel_level?: (chIdx: number) => number;
-  _nes_get_channel_scope?: (chIdx: number, outPtr: number, frames: number) => number;
-}

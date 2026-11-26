@@ -12,7 +12,6 @@ import MidiControllerModal from './MidiControllerModal';
 import { saveSelectedSoundFont } from '../utils/recentSongsManager';
 import { getAvailableSoundFontInstruments } from '../utils/soundFontEngine';
 import {
-  NesWorkletEngine,
   SunVoxBridge,
   TinyRsidBridge,
   SOUNDFONT_ACCEPT_ATTR,
@@ -285,7 +284,6 @@ export default function MixerEQ({
   );
   const [sidState, setSidState] = useState(() => TinyRsidBridge.getState());
   const [sunvoxState, setSunvoxState] = useState(() => SunVoxBridge.getState());
-  const [famiTrackerState, setFamiTrackerState] = useState(() => NesWorkletEngine.getState());
 
   const sfUploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -310,9 +308,6 @@ export default function MixerEQ({
     const unsubSv = SunVoxBridge.subscribe((nextSv) => {
       setSunvoxState(nextSv);
     });
-    const unsubNes = NesWorkletEngine.subscribe((nextNes) => {
-      setFamiTrackerState(nextNes);
-    });
     return () => {
       unsubSf();
       unsubDefault();
@@ -320,7 +315,6 @@ export default function MixerEQ({
       unsubWorklet();
       unsubSid();
       unsubSv();
-      unsubNes();
     };
   }, []);
 
@@ -344,12 +338,10 @@ export default function MixerEQ({
 
   const handleToggleOscilloscopeChannelMute = (channelIndex: number) => {
     const trackerCh = channels.find(c => c.id === channelIndex + 1);
-    const ftCh = famiTrackerState.hasModuleLoaded ? famiTrackerState.channels[channelIndex] : undefined;
     const svMapped = sunvoxState.hasSunVoxLoaded ? SunVoxBridge.getChannelMappedModules() : [];
     const svMod = sunvoxState.hasSunVoxLoaded && channelIndex < svMapped.length ? svMapped[channelIndex] : undefined;
     const currentlyMuted = Boolean(
       (sidState.hasSidLoaded && channelIndex < 9 ? sidState.voiceMutes[channelIndex] : false) ||
-      ftCh?.muted ||
       svMod?.isMuted ||
       midiChannelStates[channelIndex]?.isMuted ||
       trackerCh?.mute
@@ -362,7 +354,6 @@ export default function MixerEQ({
       const updated = channels.map(c => (c.id === channelIndex + 1 ? { ...c, mute: nextMuted } : c));
       TinyRsidBridge.syncChannelStates(updated);
       SunVoxBridge.syncChannelStates(updated);
-      NesWorkletEngine.syncChannelStates(updated);
     }
     setMidiChannelStates([...SpessaSynth.getChannelStates()]);
   };
@@ -380,12 +371,10 @@ export default function MixerEQ({
   const anyChannelSolo = channels.some(c => c.enabled && c.solo);
   const mutedChannelsCount = SIXTEEN_CHANNEL_ROLES.reduce((count, role, idx) => {
     const trCh = channels.find(c => c.id === role.id);
-    const ftCh = famiTrackerState.hasModuleLoaded ? famiTrackerState.channels[idx] : undefined;
     const svMapped = sunvoxState.hasSunVoxLoaded ? SunVoxBridge.getChannelMappedModules() : [];
     const svMod = sunvoxState.hasSunVoxLoaded && idx < svMapped.length ? svMapped[idx] : undefined;
     const isMuted = Boolean(
       (sidState.hasSidLoaded && idx < 9 ? sidState.voiceMutes[idx] : false) ||
-      ftCh?.muted ||
       svMod?.isMuted ||
       midiChannelStates[idx]?.isMuted ||
       trCh?.mute ||
@@ -869,58 +858,45 @@ export default function MixerEQ({
             const workletState = workletChannelStates[idx];
             const trackerCh = channels.find(c => c.id === role.id);
             const isSidVoice = sidState.hasSidLoaded && idx < sidState.activeChipsCount * 3;
-            const isFtVoice = famiTrackerState.hasModuleLoaded && idx < famiTrackerState.channels.length;
-            const ftCh = isFtVoice ? famiTrackerState.channels[idx] : undefined;
-            const ftInstName =
-              ftCh && ftCh.activeInstrument >= 0
-                ? famiTrackerState.instruments.find((ins) => ins.index === ftCh.activeInstrument)?.name
-                : undefined;
             const svMappedMods = sunvoxState.hasSunVoxLoaded ? SunVoxBridge.getChannelMappedModules() : [];
             const svMod = sunvoxState.hasSunVoxLoaded && idx < svMappedMods.length ? svMappedMods[idx] : undefined;
 
             const isMuted = isSidVoice
               ? Boolean(sidState.voiceMutes[idx] || trackerCh?.mute || (anyChannelSolo && !trackerCh?.solo))
-              : isFtVoice
-                ? Boolean(ftCh?.muted || trackerCh?.mute || (anyChannelSolo && !trackerCh?.solo))
-                : svMod
-                  ? Boolean(svMod.isMuted || trackerCh?.mute || (anyChannelSolo && !trackerCh?.solo))
-                  : Boolean(workletState?.isMuted || midiState?.isMuted || trackerCh?.mute || (anyChannelSolo && trackerCh?.enabled && !trackerCh?.solo));
+              : svMod
+                ? Boolean(svMod.isMuted || trackerCh?.mute || (anyChannelSolo && !trackerCh?.solo))
+                : Boolean(workletState?.isMuted || midiState?.isMuted || trackerCh?.mute || (anyChannelSolo && trackerCh?.enabled && !trackerCh?.solo));
             const sidChipModelLabel = sidState.activeChipModel.replace('MOS ', '');
             const syncedName = isSidVoice
               ? (trackerCh?.label || `SID${Math.floor(idx / 3) + 1} Voice ${(idx % 3) + 1} · ${sidChipModelLabel}`)
-              : isFtVoice && ftCh
-                ? (ftInstName ? `${ftCh.shortName} · ${ftInstName}` : ftCh.name)
-                : svMod
-                  ? `#${svMod.id.toString().padStart(2, '0')} ${svMod.name}`
-                  : workletState?.patchName ||
-                    midiState?.programName ||
-                    (trackerCh?.soundFontPreset
-                      ? trackerCh.soundFontPreset.replace(/^gm_/, '').replace(/_/g, ' ').toUpperCase()
-                      : undefined) ||
-                    role.name;
+              : svMod
+                ? `#${svMod.id.toString().padStart(2, '0')} ${svMod.name}`
+                : trackerCh?.label ||
+                  workletState?.patchName ||
+                  midiState?.programName ||
+                  (trackerCh?.soundFontPreset
+                    ? trackerCh.soundFontPreset.replace(/^gm_/, '').replace(/_/g, ' ').toUpperCase()
+                    : undefined) ||
+                  role.name;
             const roleForCard = isSidVoice
               ? {
                   ...role,
                   category: sidChipModelLabel,
                   defaultFreq: `SID${Math.floor(idx / 3) + 1} V${(idx % 3) + 1}`
                 }
-              : isFtVoice && ftCh
+              : svMod
                 ? {
                     ...role,
-                    category: ftCh.chip,
-                    defaultFreq: ftCh.shortName
+                    category: svMod.type,
+                    defaultFreq: `MOD#${svMod.id.toString().padStart(2, '0')}`
                   }
-                : svMod
+                : trackerCh?.label
                   ? {
                       ...role,
-                      category: svMod.type,
-                      defaultFreq: `MOD#${svMod.id.toString().padStart(2, '0')}`
+                      category: trackerCh.chip.split(' ')[0] || role.category,
                     }
                   : role;
-            const livePitch =
-              isFtVoice && ftCh && ftCh.activeNote && ftCh.activeNote !== '---'
-                ? ftCh.activeNote
-                : channelPitches[role.id];
+            const livePitch = channelPitches[role.id];
             return (
               <WebScopeCRT
                 key={role.id}

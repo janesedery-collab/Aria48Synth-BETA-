@@ -35,13 +35,10 @@ import {
   pauseSunVoxPlayback,
   seekSunVoxPlayback,
   getSunVoxPlaybackProgress,
-  playFamiTrackerBuffer,
-  pauseFamiTrackerPlayback,
-  seekFamiTrackerPlayback,
-  getFamiTrackerPlaybackProgress,
+  pauseFurnacePlayback,
   SunVoxBridge,
   TinyRsidBridge,
-  NesWorkletEngine,
+  FurnaceBridge,
   MasterAudioRouter,
   setSoundEnginesConfig,
   syncChannelMuteSolo,
@@ -63,7 +60,8 @@ import { VideoRecorder } from './utils/videoRecorder';
 import { WorkletSynthBridge } from './engines/workletSynthBridge';
 import { formatDuration, parseChiptuneFileAsync } from './utils/chiptuneParsers';
 import { SidHeaderMetadata } from './utils/hvscManager';
-import { convertFamiTrackerToAriaPatterns } from './lib/chips/nes/famitrackerParser';
+import { isFamiTrackerFileName, parseFamiTrackerBinary } from './lib/chips/nes/famitrackerParser';
+import type { FamiTrackerModule } from './lib/chips/nes/types';
 
 function parseDurationStringSec(dur?: string | null): number | null {
   if (!dur) return null;
@@ -149,9 +147,11 @@ export default function App() {
   const [loadedSunVoxBuffer, setLoadedSunVoxBuffer] = useState<ArrayBuffer | null>(null);
   const [loadedSunVoxFileName, setLoadedSunVoxFileName] = useState<string>('project.sunvox');
   const [sunvoxRuntime, setSunvoxRuntime] = useState(() => SunVoxBridge.getState());
-  const [loadedFamiTrackerBuffer, setLoadedFamiTrackerBuffer] = useState<ArrayBuffer | null>(null);
-  const [loadedFamiTrackerFileName, setLoadedFamiTrackerFileName] = useState<string>('module.ftm');
-  const [famiTrackerRuntime, setFamiTrackerRuntime] = useState(() => NesWorkletEngine.getState());
+  const [loadedFurBuffer, setLoadedFurBuffer] = useState<ArrayBuffer | null>(null);
+  const [loadedFtmDiverted, setLoadedFtmDiverted] = useState<boolean>(false);
+  const [furnaceLiveTotalSec, setFurnaceLiveTotalSec] = useState<number | null>(null);
+  const furWasActiveRef = useRef<boolean>(false);
+  const lastSequencerStepRef = useRef<string>('');
 
   // Loaded Track Metadata for exact duration and song length tracking
   const [trackTitle, setTrackTitle] = useState<string | null>(null);
@@ -231,8 +231,9 @@ export default function App() {
     }
   }, []);
 
-  // Restore saved soundfont preset preference & custom SoundFonts saved in browser cookies
+  // Restore saved soundfont preset preference & pre-warm Furnace WASM DSP bundle
   useEffect(() => {
+    void FurnaceBridge.ensureWasmLoaded();
     void restoreSavedSoundFontsFromCookies();
     const savedSf = getSavedSelectedSoundFont();
     if (savedSf && savedSf !== 'gm_piano') {
@@ -362,80 +363,6 @@ export default function App() {
     return () => unsubSv();
   }, []);
 
-  const nesChannelsSigRef = useRef<string>('');
-  const prevFtSongIdxRef = useRef<number>(-1);
-
-  // Keep FamiTracker / bitphase NES AudioWorklet state, subsong duration, and active channel meters synchronized
-  useEffect(() => {
-    const unsubNes = NesWorkletEngine.subscribe((nextNes) => {
-      setFamiTrackerRuntime(nextNes);
-      if (nextNes.hasModuleLoaded) {
-        if (nextNes.moduleTitle) setTrackTitle(nextNes.moduleTitle);
-        if (nextNes.estimatedDurationSeconds > 0) {
-          setTrackDuration(formatDuration(nextNes.estimatedDurationSeconds));
-        }
-
-        const ftMod = NesWorkletEngine.getCurrentModule();
-        if (ftMod && prevFtSongIdxRef.current !== nextNes.activeSongIndex) {
-          const isSubsongSwitch = prevFtSongIdxRef.current !== -1;
-          prevFtSongIdxRef.current = nextNes.activeSongIndex;
-          if (isSubsongSwitch) {
-            const subConv = convertFamiTrackerToAriaPatterns(ftMod, nextNes.activeSongIndex);
-            setSongPatterns(subConv.allPatterns);
-            setPatterns(subConv.patterns);
-            setCurrentPatternIndex(0);
-            setActiveRow(0);
-            setBpm(subConv.bpm);
-            setBaseSongBpm(subConv.bpm);
-          }
-        }
-
-        const sig = `${nextNes.moduleTitle}:${nextNes.expansionMask}:${nextNes.channels.map((c) => c.shortName).join(',')}`;
-        if (nextNes.channels.length > 0 && sig !== nesChannelsSigRef.current) {
-          nesChannelsSigRef.current = sig;
-          const targetChCount = Math.min(MAX_CHANNELS, Math.max(5, nextNes.channels.length));
-          setTrackChannelsCount(targetChCount);
-          setChannels((prev) =>
-            prev.map((ch, idx) => {
-              const ftCh = idx < nextNes.channels.length ? nextNes.channels[idx] : null;
-              let assignedChip = ch.chip;
-              if (ftCh) {
-                if (ftCh.chip === 'VRC6') assignedChip = 'VRC6 (FamiTracker)';
-                else if (ftCh.chip === 'VRC7') assignedChip = 'VRC7 (OPLL FM)';
-                else if (ftCh.chip === 'FDS') assignedChip = 'FDS (Famicom Disk)';
-                else if (ftCh.chip === 'MMC5') assignedChip = 'RP2A03 (NES APU)';
-                else if (ftCh.chip === 'N163') assignedChip = 'Namco 163';
-                else if (ftCh.chip === 'Sunsoft 5B') assignedChip = 'Sunsoft 5B (FamiTracker)';
-                else assignedChip = 'RP2A03 (NES APU)';
-              }
-              return {
-                ...ch,
-                enabled: idx < nextNes.channels.length,
-                chip: ftCh ? assignedChip : ch.chip,
-                soundFontPreset: undefined,
-                label: ftCh ? ftCh.name : undefined,
-              };
-            })
-          );
-        }
-
-        if (nextNes.isPlaying) {
-          setCurrentPatternIndex((prevOrd) => {
-            if (prevOrd !== nextNes.currentOrder && songPatterns[nextNes.currentOrder]) {
-              setPatterns(songPatterns[nextNes.currentOrder]);
-            }
-            return nextNes.currentOrder;
-          });
-          setActiveRow(nextNes.currentRow);
-        }
-      } else {
-        nesChannelsSigRef.current = '';
-        prevFtSongIdxRef.current = -1;
-      }
-    });
-    return () => unsubNes();
-  }, [songPatterns]);
-
   // Sync channel mute/solo/enable state post-render (avoids cross-component setState during render)
   useEffect(() => {
     syncChannelMuteSolo(channels);
@@ -488,10 +415,20 @@ export default function App() {
             setIsPlaying(false);
           }
         });
-      } else if (loadedFamiTrackerBuffer) {
-        void playFamiTrackerBuffer(loadedFamiTrackerBuffer, loadedFamiTrackerFileName, {
-          seekRatio: pendingSeekRatioRef.current
-        });
+      } else if (loadedFurBuffer || loadedFtmDiverted) {
+        furWasActiveRef.current = false;
+        const ctx = unlockAudioContextSync();
+        const startFurnace = async () => {
+          if (ctx) {
+            const furBus = MasterAudioRouter.getEngineInput('FURNACE') || ctx.destination;
+            await FurnaceBridge.attachToMasterRouter(ctx, furBus);
+          }
+          await FurnaceBridge.ensureWasmLoaded();
+          FurnaceBridge.setTempoScale(bpm / (baseSongBpm || 150));
+          FurnaceBridge.seekToRatio(pendingSeekRatioRef.current);
+          FurnaceBridge.play();
+        };
+        void startFurnace();
       } else if (loadedMidiBuffer) {
         playMidiBuffer(
           loadedMidiBuffer,
@@ -525,14 +462,15 @@ export default function App() {
         setAudioPlaybackRate(rate);
       }
     } else {
+      furWasActiveRef.current = false;
       pauseSidPlayback();
       pauseSunVoxPlayback();
-      pauseFamiTrackerPlayback();
+      pauseFurnacePlayback();
       stopDirectAudio();
       stopMidiPlayback();
       stopAllChannelsSound();
     }
-  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, loadedSunVoxBuffer, loadedFamiTrackerBuffer]);
+  }, [isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, loadedSunVoxBuffer, loadedFurBuffer, loadedFtmDiverted]);
 
   // Dynamic Audio Playback Rate / Tempo Scaling on BPM changes (does NOT restart the song!)
   useEffect(() => {
@@ -545,16 +483,17 @@ export default function App() {
       const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
       setMidiLiveTotalSec(prog.totalSeconds);
     }
-    if (loadedFamiTrackerBuffer) {
-      NesWorkletEngine.setUserBpm(bpm, baseSongBpm);
+    if (loadedFurBuffer || loadedFtmDiverted) {
+      const rate = bpm / (baseSongBpm || 150);
+      FurnaceBridge.setTempoScale(rate);
     }
-  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedFamiTrackerBuffer]);
+  }, [bpm, baseSongBpm, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedFurBuffer, loadedFtmDiverted]);
 
   // Clock-Locked Tracker Row & Pattern Synchronization (SID / SunVox / MIDI / AudioBuffer / Pattern Sequencer)
   useEffect(() => {
     if (!isPlaying) return;
 
-    if (loadedSidBuffer || loadedSunVoxBuffer || loadedFamiTrackerBuffer || loadedMidiBuffer || loadedAudioBuffer) {
+    if (loadedSidBuffer || loadedSunVoxBuffer || loadedFurBuffer || loadedFtmDiverted || loadedMidiBuffer || loadedAudioBuffer) {
       const syncTimer = setInterval(() => {
         const pats = songPatterns;
         const rowsPerPat = Math.max(1, pats[0]?.length || 64);
@@ -570,10 +509,30 @@ export default function App() {
           const prog = getSunVoxPlaybackProgress();
           ratio = prog.ratio;
           elapsed = prog.elapsedSeconds;
-        } else if (loadedFamiTrackerBuffer) {
-          const prog = getFamiTrackerPlaybackProgress();
-          ratio = prog.ratio;
-          elapsed = prog.elapsedSeconds;
+        } else if (loadedFurBuffer || loadedFtmDiverted) {
+          const prog = FurnaceBridge.getPlaybackProgress();
+          if (prog.isPlaying) {
+            furWasActiveRef.current = true;
+          }
+          if (prog.totalSeconds > 0) {
+            setFurnaceLiveTotalSec(prog.totalSeconds);
+          }
+          pendingSeekRatioRef.current = prog.ratio;
+          setLiveElapsedSec(prog.elapsedSeconds);
+          const targetOrd = Math.max(0, Math.min(pats.length - 1, prog.orderIdx));
+          const patRows = pats[targetOrd];
+          const targetRow = Math.max(0, Math.min((patRows?.length || rowsPerPat) - 1, prog.rowIdx));
+          setCurrentPatternIndex((prevPat) => (prevPat !== targetOrd ? targetOrd : prevPat));
+          if (patRows) {
+            setPatterns((prevRows) => (prevRows === patRows ? prevRows : patRows));
+          }
+          setActiveRow(targetRow);
+          if (furWasActiveRef.current && !prog.isPlaying) {
+            pendingSeekRatioRef.current = 0;
+            setLiveElapsedSec(0);
+            setIsPlaying(false);
+          }
+          return;
         } else if (loadedMidiBuffer) {
           const prog = getMidiPlaybackProgress(bpm, baseSongBpm);
           ratio = prog.ratio;
@@ -589,25 +548,21 @@ export default function App() {
         pendingSeekRatioRef.current = ratio;
         setLiveElapsedSec(elapsed);
 
-        if (!loadedFamiTrackerBuffer) {
-          const globalRow = Math.max(0, Math.min(totalRows - 1, Math.floor(ratio * totalRows)));
-          const patIdx = Math.floor(globalRow / rowsPerPat);
-          const rowIdx = globalRow % rowsPerPat;
+        const globalRow = Math.max(0, Math.min(totalRows - 1, Math.floor(ratio * totalRows)));
+        const patIdx = Math.floor(globalRow / rowsPerPat);
+        const rowIdx = globalRow % rowsPerPat;
 
-          setCurrentPatternIndex((prevPat) => {
-            if (prevPat !== patIdx && pats[patIdx]) {
-              setPatterns(pats[patIdx]);
-            }
-            return patIdx;
-          });
-          setActiveRow(rowIdx);
+        setCurrentPatternIndex((prevPat) => (prevPat !== patIdx ? patIdx : prevPat));
+        if (pats[patIdx]) {
+          setPatterns((prevRows) => (prevRows === pats[patIdx] ? prevRows : pats[patIdx]));
         }
+        setActiveRow(rowIdx);
       }, 50);
 
       return () => clearInterval(syncTimer);
     }
 
-    // Pattern Sequencer mode (no pre-rendered AudioBuffer / MIDI / SID / SunVox / FamiTracker)
+    // Pattern Sequencer mode (manual pattern editing without loaded audio/MIDI/SID/SunVox/Furnace/FTM)
     const maxRowIndex = Math.max(0, (patterns?.length || 64) - 1);
     const msPerRow = Math.max(15, (60 / Math.max(30, bpm) / 4) * 1000);
     const timer = setInterval(() => {
@@ -631,11 +586,19 @@ export default function App() {
     return () => {
       clearInterval(timer);
     };
-  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer, loadedSidBuffer, loadedSunVoxBuffer, loadedFamiTrackerBuffer]);
+  }, [isPlaying, bpm, baseSongBpm, playMode, songPatterns, loadedMidiBuffer, loadedAudioBuffer, loadedSidBuffer, loadedSunVoxBuffer, loadedFurBuffer, loadedFtmDiverted]);
 
-  // Real-time Note Triggering for pattern sequencer when no pre-rendered audio buffer / MIDI / SID / SunVox / FamiTracker is used
+  // Real-time Note Triggering for manual pattern sequencer only
   useEffect(() => {
-    if (isPlaying && !loadedAudioBuffer && !loadedMidiBuffer && !loadedSidBuffer && !loadedSunVoxBuffer && !loadedFamiTrackerBuffer) {
+    if (!isPlaying) {
+      lastSequencerStepRef.current = '';
+      return;
+    }
+    if (!loadedAudioBuffer && !loadedMidiBuffer && !loadedSidBuffer && !loadedSunVoxBuffer && !loadedFurBuffer && !loadedFtmDiverted) {
+      const stepKey = `${currentPatternIndex}:${activeRow}`;
+      if (lastSequencerStepRef.current === stepKey) return;
+      lastSequencerStepRef.current = stepKey;
+
       const activePat = (songPatterns && songPatterns[currentPatternIndex]) || patterns;
       const rowData = activePat?.[activeRow];
       if (rowData) {
@@ -663,18 +626,35 @@ export default function App() {
                   sustainRows++;
                 }
                 const noteDuration = Math.max(0.24, Math.min(3.5, stepSec * sustainRows));
-                const vol = cell.vol && cell.vol !== '..' ? parseInt(cell.vol, 16) : ch.volume;
-                playNote(chId, ch.chip, cell.note, noteDuration, vol, ch.pan, ch.soundFontPreset);
+                const vol =
+                  cell.vol && cell.vol !== '..'
+                    ? Math.min(100, /^[0-9]+$/.test(cell.vol) ? parseInt(cell.vol, 10) : parseInt(cell.vol, 16))
+                    : ch.volume;
+                const parsedInst = cell.inst && cell.inst !== '..' ? parseInt(cell.inst, 16) : undefined;
+                playNote(
+                  chId,
+                  ch.chip,
+                  cell.note,
+                  noteDuration,
+                  vol,
+                  ch.pan,
+                  ch.soundFontPreset,
+                  parsedInst !== undefined && !Number.isNaN(parsedInst) ? parsedInst : undefined
+                );
               }
             }
           }
         }
       }
     }
-  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, loadedSunVoxBuffer, loadedFamiTrackerBuffer, currentPatternIndex, songPatterns, patterns, channels, bpm]);
+  }, [activeRow, isPlaying, loadedAudioBuffer, loadedMidiBuffer, loadedSidBuffer, loadedSunVoxBuffer, loadedFurBuffer, loadedFtmDiverted, currentPatternIndex, songPatterns, patterns, channels, bpm]);
 
   const handleLoadTrack = (tracksJson: string, trackBpm: number) => {
     try {
+      setLoadedFtmDiverted(false);
+      setLoadedFurBuffer(null);
+      setFurnaceLiveTotalSec(null);
+      FurnaceBridge.clearLoadedSong();
       if (!tracksJson || tracksJson === '{}') {
         setChannels(prev => prev.map((ch, idx) => ({
           ...ch,
@@ -717,44 +697,59 @@ export default function App() {
     rawSidBuffer?: ArrayBuffer,
     sidMetadata?: SidHeaderMetadata,
     rawSunVoxBuffer?: ArrayBuffer,
-    rawFamiTrackerBuffer?: ArrayBuffer
+    rawFurnaceBuffer?: ArrayBuffer
   ) => {
     const finalAllPatterns = (allPatterns && allPatterns.length > 0) ? allPatterns : [importedPatterns];
-    const resolvedName = fileName || (title ? `${title}.${rawSidBuffer ? 'sid' : rawSunVoxBuffer ? 'sunvox' : rawFamiTrackerBuffer ? 'ftm' : 'mid'}` : 'sequence.mid');
+    const resolvedName =
+      fileName ||
+      (title
+        ? `${title}.${rawSidBuffer ? 'sid' : rawSunVoxBuffer ? 'sunvox' : rawFurnaceBuffer ? 'fur' : 'mid'}`
+        : 'sequence.mid');
+    const isFamiTrackerDiverted = Boolean(rawFurnaceBuffer && isFamiTrackerFileName(resolvedName));
+    const isFurNative = Boolean(rawFurnaceBuffer && !isFamiTrackerDiverted);
     pendingSeekRatioRef.current = 0;
     setMidiLiveTotalSec(null);
+    setFurnaceLiveTotalSec(null);
     setLiveElapsedSec(0);
     setActiveRow(0);
     setSongPatterns(finalAllPatterns);
     setPatterns(importedPatterns || finalAllPatterns[0]);
     setCurrentPatternIndex(0);
-    setLoadedAudioBuffer((rawSidBuffer || rawSunVoxBuffer || rawFamiTrackerBuffer) ? null : (audioBuffer || null));
-    setLoadedMidiBuffer((rawSidBuffer || rawSunVoxBuffer || rawFamiTrackerBuffer) ? null : (rawMidiBuffer || null));
+    setLoadedAudioBuffer((rawSidBuffer || rawSunVoxBuffer || rawFurnaceBuffer) ? null : (audioBuffer || null));
+    setLoadedMidiBuffer((rawSidBuffer || rawSunVoxBuffer || rawFurnaceBuffer) ? null : (rawMidiBuffer || null));
     setLoadedSidBuffer(rawSidBuffer || null);
     setLoadedSunVoxBuffer(rawSunVoxBuffer || null);
-    setLoadedFamiTrackerBuffer(rawFamiTrackerBuffer || null);
+    setLoadedFurBuffer(isFurNative ? rawFurnaceBuffer! : null);
+    setLoadedFtmDiverted(isFamiTrackerDiverted);
 
-    let loadedFtMod: ReturnType<typeof NesWorkletEngine.loadModule> | null = null;
-    if (rawFamiTrackerBuffer) {
+    let loadedFtMod: FamiTrackerModule | null = null;
+    if (rawFurnaceBuffer) {
       const ctx = unlockAudioContextSync();
       if (ctx) {
-        const famBus = MasterAudioRouter.getEngineInput('FAMITRACKER') || ctx.destination;
-        void NesWorkletEngine.attachToMasterRouter(ctx, famBus);
+        const furBus = MasterAudioRouter.getEngineInput('FURNACE') || ctx.destination;
+        void FurnaceBridge.attachToMasterRouter(ctx, furBus);
       }
-      setLoadedFamiTrackerFileName(resolvedName);
       SunVoxBridge.clearLoadedSunVox();
       TinyRsidBridge.clearLoadedSid();
       WorkletSynthBridge.clearCurrentSequence();
-      setSoundEnginesConfig({ famitracker: true });
-      loadedFtMod = NesWorkletEngine.loadModule(rawFamiTrackerBuffer, resolvedName);
-      setFamiTrackerRuntime(NesWorkletEngine.getState());
+      setSoundEnginesConfig({ furnace: true });
+      if (isFamiTrackerDiverted) {
+        try {
+          loadedFtMod = parseFamiTrackerBinary(rawFurnaceBuffer, resolvedName);
+          FurnaceBridge.loadFamiTrackerBuffer(rawFurnaceBuffer, resolvedName, loadedFtMod);
+        } catch (err) {
+          console.warn('FurnaceBridge FamiTracker diversion failed:', err);
+        }
+      } else {
+        void FurnaceBridge.loadFurBuffer(rawFurnaceBuffer, resolvedName);
+      }
     } else if (rawSunVoxBuffer) {
       const ctx = unlockAudioContextSync();
       if (ctx) SunVoxBridge.setHostAudioContext(ctx);
       sunvoxBpmLoadedRef.current = '';
       sunvoxChannelsSigRef.current = '';
       setLoadedSunVoxFileName(resolvedName);
-      NesWorkletEngine.clearModule();
+      FurnaceBridge.clearLoadedSong();
       TinyRsidBridge.clearLoadedSid();
       WorkletSynthBridge.clearCurrentSequence();
       setSoundEnginesConfig({ sunvox: true });
@@ -762,7 +757,7 @@ export default function App() {
       setSunvoxRuntime(registeredSv);
     } else if (rawSidBuffer) {
       SunVoxBridge.clearLoadedSunVox();
-      NesWorkletEngine.clearModule();
+      FurnaceBridge.clearLoadedSong();
       setLoadedSidFileName(resolvedName);
       WorkletSynthBridge.clearCurrentSequence();
       const registered = TinyRsidBridge.registerSidFile(rawSidBuffer, resolvedName, sidMetadata?.startSong);
@@ -770,7 +765,7 @@ export default function App() {
     } else {
       SunVoxBridge.clearLoadedSunVox();
       TinyRsidBridge.clearLoadedSid();
-      NesWorkletEngine.clearModule();
+      FurnaceBridge.clearLoadedSong();
       if (rawMidiBuffer) {
         setLoadedMidiFileName(resolvedName);
         WorkletSynthBridge.registerLoadedSequence(
@@ -814,11 +809,11 @@ export default function App() {
           assignedPreset = undefined;
           if (ftCh) {
             assignedLabel = ftCh.name;
-            if (ftCh.chip === 'VRC6') assignedChip = 'VRC6 (FamiTracker)';
+            if (ftCh.chip === 'VRC6') assignedChip = 'VRC6 (Furnace)';
             else if (ftCh.chip === 'VRC7') assignedChip = 'VRC7 (OPLL FM)';
             else if (ftCh.chip === 'FDS') assignedChip = 'FDS (Famicom Disk)';
             else if (ftCh.chip === 'N163') assignedChip = 'Namco 163';
-            else if (ftCh.chip === 'Sunsoft 5B') assignedChip = 'Sunsoft 5B (FamiTracker)';
+            else if (ftCh.chip === 'Sunsoft 5B') assignedChip = 'Sunsoft 5B (Furnace)';
             else assignedChip = 'RP2A03 (NES APU)';
           } else {
             assignedChip = 'RP2A03 (NES APU)';
@@ -972,7 +967,7 @@ export default function App() {
           res.rawSidBuffer,
           res.sidMetadata,
           res.rawSunVoxBuffer,
-          res.rawFamiTrackerBuffer
+          res.rawFurnaceBuffer
         );
       } catch (err) {
         console.warn('Global song drop parse error:', err);
@@ -1039,8 +1034,8 @@ export default function App() {
           if (loadedSunVoxBuffer) {
             return Math.max(1, sunvoxRuntime.durationSeconds || 180);
           }
-          if (loadedFamiTrackerBuffer) {
-            return Math.max(1, famiTrackerRuntime.estimatedDurationSeconds || 90);
+          if (loadedFurBuffer || loadedFtmDiverted) {
+            if (furnaceLiveTotalSec && furnaceLiveTotalSec > 0) return furnaceLiveTotalSec;
           }
           const rate = Math.max(0.25, Math.min(4.0, bpm / (baseSongBpm || 125)));
           if (loadedAudioBuffer) {
@@ -1053,7 +1048,7 @@ export default function App() {
           }
           return null;
         })()}
-        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer || loadedSidBuffer || loadedSunVoxBuffer || loadedFamiTrackerBuffer ? liveElapsedSec : null}
+        actualElapsedSeconds={loadedAudioBuffer || loadedMidiBuffer || loadedSidBuffer || loadedSunVoxBuffer || loadedFurBuffer || loadedFtmDiverted ? liveElapsedSec : null}
         onSeekPosition={(targetSeconds, ratio) => {
           pendingSeekRatioRef.current = ratio;
           setLiveElapsedSec(targetSeconds);
@@ -1061,8 +1056,8 @@ export default function App() {
             void seekSidPlayback(targetSeconds);
           } else if (loadedSunVoxBuffer) {
             seekSunVoxPlayback(targetSeconds);
-          } else if (loadedFamiTrackerBuffer) {
-            seekFamiTrackerPlayback(targetSeconds);
+          } else if (loadedFurBuffer || loadedFtmDiverted) {
+            FurnaceBridge.seekToRatio(ratio);
           } else if (loadedMidiBuffer) {
             if (isPlaying) {
               seekMidiPlayback(ratio, bpm, baseSongBpm);
@@ -1228,7 +1223,7 @@ export default function App() {
                     setSidRuntime(updated);
                     setTrackDuration(formatDuration(updated.durationSeconds));
                   }}
-                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName, rawSidBuffer, sidMetadata, rawSunVoxBuffer, rawFamiTrackerBuffer) => {
+                  onImportTrack={(duration, title, chipType, importedBpm, octaveRange, channelsCount, allPatterns, audioBuffer, channelSoundFonts, rawMidiBuffer, fileName, rawSidBuffer, sidMetadata, rawSunVoxBuffer, rawFurnaceBuffer) => {
                     handleImportMasterSequence(
                       allPatterns?.[0] || patterns,
                       importedBpm,
@@ -1245,7 +1240,7 @@ export default function App() {
                       rawSidBuffer,
                       sidMetadata,
                       rawSunVoxBuffer,
-                      rawFamiTrackerBuffer
+                      rawFurnaceBuffer
                     );
                   }}
                 />

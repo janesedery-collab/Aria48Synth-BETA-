@@ -13,6 +13,8 @@
 import { WasmBundleStatus } from '../types';
 import { AriaFurnaceNodeHandle, createAriaFurnaceNode } from './furnace-worklet';
 import { parseFurnaceEffectToken } from './FurnaceEffectTable';
+import { convertFamiTrackerToAriaPatterns, parseFamiTrackerBinary } from '../lib/chips/nes/famitrackerParser';
+import type { FamiTrackerModule } from '../lib/chips/nes/types';
 
 export const FURNACE_ENGINE_ID = 'furnace-divengine-wasm';
 export const FURNACE_DEFAULT_JS_URL = '/wasm/aria_furnace_all.js';
@@ -98,6 +100,26 @@ export const FURNACE_CHIP_CATALOG: FurnaceChipCatalogItem[] = [
     defaultClockHz: 1789773,
     clockPresets: [{ label: 'NTSC 60Hz (1.79 MHz)', hz: 1789773 }],
     category: 'Wavetable',
+  },
+  {
+    id: 0x85,
+    code: 'VRC7',
+    name: 'Konami VRC7 (OPLL FM)',
+    channels: 6,
+    cores: ['ymfm', 'Nuked-OPLL'],
+    defaultClockHz: 3579545,
+    clockPresets: [{ label: 'NTSC 60Hz (3.58 MHz)', hz: 3579545 }],
+    category: 'FM',
+  },
+  {
+    id: 0x89,
+    code: 'MMC5',
+    name: 'Nintendo MMC5 (NES)',
+    channels: 3,
+    cores: ['NSFPlay'],
+    defaultClockHz: 1789773,
+    clockPresets: [{ label: 'NTSC 60Hz (1.79 MHz)', hz: 1789773 }],
+    category: 'Nintendo',
   },
   {
     id: 0x04,
@@ -396,24 +418,24 @@ function createDefaultMacros(): Record<MacroLaneType, FurnaceMacroLane> {
   });
 
   return {
-    volume: mk('volume', 'Volume', 0, 127, [127, 118, 108, 96, 86, 78, 72, 68], 4, 6),
-    arpRel: mk('arpRel', 'Arpeggio (Rel)', -24, 24, [0, 4, 7, 12], 0, -1),
-    arpFixed: mk('arpFixed', 'Arpeggio (Fixed MIDI)', 0, 127, [60, 64, 67], -1, -1),
-    duty: mk('duty', 'Duty / Noise Mode', 0, 15, [2, 2, 1, 0], -1, -1),
-    wave: mk('wave', 'Wavetable Index', 0, 63, [0, 0, 1, 2], 0, -1),
-    pitch: mk('pitch', 'Pitch', -128, 127, [0, 0, 2, 0, -2, 0], 1, -1),
-    pan: mk('pan', 'Panning (L/R)', -127, 127, [0, -32, 0, 32], 0, -1),
-    phaseReset: mk('phaseReset', 'Phase Reset', 0, 1, [1, 0, 0, 0], -1, -1),
-    ex1: mk('ex1', 'Ex1 (Filter / Feedback)', 0, 255, [64, 96, 128, 96], 0, -1),
-    ex2: mk('ex2', 'Ex2 (Modulation)', 0, 255, [0, 32, 64, 32], 0, -1),
-    ex3: mk('ex3', 'Ex3 (Aux Chip)', 0, 255, [0, 0, 0, 0], -1, -1),
-    op1_tl: mk('op1_tl', 'OP1 Total Level', 0, 127, [24, 28, 32, 36], -1, -1),
-    op1_ar: mk('op1_ar', 'OP1 Attack Rate', 0, 31, [31, 31, 31, 31], -1, -1),
-    op1_dr: mk('op1_dr', 'OP1 Decay Rate', 0, 31, [10, 12, 12, 14], -1, -1),
-    op1_mult: mk('op1_mult', 'OP1 Multiplier', 0, 15, [1, 1, 2, 1], 0, -1),
-    op2_tl: mk('op2_tl', 'OP2 Total Level', 0, 127, [20, 22, 24, 26], -1, -1),
-    op3_tl: mk('op3_tl', 'OP3 Total Level', 0, 127, [30, 34, 38, 42], -1, -1),
-    op4_tl: mk('op4_tl', 'OP4 Total Level', 0, 127, [10, 12, 14, 16], -1, -1),
+    volume: mk('volume', 'Volume', 0, 127, [127], -1, -1),
+    arpRel: mk('arpRel', 'Arpeggio (Rel)', -24, 24, [], -1, -1),
+    arpFixed: mk('arpFixed', 'Arpeggio (Fixed MIDI)', 0, 127, [], -1, -1),
+    duty: mk('duty', 'Duty / Noise Mode', 0, 15, [], -1, -1),
+    wave: mk('wave', 'Wavetable Index', 0, 63, [], -1, -1),
+    pitch: mk('pitch', 'Pitch', -128, 127, [], -1, -1),
+    pan: mk('pan', 'Panning (L/R)', -127, 127, [], -1, -1),
+    phaseReset: mk('phaseReset', 'Phase Reset', 0, 1, [], -1, -1),
+    ex1: mk('ex1', 'Ex1 (Filter / Feedback)', 0, 255, [], -1, -1),
+    ex2: mk('ex2', 'Ex2 (Modulation)', 0, 255, [], -1, -1),
+    ex3: mk('ex3', 'Ex3 (Aux Chip)', 0, 255, [], -1, -1),
+    op1_tl: mk('op1_tl', 'OP1 Total Level', 0, 127, [], -1, -1),
+    op1_ar: mk('op1_ar', 'OP1 Attack Rate', 0, 31, [], -1, -1),
+    op1_dr: mk('op1_dr', 'OP1 Decay Rate', 0, 31, [], -1, -1),
+    op1_mult: mk('op1_mult', 'OP1 Multiplier', 0, 15, [], -1, -1),
+    op2_tl: mk('op2_tl', 'OP2 Total Level', 0, 127, [], -1, -1),
+    op3_tl: mk('op3_tl', 'OP3 Total Level', 0, 127, [], -1, -1),
+    op4_tl: mk('op4_tl', 'OP4 Total Level', 0, 127, [], -1, -1),
   };
 }
 
@@ -454,6 +476,77 @@ const MACRO_OP_INDEX: Partial<Record<MacroLaneType, number>> = {
   op4_tl: 3,
 };
 
+const VRC7_ROM_PATCHES: number[][] = [
+  [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 0: Custom
+  [0x03, 0x21, 0x05, 0x06, 0xb8, 0x81, 0x42, 0x27], // 1: Buzzy Bell
+  [0x13, 0x41, 0x13, 0x0d, 0xd8, 0xd6, 0x23, 0x12], // 2: Guitar
+  [0x31, 0x11, 0x08, 0x08, 0xfa, 0x9a, 0x22, 0x02], // 3: Wurly
+  [0x31, 0x61, 0x18, 0x07, 0x78, 0x64, 0x30, 0x27], // 4: Flute
+  [0x22, 0x21, 0x1e, 0x06, 0xf0, 0x76, 0x08, 0x28], // 5: Clarinet
+  [0x02, 0x01, 0x06, 0x00, 0xf0, 0xf2, 0x03, 0xf5], // 6: Synth
+  [0x21, 0x61, 0x1d, 0x07, 0x82, 0x81, 0x16, 0x07], // 7: Trumpet
+  [0x23, 0x21, 0x1a, 0x17, 0xcf, 0x72, 0x25, 0x17], // 8: Organ
+  [0x15, 0x11, 0x25, 0x00, 0x4f, 0x71, 0x00, 0x11], // 9: Bells
+  [0x85, 0x01, 0x12, 0x0f, 0x99, 0xa2, 0x40, 0x02], // 10: Vibes
+  [0xa7, 0xc1, 0x69, 0x07, 0xf0, 0x77, 0x18, 0x07], // 11: Vibraphone
+  [0x61, 0x22, 0x0d, 0x02, 0xc3, 0x7f, 0x24, 0x05], // 12: Tutti
+  [0x01, 0x02, 0xd3, 0x05, 0xc2, 0xb2, 0x00, 0x01], // 13: Fretless
+  [0x61, 0x62, 0x0c, 0x05, 0xf2, 0xf4, 0x00, 0x01], // 14: Synth Bass
+  [0x21, 0x62, 0x0d, 0x00, 0x84, 0xf4, 0x00, 0x01], // 15: Sweep Bass
+];
+
+function decodeDpcmToInt16(u8: Uint8Array, initialCounter = 64): Int16Array<ArrayBuffer> {
+  const totalBits = u8.length * 8;
+  const pcm16 = new Int16Array(new ArrayBuffer(totalBits * 2));
+  if (totalBits === 0) return pcm16;
+
+  const raw = new Float32Array(totalBits);
+  let counter = initialCounter >= 0 ? Math.max(0, Math.min(126, initialCounter)) : 64;
+  for (let b = 0; b < u8.length; b++) {
+    const byte = u8[b];
+    for (let bit = 0; bit < 8; bit++) {
+      if ((byte & (1 << bit)) !== 0) {
+        if (counter <= 125) counter += 2;
+      } else {
+        if (counter >= 2) counter -= 2;
+      }
+      raw[b * 8 + bit] = (counter - 63.5) / 63.5;
+    }
+  }
+
+  // 1-pole DC blocker removes hardware delta counter drift & maximizes punchy AC headroom
+  const hp = new Float32Array(totalBits);
+  let prevX = raw[0];
+  let prevY = 0;
+  let maxAbs = 0;
+  for (let i = 0; i < totalBits; i++) {
+    const x = raw[i];
+    const y = x - prevX + 0.996 * prevY;
+    prevX = x;
+    prevY = y;
+    hp[i] = y;
+    const a = Math.abs(y);
+    if (a > maxAbs) maxAbs = a;
+  }
+
+  const normScale = maxAbs > 0.002 ? Math.min(3.5, 0.85 / maxAbs) * 29000 : 24000;
+  for (let i = 0; i < totalBits; i++) {
+    const v = Math.round(hp[i] * normScale);
+    pcm16[i] = Math.max(-32768, Math.min(32767, v));
+  }
+  return pcm16;
+}
+
+function ftmEffectToNumericId(code: string): number {
+  const c = (code || '').toUpperCase();
+  if (c === 'S') return 0xec; // Note Cut
+  if (c === 'G') return 0xed; // Note Delay
+  if (c === 'V') return 0x12; // Duty / Mode
+  if (/^[0-9A-F]$/.test(c)) return parseInt(c, 16);
+  if (c.length === 1) return 0x100 + c.charCodeAt(0); // 'P'->0x150, 'Q'->0x151, 'R'->0x152, 'W'->0x157, 'Y'->0x159, 'Z'->0x15A, '='->0x13D
+  return -1;
+}
+
 class FurnaceBridgeEngine {
   public readonly engineId = FURNACE_ENGINE_ID;
   private listeners: Array<(state: FurnaceRuntimeState) => void> = [];
@@ -469,6 +562,34 @@ class FurnaceBridgeEngine {
   private customJsUrl: string | null = null;
   private customWasmUrl: string | null = null;
   private scopeScratch = new Float32Array(1024);
+  private pendingSongRaw: Uint8Array | null = null;
+  private pendingSongKind: 'fur' | 'ftm' | null = null;
+  private pendingGridSong: any = null;
+  private pendingTempoScale = 1.0;
+  private attachPromise: Promise<void> | null = null;
+  private wasmLoadPromise: Promise<boolean> | null = null;
+  private workletPrimed = false;
+  private ftmChannelMapOverride: Array<{
+    chipKind: number;
+    tuningHz: number;
+    freqMul?: number;
+    ftmChipIdx?: number;
+    volume: number;
+    pan: number;
+    defaultDuty: number;
+  }> | null = null;
+  private ftmInstrumentSyncList: Array<{
+    instIdx: number;
+    waveId?: number;
+    vrc7Regs?: Uint8Array;
+    ftmMacroSpec?: {
+      arp?: { loop: number; release: number; mode: number; items: number[] };
+      pitch?: { loop: number; release: number; mode: number; items: number[] };
+      hiPitch?: { loop: number; release: number; mode: number; items: number[] };
+    };
+    macros: Array<{ code: number; speed: number; loop: number; release: number; mode: number; values: number[] }>;
+    dpcmMaps: Array<{ note: number; sampleId: number; rateIdx: number; loop: boolean }>;
+  }> = [];
 
   private state: FurnaceRuntimeState = {
     engineEnabled: true,
@@ -518,8 +639,8 @@ class FurnaceBridgeEngine {
       fms: 0,
       ams: 0,
       ops: [
-        createDefaultOp(24, 1, 3, 6),
-        createDefaultOp(18, 2, 2, 7),
+        createDefaultOp(24, 2, 3, 6),
+        createDefaultOp(18, 1, 2, 7),
         createDefaultOp(28, 1, 4, 5),
         createDefaultOp(8, 1, 1, 6),
       ],
@@ -589,30 +710,76 @@ class FurnaceBridgeEngine {
   public setEngineEnabled(enabled: boolean) {
     this.state = { ...this.state, engineEnabled: enabled };
     if (!enabled) {
+      this.workletPrimed = false;
       this.workletHandle?.clear();
       this.workletHandle?.setActive(false);
     } else if (this.isWasmReady()) {
-      this.workletHandle?.setActive(true);
+      this.ensureWorkletStreaming();
     }
     this.notify();
   }
 
   /**
-   * Connects the AriaFurnaceNode AudioWorkletNode into the MasterAudioRouter 'FURNACE' input bus.
+   * Ensures the default `/wasm/aria_furnace_all.js` + `.wasm` bundle is loaded once.
+   */
+  public ensureWasmLoaded(): Promise<boolean> {
+    if (this.isWasmReady()) return Promise.resolve(true);
+    if (this.wasmLoadPromise) return this.wasmLoadPromise;
+    return this.loadWasmBundle();
+  }
+
+  /**
+   * Connects the AriaFurnaceNode AudioWorkletNode into the MasterAudioRouter 'FURNACE' input bus
+   * and automatically loads the compiled Furnace WASM engine if not already initialized.
    */
   public async attachToMasterRouter(ctx: AudioContext, destinationBus: AudioNode): Promise<void> {
     this.hostCtx = ctx;
     this.outputBus = destinationBus;
+
     if (!this.workletHandle) {
-      this.workletHandle = await createAriaFurnaceNode(ctx, (missing) => {
-        this.pumpWasmAudio(missing);
-      });
+      if (!this.attachPromise) {
+        this.attachPromise = createAriaFurnaceNode(ctx, (missing) => {
+          this.pumpWasmAudio(missing);
+        })
+          .then((handle) => {
+            this.workletHandle = handle;
+          })
+          .finally(() => {
+            this.attachPromise = null;
+          });
+      }
+      await this.attachPromise;
     }
-    if (this.workletHandle.node) {
+
+    if (this.workletHandle?.node) {
       try {
         this.workletHandle.node.disconnect();
       } catch {}
       this.workletHandle.node.connect(destinationBus);
+    }
+
+    if (this.wasmEngine?.setSampleRate && ctx.sampleRate) {
+      try {
+        this.wasmEngine.setSampleRate(ctx.sampleRate);
+      } catch {}
+    }
+
+    if (this.state.wasmStatus === 'unloaded') {
+      void this.ensureWasmLoaded();
+    } else if (this.isWasmReady() && this.state.engineEnabled) {
+      this.ensureWorkletStreaming();
+    }
+  }
+
+  private ensureWorkletStreaming() {
+    if (!this.workletHandle || !this.state.engineEnabled || !this.isWasmReady()) return;
+    if (!this.workletPrimed) {
+      this.workletPrimed = true;
+      this.workletHandle.setActive(true);
+      this.pumpWasmAudio(1024);
+      this.pumpWasmAudio(1024);
+      this.pumpWasmAudio(1024);
+      this.pumpWasmAudio(1024);
     }
   }
 
@@ -625,54 +792,89 @@ class FurnaceBridgeEngine {
     wasmUrlOrBlob?: string,
     sourceLabel?: string
   ): Promise<boolean> {
-    const jsUrl = jsUrlOrBlob || this.customJsUrl || FURNACE_DEFAULT_JS_URL;
-    const wasmUrl = wasmUrlOrBlob || this.customWasmUrl || FURNACE_DEFAULT_WASM_URL;
-    if (jsUrlOrBlob) this.customJsUrl = jsUrlOrBlob;
-    if (wasmUrlOrBlob) this.customWasmUrl = wasmUrlOrBlob;
+    const isCustomSwap = Boolean(jsUrlOrBlob || wasmUrlOrBlob);
+    if (!isCustomSwap && this.isWasmReady()) return true;
+    if (!isCustomSwap && this.wasmLoadPromise) return this.wasmLoadPromise;
 
-    this.state = {
-      ...this.state,
-      wasmStatus: 'loading',
-      wasmError: null,
-      wasmSourceLabel: sourceLabel || jsUrl,
-    };
-    this.notify();
+    const runLoad = async (): Promise<boolean> => {
+      const jsUrl = jsUrlOrBlob || this.customJsUrl || FURNACE_DEFAULT_JS_URL;
+      const wasmUrl = wasmUrlOrBlob || this.customWasmUrl || FURNACE_DEFAULT_WASM_URL;
+      if (jsUrlOrBlob) this.customJsUrl = jsUrlOrBlob;
+      if (wasmUrlOrBlob) this.customWasmUrl = wasmUrlOrBlob;
 
-    try {
-      const probe = await fetch(jsUrl);
-      if (!probe.ok) {
-        throw new Error(`Furnace JS bundle unavailable (${probe.status}) at ${jsUrl}`);
-      }
-      const jsText = await probe.text();
-      if (jsText.trimStart().startsWith('<!doctype') || jsText.trimStart().startsWith('<html')) {
-        throw new Error('aria_furnace_all.js is not present in /public/wasm/. Load a compiled Emscripten bundle in WASM Engine Manager.');
-      }
-
-      const modImport = await import(/* @vite-ignore */ jsUrl);
-      const factory =
-        modImport?.default ||
-        modImport?.createAriaFurnaceModule ||
-        (typeof window !== 'undefined' ? (window as any).createAriaFurnaceModule : null);
-
-      if (typeof factory !== 'function') {
-        throw new Error('Loaded bundle does not export an Emscripten factory (createAriaFurnaceModule)');
-      }
-
-      const moduleInstance = await factory({
-        locateFile: (path: string) => (path.endsWith('.wasm') ? wasmUrl : path),
-      });
-
-      this.attachEmscriptenModule(moduleInstance, sourceLabel || jsUrl);
-      return true;
-    } catch (err: any) {
       this.state = {
         ...this.state,
-        wasmStatus: 'unloaded',
-        wasmError: err?.message || 'Furnace WASM binary not loaded',
+        wasmStatus: 'loading',
+        wasmError: null,
+        wasmSourceLabel: sourceLabel || jsUrl,
       };
       this.notify();
-      return false;
+
+      try {
+        const probe = await fetch(jsUrl);
+        if (!probe.ok) {
+          throw new Error(`Furnace JS bundle unavailable (${probe.status}) at ${jsUrl}`);
+        }
+        const jsText = await probe.text();
+        if (jsText.trimStart().startsWith('<!doctype') || jsText.trimStart().startsWith('<html')) {
+          throw new Error('aria_furnace_all.js is not present in /public/wasm/. Load a compiled Emscripten bundle in WASM Engine Manager.');
+        }
+
+        const originBase = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+        const resolvedJsUrl = jsUrl.startsWith('blob:') || /^https?:\/\//i.test(jsUrl)
+          ? jsUrl
+          : new URL(jsUrl, originBase).href;
+        const resolvedWasmUrl = wasmUrl.startsWith('blob:') || /^https?:\/\//i.test(wasmUrl)
+          ? wasmUrl
+          : new URL(wasmUrl, originBase).href;
+
+        // Rewrite import.meta.url when importing via Blob URL so relative .wasm lookups & Vite public assets stay valid
+        const moduleCode = jsText.includes('import.meta.url')
+          ? jsText.replaceAll('import.meta.url', JSON.stringify(resolvedJsUrl))
+          : jsText;
+        const blobUrl = URL.createObjectURL(new Blob([moduleCode], { type: 'application/javascript' }));
+        let modImport: any;
+        try {
+          modImport = await import(/* @vite-ignore */ blobUrl);
+        } finally {
+          URL.revokeObjectURL(blobUrl);
+        }
+
+        const factory =
+          modImport?.default ||
+          modImport?.createAriaFurnaceModule ||
+          (typeof window !== 'undefined' ? (window as any).createAriaFurnaceModule : null);
+
+        if (typeof factory !== 'function') {
+          throw new Error('Loaded bundle does not export an Emscripten factory (createAriaFurnaceModule)');
+        }
+
+        const moduleInstance = await factory({
+          locateFile: (path: string) => (path.endsWith('.wasm') ? resolvedWasmUrl : path),
+        });
+
+        this.attachEmscriptenModule(moduleInstance, sourceLabel || jsUrl);
+        return true;
+      } catch (err: any) {
+        this.state = {
+          ...this.state,
+          wasmStatus: 'unloaded',
+          wasmError: err?.message || 'Furnace WASM binary not loaded',
+        };
+        this.notify();
+        return false;
+      }
+    };
+
+    const p = runLoad().finally(() => {
+      if (this.wasmLoadPromise === p) {
+        this.wasmLoadPromise = null;
+      }
+    });
+    if (!isCustomSwap) {
+      this.wasmLoadPromise = p;
     }
+    return p;
   }
 
   /**
@@ -707,7 +909,8 @@ class FurnaceBridgeEngine {
     // Push staged chip stack, FM patch, wavetables, samples, macros, SID/PSG params into WASM
     this.syncFullStateToWasm();
     if (this.state.engineEnabled) {
-      this.workletHandle?.setActive(true);
+      this.workletPrimed = false;
+      this.ensureWorkletStreaming();
     }
     this.notify();
   }
@@ -730,11 +933,36 @@ class FurnaceBridgeEngine {
   public syncFullStateToWasm() {
     if (!this.wasmEngine) return;
     try {
+      if (this.hostCtx?.sampleRate && typeof this.wasmEngine.setSampleRate === 'function') {
+        this.wasmEngine.setSampleRate(this.hostCtx.sampleRate);
+      }
+      if (typeof this.wasmEngine.clearAllMacros === 'function') {
+        this.wasmEngine.clearAllMacros();
+      }
+      if (this.pendingSongKind === 'fur' && this.pendingSongRaw && this.wasmModule?.HEAPU8) {
+        const ptr = this.wasmEngine.allocate(this.pendingSongRaw.length);
+        this.wasmModule.HEAPU8.set(this.pendingSongRaw, ptr);
+        this.wasmEngine.loadSong(ptr, this.pendingSongRaw.length);
+        this.wasmEngine.deallocate(ptr);
+        this.wasmEngine.setTempoScale?.(this.pendingTempoScale);
+        if (this.state.isPlaying) {
+          try { this.wasmEngine.play?.(); } catch {}
+        }
+      } else if (this.pendingSongKind === 'ftm' && this.pendingGridSong) {
+        this.wasmEngine.loadGridSong?.(this.pendingGridSong);
+        this.wasmEngine.setTempoScale?.(this.pendingTempoScale);
+        if (this.state.isPlaying) {
+          try { this.wasmEngine.play?.(); } catch {}
+        }
+      }
       this.wasmEngine.clearSystems();
       this.state.systems.forEach((slot, idx) => {
         this.wasmEngine.addSystem(slot.sysId, slot.availableCores.indexOf(slot.core), slot.clockHz, slot.tuningHz);
         this.wasmEngine.setChipMix(idx, slot.volume, slot.pan, slot.mute, slot.solo);
       });
+      if (typeof this.wasmEngine.setCustomChannelMap === 'function') {
+        this.wasmEngine.setCustomChannelMap(this.ftmChannelMapOverride);
+      }
       const instIdx = this.state.activeInstIndex;
       const fm = this.state.fm;
       this.wasmEngine.setFMGlobal(instIdx, fm.alg, fm.fb, fm.fms, fm.ams, fm.is2Op);
@@ -746,11 +974,172 @@ class FurnaceBridgeEngine {
         );
       });
       this.state.wavetables.forEach((w) => this.pushWavetableToWasm(w));
+      if (typeof this.wasmEngine.clearSamples === 'function') {
+        this.wasmEngine.clearSamples();
+      }
       this.state.samples.forEach((s) => this.pushSampleToWasm(s));
-      (Object.values(this.state.macros) as FurnaceMacroLane[]).forEach((m) => this.pushMacroToWasm(m));
+      if (this.ftmInstrumentSyncList.length === 0) {
+        (Object.values(this.state.macros) as FurnaceMacroLane[]).forEach((m) => this.pushMacroToWasm(m));
+      } else {
+        this.syncFtmInstrumentsToWasm();
+      }
       this.pushSIDToWasm();
       this.pushPSGToWasm();
     } catch {}
+  }
+
+  private syncFtmInstrumentsToWasm() {
+    if (!this.wasmEngine || !this.wasmModule?.HEAP32 || this.ftmInstrumentSyncList.length === 0) return;
+    for (const entry of this.ftmInstrumentSyncList) {
+      if (typeof entry.waveId === 'number' && typeof this.wasmEngine.setInstWaveId === 'function') {
+        this.wasmEngine.setInstWaveId(entry.instIdx, entry.waveId);
+      }
+      if (entry.ftmMacroSpec && typeof this.wasmEngine.setFtmMacros === 'function') {
+        this.wasmEngine.setFtmMacros(entry.instIdx, entry.ftmMacroSpec);
+      }
+      if (entry.vrc7Regs && entry.vrc7Regs.length >= 8) {
+        const r = entry.vrc7Regs;
+        const fb = r[3] & 0x07;
+        this.wasmEngine.setFMGlobal(entry.instIdx, 0, fb, 0, 0, true);
+        const modTl = r[2] & 0x3f;
+        const modAr = (r[4] >> 4) & 0x0f;
+        const modDr = r[4] & 0x0f;
+        const modSl = (r[6] >> 4) & 0x0f;
+        const modRr = r[6] & 0x0f;
+        const modMult = r[0] & 0x0f;
+        const carAr = (r[5] >> 4) & 0x0f;
+        const carDr = r[5] & 0x0f;
+        const carSl = (r[7] >> 4) & 0x0f;
+        const carRr = r[7] & 0x0f;
+        const carMult = r[1] & 0x0f;
+        this.wasmEngine.setFMOperator(entry.instIdx, 0, Math.min(127, modTl * 2), modAr * 2 + 1, modDr * 2, 0, modSl, modRr, modMult, 3, 0, 0, (r[0] & 0x80) ? 1 : 0, 0, 0, 0);
+        this.wasmEngine.setFMOperator(entry.instIdx, 1, 8, carAr * 2 + 1, carDr * 2, 0, carSl, carRr, carMult, 3, 0, 0, (r[1] & 0x80) ? 1 : 0, 0, 0, 0);
+      }
+      for (const m of entry.macros) {
+        if (m.values.length === 0) continue;
+        const ptr = this.wasmEngine.allocate(m.values.length * 4);
+        const heap = this.wasmModule.HEAP32 as Int32Array;
+        const base = ptr >> 2;
+        for (let i = 0; i < m.values.length; i++) {
+          heap[base + i] = m.values[i];
+        }
+        this.wasmEngine.setMacro(
+          entry.instIdx,
+          -1,
+          m.code,
+          m.speed,
+          m.loop,
+          m.release,
+          m.mode,
+          ptr,
+          m.values.length
+        );
+        this.wasmEngine.deallocate(ptr);
+      }
+      if (typeof this.wasmEngine.setDpcmMap === 'function') {
+        for (const dpcm of entry.dpcmMaps) {
+          this.wasmEngine.setDpcmMap(entry.instIdx, dpcm.note, dpcm.sampleId, dpcm.rateIdx, dpcm.loop);
+        }
+      }
+    }
+  }
+
+  public play() {
+    if (!this.state.engineEnabled) return;
+    if (this.wasmEngine && (this.pendingSongKind === 'fur' || this.pendingSongKind === 'ftm')) {
+      try {
+        this.wasmEngine.setTempoScale?.(this.pendingTempoScale);
+        this.wasmEngine.play?.();
+      } catch {}
+    }
+    if (this.isWasmReady()) {
+      this.ensureWorkletStreaming();
+    }
+    if (!this.state.isPlaying) {
+      this.state = { ...this.state, isPlaying: true };
+      this.notify();
+    }
+  }
+
+  public pause() {
+    if (this.wasmEngine) {
+      try { this.wasmEngine.stop?.(); } catch {}
+    }
+    this.workletPrimed = false;
+    this.workletHandle?.clear();
+    this.workletHandle?.setActive(false);
+    if (this.state.isPlaying) {
+      this.state = { ...this.state, isPlaying: false };
+      this.notify();
+    }
+  }
+
+  public stop() {
+    this.pause();
+  }
+
+  public setTempoScale(scale: number) {
+    const safeScale = Number.isFinite(scale) && scale > 0.1 && scale < 4.0 ? scale : 1.0;
+    this.pendingTempoScale = safeScale;
+    if (this.wasmEngine) {
+      try { this.wasmEngine.setTempoScale?.(safeScale); } catch {}
+    }
+  }
+
+  public seekToRatio(ratio: number) {
+    const r = Math.max(0, Math.min(0.999, Number(ratio) || 0));
+    if (this.wasmEngine) {
+      try { this.wasmEngine.seekToRatio?.(r); } catch {}
+    }
+    this.workletHandle?.clear();
+    this.workletPrimed = false;
+    if (this.state.isPlaying && this.isWasmReady()) {
+      this.ensureWorkletStreaming();
+    }
+  }
+
+  public getPlaybackProgress(): {
+    orderIdx: number;
+    rowIdx: number;
+    elapsedSeconds: number;
+    totalSeconds: number;
+    ratio: number;
+    isPlaying: boolean;
+  } {
+    if (this.wasmEngine?.getPlaybackProgress) {
+      try {
+        return this.wasmEngine.getPlaybackProgress();
+      } catch {}
+    }
+    return {
+      orderIdx: 0,
+      rowIdx: 0,
+      elapsedSeconds: 0,
+      totalSeconds: 0,
+      ratio: 0,
+      isPlaying: this.state.isPlaying,
+    };
+  }
+
+  public clearLoadedSong() {
+    this.pendingSongRaw = null;
+    this.pendingSongKind = null;
+    this.pendingGridSong = null;
+    this.pendingTempoScale = 1.0;
+    this.ftmInstrumentSyncList = [];
+    this.ftmChannelMapOverride = null;
+    if (this.wasmEngine) {
+      try { this.wasmEngine.loadGridSong?.(null); } catch {}
+      try { this.wasmEngine.setCustomChannelMap?.(null); } catch {}
+      try { this.wasmEngine.stop?.(); } catch {}
+    }
+    this.workletPrimed = false;
+    this.workletHandle?.clear();
+    this.workletHandle?.setActive(false);
+    if (this.state.loadedSongName !== null || this.state.isPlaying) {
+      this.state = { ...this.state, loadedSongName: null, isPlaying: false };
+      this.notify();
+    }
   }
 
   // --- SYSTEM RACK OPERATIONS ---
@@ -987,8 +1376,9 @@ class FurnaceBridgeEngine {
 
   private pushMacroToWasm(macro: FurnaceMacroLane) {
     if (!this.wasmEngine || !this.wasmModule?.HEAP32) return;
+    if (macro.values.length === 0) return;
     try {
-      const len = Math.max(1, macro.values.length);
+      const len = macro.values.length;
       const ptr = this.wasmEngine.allocate(len * 4);
       const base = ptr >> 2;
       for (let i = 0; i < macro.values.length; i++) {
@@ -1062,7 +1452,7 @@ class FurnaceBridgeEngine {
     if (!this.state.engineEnabled || !this.wasmEngine) return false;
     try {
       this.wasmEngine.noteOn(channel, midiNote, velocity, instIndex);
-      this.pumpWasmAudio(512);
+      this.ensureWorkletStreaming();
       return true;
     } catch {
       return false;
@@ -1401,17 +1791,7 @@ class FurnaceBridgeEngine {
     if (ext === '.dmc') {
       bitDepth = 1;
       rate = 33144;
-      const samples = new Int16Array(u8.length * 8);
-      let level = 0;
-      for (let b = 0; b < u8.length; b++) {
-        const byte = u8[b];
-        for (let bit = 0; bit < 8; bit++) {
-          level += (byte & (1 << bit)) !== 0 ? 2 : -2;
-          level = Math.max(-64, Math.min(63, level));
-          samples[b * 8 + bit] = level * 450;
-        }
-      }
-      pcm16 = samples;
+      pcm16 = decodeDpcmToInt16(u8, 64);
     } else if (ext === '.brr') {
       bitDepth = 4;
       rate = 32000;
@@ -1516,22 +1896,43 @@ class FurnaceBridgeEngine {
     let channelsCount = 10;
     const chipNames: string[] = [];
 
+    const nextFurSystems: FurnaceChipSlot[] = [];
+
     if (raw.length >= 64 && String.fromCharCode(...raw.slice(0, 15)) === '-Furnace module') {
       const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
       const infoPtr = view.getUint32(20, true);
       if (infoPtr > 0 && infoPtr + 48 < raw.length) {
-        const hz = view.getFloat32(infoPtr + 12, true);
-        if (hz >= 30 && hz <= 300) {
-          bpm = Math.round(hz * 2);
-        }
-        const sysCount = Math.min(32, Math.max(1, raw[infoPtr + 20] || 1));
+        const timeBase = Math.max(0, Math.min(8, raw[infoPtr + 8] || 0));
+        const speed1 = Math.max(1, raw[infoPtr + 9] || 6);
+        const speed2 = Math.max(1, raw[infoPtr + 10] || speed1);
+        const avgSpeed = Math.max(1, (speed1 + speed2) * 0.5);
+        const hzRaw = view.getFloat32(infoPtr + 12, true);
+        const hz = Number.isFinite(hzRaw) && hzRaw >= 10 && hzRaw <= 400 ? hzRaw : 60;
+        bpm = Math.max(40, Math.min(300, Math.round((15 * hz) / (avgSpeed * (timeBase + 1)))));
+
         channelsCount = 0;
-        for (let i = 0; i < sysCount; i++) {
-          const sysId = raw[infoPtr + 24 + i];
+        for (let i = 0; i < 32 && infoPtr + 32 + i < raw.length; i++) {
+          const sysId = raw[infoPtr + 32 + i];
+          if (!sysId) break;
           const match = FURNACE_CHIP_CATALOG.find((c) => c.id === sysId);
           if (match) {
             chipNames.push(match.name);
             channelsCount += match.channels;
+            nextFurSystems.push({
+              slotId: `fur-slot-${i}-${Date.now()}`,
+              sysId: match.id,
+              code: match.code,
+              name: match.name,
+              channels: match.channels,
+              core: match.cores[0],
+              availableCores: match.cores,
+              clockHz: match.defaultClockHz,
+              tuningHz: 440,
+              volume: 1.0,
+              pan: 0,
+              mute: false,
+              solo: false,
+            });
           }
         }
         if (channelsCount <= 0) channelsCount = 8;
@@ -1546,18 +1947,25 @@ class FurnaceBridgeEngine {
       if (s.trim().length >= 2) title = s.trim();
     }
 
-    if (this.wasmEngine && this.wasmModule?.HEAPU8) {
-      const ptr = this.wasmEngine.allocate(raw.length);
-      this.wasmModule.HEAPU8.set(raw, ptr);
-      this.wasmEngine.loadSong(ptr, raw.length);
-      this.wasmEngine.deallocate(ptr);
-    }
+    this.pendingSongRaw = raw;
+    this.pendingSongKind = 'fur';
+    this.pendingGridSong = null;
+    this.pendingTempoScale = 1.0;
+    this.ftmInstrumentSyncList = [];
+    this.ftmChannelMapOverride = null;
 
     this.state = {
       ...this.state,
+      ...(nextFurSystems.length > 0
+        ? {
+            systems: nextFurSystems,
+            totalChannels: nextFurSystems.reduce((sum, sys) => sum + sys.channels, 0),
+          }
+        : {}),
       loadedSongName: title,
-      isPlaying: this.isWasmReady(),
+      isPlaying: false,
     };
+    this.syncFullStateToWasm();
     this.notify();
 
     return {
@@ -1565,6 +1973,413 @@ class FurnaceBridgeEngine {
       bpm,
       channelsCount: Math.max(4, Math.min(48, channelsCount)),
       chipNames,
+    };
+  }
+
+  /**
+   * Diverts a FamiTracker (.ftm, .0cc, .dnm) module into the Furnace Tracker engine:
+   * configures Furnace DivSystem chip racks (RP2A03 + VRC6/VRC7/FDS/MMC5/N163/AY8910),
+   * decodes 1-bit DPCM samples into Furnace's Sample Bank, maps FTM sequences & DPCM maps
+   * for ALL instruments to Furnace macros, and syncs everything to `AriaFurnaceEngine`.
+   */
+  public loadFamiTrackerBuffer(
+    arrayBuffer: ArrayBuffer,
+    fileName = 'module.ftm',
+    preParsedMod?: FamiTrackerModule
+  ): {
+    title: string;
+    bpm: number;
+    channelsCount: number;
+    chipNames: string[];
+  } {
+    const mod = preParsedMod || parseFamiTrackerBinary(arrayBuffer, fileName);
+    const clockHz = mod.machine === 'PAL' ? 1662607 : 1789773;
+
+    this.pendingSongRaw = new Uint8Array(arrayBuffer);
+    this.pendingSongKind = 'ftm';
+
+    const expToCode = (exp: string): { code: string; customName?: string; channelsOverride?: number } => {
+      switch (exp) {
+        case 'VRC6':
+          return { code: 'VRC6' };
+        case 'VRC7':
+          return { code: 'VRC7' };
+        case 'FDS':
+          return { code: 'FDS' };
+        case 'MMC5':
+          return { code: 'MMC5', channelsOverride: 2 };
+        case 'N163':
+          return { code: 'N163', channelsOverride: Math.max(1, Math.min(8, mod.n163Channels || 1)) };
+        case 'Sunsoft 5B':
+          return { code: 'AY8910', customName: 'Sunsoft 5B (Furnace AY)' };
+        default:
+          return { code: 'RP2A03' };
+      }
+    };
+
+    const nextSystems: FurnaceChipSlot[] = [];
+    const expList = mod.expansions.length > 0 ? mod.expansions : ['2A03'];
+    expList.forEach((exp, idx) => {
+      const mapped = expToCode(exp);
+      const def =
+        FURNACE_CHIP_CATALOG.find((c) => c.code === mapped.code) ||
+        FURNACE_CHIP_CATALOG.find((c) => c.code === 'RP2A03')!;
+      nextSystems.push({
+        slotId: `ftm-slot-${idx}-${Date.now()}`,
+        sysId: def.id,
+        code: def.code,
+        name: mapped.customName || def.name,
+        channels: mapped.channelsOverride ?? def.channels,
+        core: def.cores[0],
+        availableCores: def.cores,
+        clockHz: def.code === 'VRC7' ? 3579545 : clockHz,
+        tuningHz: 440,
+        volume: 1.0,
+        pan: 0,
+        mute: false,
+        solo: false,
+      });
+    });
+
+    // Decode 1-bit DPCM samples into Int16 PCM buffers for Furnace Sample Bank & DivEngine upload
+    const dmcIdxBySampleIndex = new Map<number, number>();
+    const initialDeltaBySampleIndex = new Map<number, number>();
+    for (const ins of mod.instruments) {
+      if (Array.isArray(ins.dpcmMap)) {
+        for (const entry of ins.dpcmMap) {
+          if (entry && entry.sampleIndex >= 0 && entry.deltaCounter >= 0 && !initialDeltaBySampleIndex.has(entry.sampleIndex)) {
+            initialDeltaBySampleIndex.set(entry.sampleIndex, entry.deltaCounter);
+          }
+        }
+      }
+    }
+    const decodedSamples: FurnaceSample[] = mod.dpcmSamples.map((dmc, idx) => {
+      dmcIdxBySampleIndex.set(dmc.index, idx);
+      const startCounter = initialDeltaBySampleIndex.get(dmc.index) ?? 64;
+      const pcm16 = decodeDpcmToInt16(dmc.data, startCounter);
+      return {
+        id: idx,
+        name: dmc.name || `DPCM #${dmc.index}`,
+        rate: 33144,
+        rootNote: 60,
+        bitDepth: 1,
+        loopEnable: false,
+        loopStart: 0,
+        loopEnd: Math.max(0, pcm16.length - 1),
+        pcm16,
+      };
+    });
+
+    // Build wavetable slots for FDS / N163 instruments (slots 0..1 reserved for defaults, 2+ for song waves)
+    const nextWavetables: FurnaceWavetable[] = [
+      { id: 0, name: 'Sine 32x32', width: 32, height: 31, data: buildSineWave(32, 31) },
+      {
+        id: 1,
+        name: 'Sawtooth 32x15',
+        width: 32,
+        height: 15,
+        data: Array.from({ length: 32 }, (_, i) => Math.round((i / 31) * 15)),
+      },
+    ];
+    let nextWaveSlot = 2;
+
+    // Build per-instrument macro + DPCM + wavetable + VRC7 mappings for EVERY FamiTracker instrument
+    const syncEntries: typeof this.ftmInstrumentSyncList = [];
+    for (const ins of mod.instruments) {
+      const findSeq = (seqType: number, seqIdx: number) =>
+        seqIdx >= 0
+          ? mod.sequences.find((s) => s.type === seqType && s.index === seqIdx && s.chip === ins.chip) ||
+            mod.sequences.find((s) => s.type === seqType && s.index === seqIdx)
+          : undefined;
+
+      const macros: Array<{ code: number; speed: number; loop: number; release: number; mode: number; values: number[] }> = [];
+      const ftmMacroSpec: NonNullable<typeof this.ftmInstrumentSyncList[number]['ftmMacroSpec']> = {};
+
+      const volSeq = findSeq(0, ins.seqIndices[0]);
+      if (volSeq && volSeq.items.length > 0) {
+        macros.push({
+          code: 0,
+          speed: 1,
+          loop: volSeq.loopPoint,
+          release: volSeq.releasePoint,
+          mode: 0,
+          values: volSeq.items.map((v) => Math.max(0, Math.min(127, Math.round((Math.max(0, v) / 15) * 127)))),
+        });
+      }
+      const arpSeq = findSeq(1, ins.seqIndices[1]);
+      if (arpSeq && arpSeq.items.length > 0) {
+        const isFixedArp = arpSeq.setting === 1;
+        let arpValues: number[];
+        if (isFixedArp) {
+          arpValues = arpSeq.items.map((v) => {
+            const unsignedNote = v < 0 ? v + 256 : v;
+            return Math.max(12, Math.min(119, unsignedNote + 12));
+          });
+        } else if (arpSeq.setting === 2) {
+          let acc = 0;
+          arpValues = arpSeq.items.map((v) => {
+            const delta = v > 127 ? v - 256 : v;
+            acc = Math.max(-36, Math.min(36, acc + delta));
+            return acc;
+          });
+        } else if (arpSeq.setting === 3) {
+          arpValues = arpSeq.items.map((v) => {
+            const signed6 = ((v & 0x3f) << 26) >> 26;
+            return Math.max(-36, Math.min(36, signed6));
+          });
+        } else {
+          arpValues = arpSeq.items.map((v) => Math.max(-36, Math.min(36, v > 127 ? v - 256 : v)));
+        }
+        ftmMacroSpec.arp = {
+          loop: arpSeq.loopPoint,
+          release: arpSeq.releasePoint,
+          mode: isFixedArp ? 1 : 0,
+          items: arpValues,
+        };
+        macros.push({
+          code: 1,
+          speed: 1,
+          loop: arpSeq.loopPoint,
+          release: arpSeq.releasePoint,
+          mode: isFixedArp ? 1 : 0,
+          values: arpValues,
+        });
+      }
+      const pitchSeq = findSeq(2, ins.seqIndices[2]);
+      if (pitchSeq && pitchSeq.items.length > 0) {
+        const pitchVals = pitchSeq.items.map((v) => Math.max(-128, Math.min(127, v > 127 ? v - 256 : v)));
+        ftmMacroSpec.pitch = {
+          loop: pitchSeq.loopPoint,
+          release: pitchSeq.releasePoint,
+          mode: pitchSeq.setting === 1 ? 1 : 0,
+          items: pitchVals,
+        };
+        macros.push({
+          code: 4,
+          speed: 1,
+          loop: pitchSeq.loopPoint,
+          release: pitchSeq.releasePoint,
+          mode: 2, // Mode 2 tells WASM Lane 3 not to clobber exact period-space pitch computed by stepGridTick
+          values: pitchVals,
+        });
+      }
+      const hiPitchSeq = findSeq(3, ins.seqIndices[3]);
+      if (hiPitchSeq && hiPitchSeq.items.length > 0) {
+        ftmMacroSpec.hiPitch = {
+          loop: hiPitchSeq.loopPoint,
+          release: hiPitchSeq.releasePoint,
+          mode: hiPitchSeq.setting === 1 ? 1 : 0,
+          items: hiPitchSeq.items.map((v) => Math.max(-128, Math.min(127, v > 127 ? v - 256 : v))),
+        };
+      }
+      const dutySeq = findSeq(4, ins.seqIndices[4]);
+      if (dutySeq && dutySeq.items.length > 0) {
+        macros.push({
+          code: 2,
+          speed: 1,
+          loop: dutySeq.loopPoint,
+          release: dutySeq.releasePoint,
+          mode: 0,
+          values: dutySeq.items.map((v) => Math.max(0, Math.min(15, v))),
+        });
+      }
+
+      const dpcmMaps: Array<{ note: number; sampleId: number; rateIdx: number; loop: boolean }> = [];
+      if (Array.isArray(ins.dpcmMap)) {
+        ins.dpcmMap.forEach((entry, k) => {
+          if (entry && entry.sampleIndex >= 0) {
+            const mappedSampleId = dmcIdxBySampleIndex.get(entry.sampleIndex) ?? entry.sampleIndex;
+            dpcmMaps.push({
+              note: k + 12, // FTM C-0 (k=0) -> MIDI 12
+              sampleId: mappedSampleId,
+              rateIdx: Math.max(0, Math.min(15, entry.pitch ?? 15)),
+              loop: Boolean(entry.loop),
+            });
+          }
+        });
+      }
+
+      let waveId: number | undefined;
+      if (ins.chip === 'FDS' && ins.fdsWave && ins.fdsWave.length > 0 && nextWaveSlot < 250) {
+        waveId = nextWaveSlot++;
+        nextWavetables.push({
+          id: waveId,
+          name: `${ins.name} FDS`,
+          width: ins.fdsWave.length,
+          height: 63,
+          data: Array.from(ins.fdsWave),
+        });
+      } else if (ins.chip === 'N163' && ins.n163Waves && ins.n163Waves.length > 0 && nextWaveSlot < 250) {
+        waveId = nextWaveSlot;
+        for (const w of ins.n163Waves) {
+          if (nextWaveSlot >= 250) break;
+          nextWavetables.push({
+            id: nextWaveSlot++,
+            name: `${ins.name} N163`,
+            width: w.length,
+            height: 15,
+            data: Array.from(w),
+          });
+        }
+      }
+
+      let vrc7Regs: Uint8Array | undefined;
+      if (ins.chip === 'VRC7') {
+        const patchIdx = ins.vrc7Patch ?? 0;
+        if (patchIdx === 0 && ins.vrc7CustomRegs && ins.vrc7CustomRegs.length >= 8) {
+          vrc7Regs = ins.vrc7CustomRegs;
+        } else if (patchIdx > 0 && patchIdx < VRC7_ROM_PATCHES.length) {
+          vrc7Regs = Uint8Array.from(VRC7_ROM_PATCHES[patchIdx]);
+        } else {
+          vrc7Regs = Uint8Array.from(VRC7_ROM_PATCHES[1]);
+        }
+      }
+
+      syncEntries.push({ instIdx: ins.index, waveId, vrc7Regs, ftmMacroSpec, macros, dpcmMaps });
+    }
+    this.ftmInstrumentSyncList = syncEntries;
+
+    // Populate UI macro preview from clean neutral lanes + first valid 2A03 instrument
+    const nextMacros = createDefaultMacros();
+    const first2A03Inst = mod.instruments.find((ins) => ins.chip === '2A03') || mod.instruments[0];
+    if (first2A03Inst) {
+      const entry = syncEntries.find((e) => e.instIdx === first2A03Inst.index);
+      const volM = entry?.macros.find((m) => m.code === 0);
+      if (volM) nextMacros.volume = { ...nextMacros.volume, values: volM.values, loop: volM.loop, release: volM.release };
+      const arpM = entry?.macros.find((m) => m.code === 1);
+      if (arpM) {
+        if (arpM.mode === 1) {
+          nextMacros.arpFixed = { ...nextMacros.arpFixed, values: arpM.values, loop: arpM.loop, release: arpM.release };
+        } else {
+          nextMacros.arpRel = { ...nextMacros.arpRel, values: arpM.values, loop: arpM.loop, release: arpM.release };
+        }
+      }
+      const pitchM = entry?.macros.find((m) => m.code === 4);
+      if (pitchM) nextMacros.pitch = { ...nextMacros.pitch, values: pitchM.values, loop: pitchM.loop, release: pitchM.release };
+      const dutyM = entry?.macros.find((m) => m.code === 2);
+      if (dutyM) nextMacros.duty = { ...nextMacros.duty, values: dutyM.values, loop: dutyM.loop, release: dutyM.release };
+    }
+
+    this.ftmChannelMapOverride = (mod.channels || []).slice(0, 48).map((ftCh) => {
+      let chipKind = 2; // NES Pulse default
+      let freqMul = 1.0;
+      let ftmChipIdx = mod.machine === 'PAL' ? 1 : 0;
+      let defaultDuty = ftCh.subChannel === 0 ? 1 : 2;
+      if (ftCh.chip === '2A03') {
+        chipKind =
+          ftCh.subChannel === 2 ? 3 : ftCh.subChannel === 3 ? 4 : ftCh.subChannel === 4 ? 5 : 2;
+        if (ftCh.subChannel === 2) {
+          // FamiTracker Triangle plays 1 octave lower than Pulse for the same written note (CPU / (32*(P+1)))
+          freqMul = 0.5;
+        } else if (ftCh.subChannel === 3) {
+          defaultDuty = 0; // Long white noise mode by default (short loop enabled explicitly via V01 or duty macro)
+        }
+      } else if (ftCh.chip === 'VRC6') {
+        chipKind = ftCh.subChannel === 2 ? 7 : 6;
+        if (ftCh.subChannel === 2) ftmChipIdx = 2;
+      } else if (ftCh.chip === 'VRC7') {
+        chipKind = 11;
+        ftmChipIdx = 3;
+      } else if (ftCh.chip === 'FDS') {
+        chipKind = 8;
+        ftmChipIdx = 4;
+      } else if (ftCh.chip === 'N163') {
+        chipKind = 8;
+        ftmChipIdx = 5;
+      } else if (ftCh.chip === 'MMC5') {
+        chipKind = ftCh.subChannel < 2 ? 2 : 5;
+      } else if (ftCh.chip === 'Sunsoft 5B') {
+        chipKind = 1;
+      }
+      return {
+        chipKind,
+        tuningHz: 440,
+        freqMul,
+        ftmChipIdx,
+        volume: 1.0,
+        pan: 0.0,
+        defaultDuty,
+      };
+    });
+
+    const totalCh = nextSystems.reduce((sum, s) => sum + s.channels, 0);
+    const title = mod.title || fileName.replace(/\.[^/.]+$/, '');
+    const song = mod.songs[0];
+    const conv = convertFamiTrackerToAriaPatterns(mod, 0);
+    const effectiveBpm = conv.bpm;
+
+    const seqChCount = Math.min(48, Math.max(5, mod.channels.length || totalCh));
+    const rowCap = Math.max(1, Math.min(256, song?.rowsPerPattern || conv.patterns.length || 64));
+    const frameList = song?.frameList && song.frameList.length > 0 ? song.frameList : [Array.from({ length: seqChCount }, () => 0)];
+
+    // Build gridOrders directly from parsed FTM cells so Pxx/Qxy/Rxy/Wxx/Yxx/Zxx/Hxy/Ixy/=xx never get mangled
+    const gridOrders = frameList.map((orderPats) => {
+      const patRows: Array<Array<{ midi: number; off: boolean; inst: number; vol: number; fx: Array<{ id: number; val: number }> }>> =
+        Array.from({ length: rowCap }, () =>
+          Array.from({ length: seqChCount }, () => ({ midi: -1, off: false, inst: -1, vol: -1, fx: [] }))
+        );
+      for (let ch = 0; ch < seqChCount; ch++) {
+        const patId = orderPats[ch] ?? 0;
+        const cells = song?.patterns[`${ch}:${patId}`] || [];
+        for (const cell of cells) {
+          if (cell.row < 0 || cell.row >= rowCap) continue;
+          const off = cell.note === 97 || cell.note === 98;
+          const midi = !off && cell.note >= 1 && cell.note <= 96 ? cell.note + 11 : -1;
+          const vol = cell.volume >= 0 ? Math.min(100, Math.round((cell.volume / 15) * 100)) : -1;
+          const fx: Array<{ id: number; val: number }> = [];
+          for (const eff of cell.effects) {
+            const id = ftmEffectToNumericId(eff.code);
+            if (id >= 0) {
+              fx.push({ id, val: eff.param & 0xff });
+            }
+          }
+          patRows[cell.row][ch] = {
+            midi,
+            off,
+            inst: cell.instrument >= 0 ? cell.instrument : -1,
+            vol,
+            fx,
+          };
+        }
+      }
+      return patRows;
+    });
+
+    this.pendingTempoScale = 1.0;
+    this.pendingGridSong = {
+      orders: gridOrders,
+      channelCount: seqChCount,
+      speed: Math.max(1, Math.min(31, song?.speed || 6)),
+      tempo: Math.max(32, Math.min(255, song?.tempo || 150)),
+      machine: mod.machine,
+      engineSpeedHz: mod.engineSpeedHz || 0,
+      vibratoStyle: mod.vibratoStyle ?? 1,
+      detuneTable: mod.detuneTable,
+      rowsPerPattern: rowCap,
+    };
+
+    this.state = {
+      ...this.state,
+      loadedSongName: title,
+      systems: nextSystems,
+      activeInstIndex: first2A03Inst?.index ?? 0,
+      wavetables: nextWavetables,
+      activeWavetableIndex: nextWavetables.length > 2 ? 2 : 0,
+      samples: decodedSamples,
+      activeSampleIndex: 0,
+      macros: nextMacros,
+      totalChannels: totalCh,
+      isPlaying: false,
+    };
+
+    this.syncFullStateToWasm();
+    this.notify();
+
+    return {
+      title,
+      bpm: effectiveBpm,
+      channelsCount: Math.max(5, Math.min(48, mod.channelsCount || totalCh)),
+      chipNames: nextSystems.map((s) => s.name),
     };
   }
 }

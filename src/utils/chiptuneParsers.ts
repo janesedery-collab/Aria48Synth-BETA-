@@ -74,18 +74,8 @@ export interface ChiptuneImportResult {
   rawMidiBuffer?: ArrayBuffer;
   rawSidBuffer?: ArrayBuffer;
   rawSunVoxBuffer?: ArrayBuffer;
-  rawFamiTrackerBuffer?: ArrayBuffer;
+  rawFurnaceBuffer?: ArrayBuffer;
   sidMetadata?: SidHeaderMetadata;
-  famiTrackerMeta?: {
-    format: 'ftm' | '0cc' | 'dnm';
-    title: string;
-    author: string;
-    expansions: string[];
-    machine: string;
-    subsongsCount: number;
-    maxFxColumns?: number;
-    channels: { index: number; name: string; chip: string }[];
-  };
   channelSoundFonts?: { [channelId: number]: string };
   sequenceMetadata?: LoadedSequenceMetadata;
 }
@@ -321,9 +311,18 @@ export async function parseChiptuneFileAsync(
       result.bpm = furInfo.bpm;
       result.channelsCount = furInfo.channelsCount;
       result.chipType = 'Furnace (WASM Chip Core)';
+      result.rawFurnaceBuffer = arrayBuffer.slice(0);
       result.log.push(`[FURNACE] Decoded .fur module "${furInfo.title}" (${furInfo.channelsCount} ch)`);
     } catch (err: any) {
       result.log.push(`[FURNACE] .fur decode note: ${err?.message || 'Metadata fallback'}`);
+    }
+  } else if (isFamiTrackerFileName(fileName)) {
+    try {
+      const furInfo = FurnaceBridge.loadFamiTrackerBuffer(arrayBuffer, fileName);
+      result.rawFurnaceBuffer = arrayBuffer.slice(0);
+      result.log.push(`[FURNACE] Diverted ${extension.toUpperCase()} module "${furInfo.title}" into Furnace Tracker Engine (${furInfo.chipNames.join(' + ')})`);
+    } catch (err: any) {
+      result.log.push(`[FURNACE] FTM diversion note: ${err?.message || 'Fallback to pattern grid'}`);
     }
   } else if (
     (extension === '.wav' || extension === '.mp3' || extension === '.ogg' || extension === '.flac') &&
@@ -350,7 +349,7 @@ export async function parseChiptuneFileAsync(
 
 function parseFurnaceModulePlaceholder(
   fileName: string,
-  _arrayBuffer: ArrayBuffer,
+  arrayBuffer: ArrayBuffer,
   logs: string[]
 ): ChiptuneImportResult {
   const pat = createEmptyPattern(10);
@@ -363,6 +362,7 @@ function parseFurnaceModulePlaceholder(
     title,
     duration: '2:00',
     channelsCount: 10,
+    rawFurnaceBuffer: arrayBuffer.slice(0),
     log: [...logs, `[FURNACE] Registered .FUR module "${title}" for DivEngine WASM playback.`],
   };
 }
@@ -814,21 +814,11 @@ function parseFTM(arrayBuffer: ArrayBuffer, logs: string[], fileName = 'module.f
     fileName,
     duration: formatDuration(conv.durationSeconds),
     channelsCount: conv.channelsCount,
-    rawFamiTrackerBuffer: arrayBuffer.slice(0),
-    famiTrackerMeta: {
-      format: mod.format,
-      title: mod.title,
-      author: mod.author,
-      expansions: mod.expansions,
-      machine: mod.machine,
-      subsongsCount: mod.songs.length,
-      maxFxColumns: mod.maxFxColumns,
-      channels: mod.channels.map((c) => ({ index: c.index, name: c.name, chip: c.chip })),
-    },
+    rawFurnaceBuffer: arrayBuffer.slice(0),
     log: [
       ...logs,
       ...mod.parseNotes,
-      `[FAMITRACKER] Parsed ${mod.format.toUpperCase()} ("${mod.title}") · ${conv.channelsCount} ch · ${mod.instruments.length} inst · ${mod.dpcmSamples.length} DPCM · Expansions: ${mod.expansions.join(', ')}`
+      `[FURNACE] Parsed ${mod.format.toUpperCase()} ("${mod.title}") -> Diverted to Furnace Engine · ${conv.channelsCount} ch · ${mod.instruments.length} inst · ${mod.dpcmSamples.length} DPCM · Expansions: ${mod.expansions.join(', ')}`
     ]
   };
 }

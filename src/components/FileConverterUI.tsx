@@ -9,7 +9,7 @@ import {
 } from '../utils/chiptuneExporters';
 import { getSoundFontBankInfo, getAvailableSoundFontInstruments, getGmProgramForPreset } from '../utils/soundFontEngine';
 import {
-  NesWorkletEngine,
+  FurnaceBridge,
   SunVoxBridge,
   TinyRsidBridge,
   WorkletSynthBridge,
@@ -60,7 +60,7 @@ interface FileConverterUIProps {
     rawSidBuffer?: ArrayBuffer,
     sidMetadata?: SidHeaderMetadata,
     rawSunVoxBuffer?: ArrayBuffer,
-    rawFamiTrackerBuffer?: ArrayBuffer
+    rawFurnaceBuffer?: ArrayBuffer
   ) => void;
 }
 
@@ -78,7 +78,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
   const [parsedRawMidiBuffer, setParsedRawMidiBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedRawSidBuffer, setParsedRawSidBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedRawSunVoxBuffer, setParsedRawSunVoxBuffer] = useState<ArrayBuffer | null>(null);
-  const [parsedRawFamiTrackerBuffer, setParsedRawFamiTrackerBuffer] = useState<ArrayBuffer | null>(null);
+  const [parsedRawFurnaceBuffer, setParsedRawFurnaceBuffer] = useState<ArrayBuffer | null>(null);
   const [parsedSidMetadata, setParsedSidMetadata] = useState<SidHeaderMetadata | null>(null);
   const [parsedHvscLookup, setParsedHvscLookup] = useState<HvscLookupResult | null>(null);
   const [parsedChannelSoundFonts, setParsedChannelSoundFonts] = useState<{ [ch: number]: string } | null>(null);
@@ -231,7 +231,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         setParsedRawMidiBuffer(result.rawMidiBuffer || null);
         setParsedRawSidBuffer(result.rawSidBuffer || null);
         setParsedRawSunVoxBuffer(result.rawSunVoxBuffer || null);
-        setParsedRawFamiTrackerBuffer(result.rawFamiTrackerBuffer || null);
+        setParsedRawFurnaceBuffer(result.rawFurnaceBuffer || null);
         setParsedSidMetadata(result.sidMetadata || null);
         if (result.sidMetadata) {
           setParsedHvscLookup(lookupHvscForSid(result.sidMetadata, result.sidMetadata.startSong));
@@ -431,20 +431,19 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
         `[SYSTEM] Loaded SunVox WASM project: '${incomingName}'`,
         ...res.log
       ]);
-      setParsedRawFamiTrackerBuffer(null);
+      setParsedRawFurnaceBuffer(null);
     } else if (isFamiTrackerFileName(incomingName)) {
       setParsedRawSidBuffer(null);
       setParsedRawSunVoxBuffer(null);
       setParsedSidMetadata(null);
       setParsedHvscLookup(null);
       unlockAudioContextSync();
-      NesWorkletEngine.loadModule(buf.slice(0), incomingName);
       const res = await parseChiptuneFileAsync(incomingName, buf);
       setParsedPatterns(res.patterns);
       setParsedAllPatterns(res.allPatterns || [res.patterns]);
       setParsedAudioBuffer(null);
       setParsedRawMidiBuffer(null);
-      setParsedRawFamiTrackerBuffer(res.rawFamiTrackerBuffer || buf.slice(0));
+      setParsedRawFurnaceBuffer(res.rawFurnaceBuffer || buf.slice(0));
       setParsedChannelSoundFonts(null);
       setParsedBpm(res.bpm);
       setParsedDuration(res.duration || '1:30');
@@ -453,13 +452,36 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
       setParsedChannelsCount(res.channelsCount || 5);
       setParsedOctaveRange(res.octaveRange || 'C-2 - B-6');
       setConversionLog([
-        `[SYSTEM] Loaded FamiTracker / Dn-FamiTracker module: '${incomingName}'`,
+        `[FURNACE] Loaded ${incomingName} & diverted to Furnace Tracker Engine:`,
+        ...res.log
+      ]);
+    } else if (lower.endsWith('.fur')) {
+      setParsedRawSidBuffer(null);
+      setParsedRawSunVoxBuffer(null);
+      setParsedSidMetadata(null);
+      setParsedHvscLookup(null);
+      unlockAudioContextSync();
+      const res = await parseChiptuneFileAsync(incomingName, buf);
+      setParsedPatterns(res.patterns);
+      setParsedAllPatterns(res.allPatterns || [res.patterns]);
+      setParsedAudioBuffer(null);
+      setParsedRawMidiBuffer(null);
+      setParsedRawFurnaceBuffer(res.rawFurnaceBuffer || buf.slice(0));
+      setParsedChannelSoundFonts(null);
+      setParsedBpm(res.bpm);
+      setParsedDuration(res.duration || '2:00');
+      setParsedTitle(res.title || incomingName);
+      setParsedChipType(res.chipType);
+      setParsedChannelsCount(res.channelsCount || 10);
+      setParsedOctaveRange(res.octaveRange || 'C-2 - B-6');
+      setConversionLog([
+        `[FURNACE] Loaded Furnace module '${incomingName}'`,
         ...res.log
       ]);
     } else {
       setParsedRawSidBuffer(null);
       setParsedRawSunVoxBuffer(null);
-      setParsedRawFamiTrackerBuffer(null);
+      setParsedRawFurnaceBuffer(null);
       setParsedSidMetadata(null);
       setParsedHvscLookup(null);
       setConversionLog([`[SYSTEM] Loaded document: '${incomingName}'`]);
@@ -1072,9 +1094,9 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                </button>
              )}
 
-             {parsedRawFamiTrackerBuffer && parsedPatterns && onImportSequence && !convertedFileUrl && (
+             {parsedRawFurnaceBuffer && parsedPatterns && onImportSequence && !convertedFileUrl && (
                <button
-                 id="famitracker-load-workstation-btn"
+                 id="furnace-load-workstation-btn"
                  onClick={() => {
                    unlockAudioContextSync();
                    onImportSequence(
@@ -1093,12 +1115,12 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                      undefined,
                      undefined,
                      undefined,
-                     parsedRawFamiTrackerBuffer
+                     parsedRawFurnaceBuffer
                    );
                  }}
-                 className="w-full py-2.5 bg-rose-950/70 hover:bg-rose-900/80 text-rose-300 border border-rose-500/50 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(244,63,94,0.22)] font-mono"
+                 className="w-full py-2.5 bg-amber-950/70 hover:bg-amber-900/80 text-amber-300 border border-amber-500/50 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(245,158,11,0.22)] font-mono"
                >
-                 <span>▶ PLAY IN FAMITRACKER / BITPHASE NES ENGINE</span>
+                 <span>▶ PLAY IN FURNACE TRACKER ENGINE</span>
                </button>
              )}
 
@@ -1142,7 +1164,7 @@ export default function FileConverterUI({ onImportSequence }: FileConverterUIPro
                           parsedRawSidBuffer || undefined,
                           parsedSidMetadata || undefined,
                           parsedRawSunVoxBuffer || undefined,
-                          parsedRawFamiTrackerBuffer || undefined
+                          parsedRawFurnaceBuffer || undefined
                         );
                       }}
                       className="w-full py-3 bg-cyan-950/60 hover:bg-cyan-900/70 text-cyan-400 border border-cyan-800/40 hover:text-white rounded-xl font-bold text-xs uppercase tracking-widest transition cursor-pointer flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(34,211,238,0.1)] font-mono duration-300"

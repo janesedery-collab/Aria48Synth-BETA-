@@ -17,7 +17,10 @@ class AriaFurnaceProcessor extends AudioWorkletProcessor {
     this.readPtr = 0;
     this.writePtr = 0;
     this.active = false;
-    this.underruns = 0;
+    this.lastL = 0;
+    this.lastR = 0;
+    this.awaitingFrames = false;
+    this.quantumsSinceRequest = 0;
 
     this.port.onmessage = (ev) => {
       const msg = ev.data;
@@ -34,20 +37,41 @@ class AriaFurnaceProcessor extends AudioWorkletProcessor {
             this.readPtr = (this.readPtr + 1) & (this.ringSize - 1);
           }
         }
+        this.awaitingFrames = false;
+        this.quantumsSinceRequest = 0;
         this.active = true;
       } else if (msg.type === 'clear') {
         this.readPtr = 0;
         this.writePtr = 0;
+        this.lastL = 0;
+        this.lastR = 0;
+        this.awaitingFrames = false;
+        this.quantumsSinceRequest = 0;
         this.ringL.fill(0);
         this.ringR.fill(0);
       } else if (msg.type === 'active') {
         this.active = !!msg.value;
+        if (!this.active) {
+          this.awaitingFrames = false;
+          this.quantumsSinceRequest = 0;
+        }
       }
     };
   }
 
   availableSamples() {
     return (this.writePtr - this.readPtr) & (this.ringSize - 1);
+  }
+
+  requestMoreIfNeeded() {
+    if (!this.active) return;
+    if (this.awaitingFrames) {
+      this.quantumsSinceRequest++;
+      if (this.quantumsSinceRequest < 4) return;
+    }
+    this.awaitingFrames = true;
+    this.quantumsSinceRequest = 0;
+    this.port.postMessage({ type: 'need_frames', missing: 1024 });
   }
 
   process(_inputs, outputs) {
@@ -61,28 +85,36 @@ class AriaFurnaceProcessor extends AudioWorkletProcessor {
     if (!this.active || avail < frames) {
       for (let i = 0; i < frames; i++) {
         if (i < avail && this.active) {
-          outL[i] = this.ringL[this.readPtr];
-          outR[i] = this.ringR[this.readPtr];
+          this.lastL = this.ringL[this.readPtr];
+          this.lastR = this.ringR[this.readPtr];
+          outL[i] = this.lastL;
+          outR[i] = this.lastR;
           this.readPtr = (this.readPtr + 1) & (this.ringSize - 1);
         } else {
-          outL[i] = 0;
-          outR[i] = 0;
+          this.lastL *= 0.92;
+          this.lastR *= 0.92;
+          outL[i] = this.lastL;
+          outR[i] = this.lastR;
         }
       }
-      if (this.active && avail < frames * 4) {
-        this.port.postMessage({ type: 'need_frames', missing: 1024 });
+      if (this.active && avail < 4096) {
+        this.requestMoreIfNeeded();
       }
       return true;
     }
 
     for (let i = 0; i < frames; i++) {
-      outL[i] = this.ringL[this.readPtr];
-      outR[i] = this.ringR[this.readPtr];
+      const sL = this.ringL[this.readPtr];
+      const sR = this.ringR[this.readPtr];
+      outL[i] = sL;
+      outR[i] = sR;
       this.readPtr = (this.readPtr + 1) & (this.ringSize - 1);
     }
+    this.lastL = outL[frames - 1];
+    this.lastR = outR[frames - 1];
 
-    if (this.availableSamples() < 2048) {
-      this.port.postMessage({ type: 'need_frames', missing: 1024 });
+    if (this.availableSamples() < 4096) {
+      this.requestMoreIfNeeded();
     }
     return true;
   }

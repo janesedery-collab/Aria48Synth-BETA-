@@ -25,45 +25,53 @@ import { buildFamiTrackerChannelDescriptors, decodeExpansionMask } from './dnEff
 
 const FTM_NOTE_NAMES = ['C-', 'C#', 'D-', 'D#', 'E-', 'F-', 'F#', 'G-', 'G#', 'A-', 'A#', 'B-'];
 
-// Standard FamiTracker effect ID table (mapped by binary enum id from FamiTracker source)
+// Official FamiTracker / 0CC-FamiTracker / Dn-FamiTracker effect_t enum IDs (0x00..0x2C)
 const FTM_EFFECT_CHARS = [
-  '.', // 0: EF_NONE
-  'F', // 1: EF_SPEED
-  'B', // 2: EF_JUMP
-  'D', // 3: EF_SKIP
-  'C', // 4: EF_HALT
-  'E', // 5: EF_VOLUME
-  '3', // 6: EF_PORTAMENTO
-  '.', // 7: EF_PORTAOFF (legacy)
-  'H', // 8: EF_SWEEPUP
-  'I', // 9: EF_SWEEPDOWN
-  '0', // 10: EF_ARPEGGIO
-  '4', // 11: EF_VIBRATO
-  '7', // 12: EF_TREMOLO
-  'P', // 13: EF_PITCH
-  'G', // 14: EF_DELAY
-  'Z', // 15: EF_DAC
-  '1', // 16: EF_PORTA_UP
-  '2', // 17: EF_PORTA_DOWN
-  'V', // 18: EF_DUTY_CYCLE
-  'Y', // 19: EF_SAMPLE_OFFSET
-  'Q', // 20: EF_SLIDE_UP
-  'R', // 21: EF_SLIDE_DOWN
-  'A', // 22: EF_VOLUME_SLIDE
-  'S', // 23: EF_NOTE_CUT
-  'X', // 24: EF_RETRIGGER
-  'S', // 25: EF_DELAYED_VOLUME (legacy alias)
-  'W', // 26: EF_DPCM_PITCH / FDS_MOD_SPEED_HI
-  'J', // 27: EF_SUNSOFT_ENV_TYPE / FDS_MOD_DEPTH
-  'H', // 28: EF_FDS_MOD_SPEED_HI
-  'I', // 29: EF_FDS_MOD_SPEED_LO
-  'Z', // 30: EF_FDS_MOD_BIAS
-  'O', // 31: EF_GROOVE
-  'T', // 32: EF_TRANSPOSE
-  'N', // 33: EF_N163_WAVE_BUFFER / Dn target vol slide
-  'L', // 34: EF_NOTE_RELEASE
-  '=', // 35: EF_PHASE_RESET (Dn-FamiTracker)
-  'K', // 36: EF_FREQ_MULTIPLIER (Dn-FamiTracker)
+  '.', // 0x00: EF_NONE
+  'F', // 0x01: EF_SPEED
+  'B', // 0x02: EF_JUMP
+  'D', // 0x03: EF_SKIP
+  'C', // 0x04: EF_HALT
+  'E', // 0x05: EF_VOLUME
+  '3', // 0x06: EF_PORTAMENTO
+  '3', // 0x07: EF_PORTAOFF (legacy alias -> 300 disables portamento)
+  'H', // 0x08: EF_SWEEPUP
+  'I', // 0x09: EF_SWEEPDOWN
+  '0', // 0x0A: EF_ARPEGGIO
+  '4', // 0x0B: EF_VIBRATO
+  '7', // 0x0C: EF_TREMOLO
+  'P', // 0x0D: EF_PITCH
+  'G', // 0x0E: EF_DELAY
+  'Z', // 0x0F: EF_DAC
+  '1', // 0x10: EF_PORTA_UP
+  '2', // 0x11: EF_PORTA_DOWN
+  'V', // 0x12: EF_DUTY_CYCLE
+  'Y', // 0x13: EF_SAMPLE_OFFSET
+  'Q', // 0x14: EF_SLIDE_UP
+  'R', // 0x15: EF_SLIDE_DOWN
+  'A', // 0x16: EF_VOLUME_SLIDE
+  'S', // 0x17: EF_NOTE_CUT
+  'X', // 0x18: EF_RETRIGGER
+  'M', // 0x19: EF_DELAYED_VOLUME
+  'H', // 0x1A: EF_FDS_MOD_DEPTH
+  'I', // 0x1B: EF_FDS_MOD_SPEED_HI
+  'J', // 0x1C: EF_FDS_MOD_SPEED_LO
+  'W', // 0x1D: EF_DPCM_PITCH
+  'H', // 0x1E: EF_SUNSOFT_ENV_TYPE
+  'I', // 0x1F: EF_SUNSOFT_ENV_HI
+  'J', // 0x20: EF_SUNSOFT_ENV_LO
+  'W', // 0x21: EF_SUNSOFT_NOISE
+  '.', // 0x22: EF_VRC7_PORT
+  '.', // 0x23: EF_VRC7_WRITE
+  'L', // 0x24: EF_NOTE_RELEASE
+  'O', // 0x25: EF_GROOVE
+  'T', // 0x26: EF_TRANSPOSE
+  'Z', // 0x27: EF_N163_WAVE_BUFFER
+  'E', // 0x28: EF_FDS_VOLUME
+  'Z', // 0x29: EF_FDS_MOD_BIAS
+  '=', // 0x2A: EF_PHASE_RESET (Dn-FamiTracker)
+  'K', // 0x2B: EF_HARMONIC (Dn-FamiTracker)
+  'N', // 0x2C: EF_TARGET_VOLUME_SLIDE (Dn-FamiTracker)
 ];
 
 class BinaryCursor {
@@ -219,6 +227,10 @@ function instTypeToChip(instType: number): ExpansionChipName {
 
 function decodeEffectPair(effCode: number, effParam: number): FamiTrackerEffectEntry | null {
   if (effCode <= 0) return null;
+  if (effCode === 7) {
+    // Legacy EF_PORTAOFF -> emit 300 to turn portamento off cleanly
+    return { code: '3', param: 0, token: '300' };
+  }
   const cmdChar =
     effCode < FTM_EFFECT_CHARS.length
       ? FTM_EFFECT_CHARS[effCode]
@@ -238,8 +250,12 @@ function decodeEffectPair(effCode: number, effParam: number): FamiTrackerEffectE
 }
 
 function toAriaFxToken(eff: FamiTrackerEffectEntry): string {
-  // Preserve 4-char Aria48 cell tokens cleanly while distinguishing Dn-FT extensions
+  // Translate FamiTracker effects into 4-char Furnace hex effect tokens so
+  // diverted .ftm/.0cc/.dnm patterns drive FurnaceBridge cleanly.
   const hex = eff.param.toString(16).toUpperCase().padStart(2, '0');
+  if (eff.code === 'S') return `EC${hex}`; // Note Cut -> Furnace ECxx
+  if (eff.code === 'G') return `ED${hex}`; // Note Delay -> Furnace EDxx
+  if (eff.code === 'V') return `12${hex}`; // Duty Cycle -> Furnace 12xx
   if (eff.code === '=') return `=${hex}`;
   if (eff.code === 'N') return `N${hex}`;
   if (eff.code === 'K') return `K${hex}`;
@@ -322,6 +338,8 @@ export function parseFamiTrackerBinary(
   const fxColumnsByChannel: number[] = [];
   const fxColumnsByTrack: number[][] = [[]];
   const headerChannelIds: number[] = [];
+  const detuneTable = new Array<number>(6 * 96).fill(0);
+  let hasDetuneTable = false;
 
   const isPlausibleNameHeader = (pos: number): boolean => {
     if (pos + 4 > cur.length) return false;
@@ -359,16 +377,17 @@ export function parseFamiTrackerBinary(
       const seqIdx = cur.u32Read();
       const seqType = cur.u32Read();
       const itemCount = cur.u8Read();
-      if (seqIdx > 512 || seqType > 5) return { ok: false, endPos: cur.pos, items: out };
+      if (seqIdx > 1024 || seqType > 5) return { ok: false, endPos: cur.pos, items: out };
       const loopPoint = layout === 'v1' ? -1 : cur.i32Read();
       const releasePoint = layout === 'v4' || layout === 'v3' ? cur.i32Read() : -1;
       const setting = layout === 'v4' ? cur.u32Read() : 0;
-      if (loopPoint < -1 || loopPoint > 256 || releasePoint < -1 || releasePoint > 256 || setting > 64) {
+      if (loopPoint < -1 || loopPoint > 256 || releasePoint < -1 || releasePoint > 256 || setting > 4096) {
         return { ok: false, endPos: cur.pos, items: out };
       }
       if (cur.pos + itemCount > blockEnd) return { ok: false, endPos: cur.pos, items: out };
       const items: number[] = [];
       for (let k = 0; k < itemCount; k++) {
+        // Sequence items (pitch, hi-pitch, arpeggio, volume, duty) are stored as signed 8-bit integers
         items.push(cur.i8Read());
       }
       out.push({
@@ -387,7 +406,7 @@ export function parseFamiTrackerBinary(
         for (let i = 0; i < count; i++) {
           const rel = cur.i32Read();
           const set = cur.u32Read();
-          if (rel < -1 || rel > 256 || set > 64) {
+          if (rel < -1 || rel > 256 || set > 4096) {
             return { ok: false, endPos: cur.pos, items: out };
           }
           out[i].releasePoint = rel;
@@ -499,7 +518,7 @@ export function parseFamiTrackerBinary(
                 : blockId === 'SEQUENCES_S5B'
                   ? 'Sunsoft 5B'
                   : '2A03';
-          const count = Math.min(512, cur.u32Read());
+          const count = Math.min(1024, cur.u32Read());
           if (count > 0) {
             const startPos = cur.pos;
             const candidates: Array<'v6' | 'v5' | 'v4' | 'v3' | 'v2' | 'v1'> =
@@ -538,7 +557,29 @@ export function parseFamiTrackerBinary(
           }
         } else if (blockId === 'INSTRUMENTS') {
           const count = Math.min(128, cur.u32Read());
+          const looksLikeInstBoundary = (pos: number, isLast: boolean): boolean => {
+            if (isLast) return pos === blockEnd;
+            if (pos + 5 > blockEnd) return false;
+            const saved = cur.pos;
+            cur.seek(pos);
+            const nextIdx = cur.u32Read();
+            const nextType = cur.u8Read();
+            cur.seek(saved);
+            return nextIdx < 128 && nextType >= 1 && nextType <= 6;
+          };
+          const validateNameThenBoundary = (nameHeaderPos: number, isLast: boolean): boolean => {
+            if (nameHeaderPos + 4 > blockEnd || !isPlausibleNameHeader(nameHeaderPos)) return false;
+            const saved = cur.pos;
+            cur.seek(nameHeaderPos);
+            const nLen = cur.u32Read();
+            cur.seek(saved);
+            const afterName = nameHeaderPos + 4 + nLen;
+            if (afterName > blockEnd) return false;
+            return looksLikeInstBoundary(afterName, isLast);
+          };
+
           for (let i = 0; i < count && cur.pos + 5 <= blockEnd; i++) {
+            const isLastInst = i === count - 1;
             const instIdx = cur.u32Read();
             const instType = cur.u8Read();
             const chip = instTypeToChip(instType);
@@ -560,18 +601,37 @@ export function parseFamiTrackerBinary(
 
               if (instType === 1) {
                 // 2A03 DPCM Keymap Table (v1: 72*2=144 bytes, v2..v5: 96*2=192 bytes, v6+: 96*3=288 bytes)
-                const keysCount = blockVersion === 1 ? 72 : 96;
                 const remainingBytes = blockEnd - cur.pos;
-                let hasDeltaByte = blockVersion >= 6;
-                if (blockVersion >= 6) {
-                  // Verify 288 vs 192 bytes cleanly using the trailing instrument name length header
-                  const canBe3 = remainingBytes >= keysCount * 3 + 4 && isPlausibleNameHeader(cur.pos + keysCount * 3);
-                  const canBe2 = remainingBytes >= keysCount * 2 + 4 && isPlausibleNameHeader(cur.pos + keysCount * 2);
-                  if (!canBe3 && canBe2) hasDeltaByte = false;
-                } else if (remainingBytes >= keysCount * 3 + 4 && !isPlausibleNameHeader(cur.pos + keysCount * 2) && isPlausibleNameHeader(cur.pos + keysCount * 3)) {
-                  hasDeltaByte = true;
+                const candidatePairs: Array<[number, number]> =
+                  blockVersion >= 6
+                    ? [[96, 3], [96, 2], [72, 2], [72, 3]]
+                    : blockVersion >= 2
+                      ? [[96, 2], [96, 3], [72, 2]]
+                      : [[72, 2], [96, 2], [96, 3]];
+
+                let keysCount = blockVersion === 1 ? 72 : 96;
+                let entryBytes = blockVersion >= 6 ? 3 : 2;
+                let matchedExact = false;
+
+                for (const [kc, eb] of candidatePairs) {
+                  if (remainingBytes >= kc * eb + 4 && validateNameThenBoundary(cur.pos + kc * eb, isLastInst)) {
+                    keysCount = kc;
+                    entryBytes = eb;
+                    matchedExact = true;
+                    break;
+                  }
                 }
-                const entryBytes = hasDeltaByte ? 3 : 2;
+                if (!matchedExact) {
+                  for (const [kc, eb] of candidatePairs) {
+                    if (remainingBytes >= kc * eb + 4 && isPlausibleNameHeader(cur.pos + kc * eb)) {
+                      keysCount = kc;
+                      entryBytes = eb;
+                      break;
+                    }
+                  }
+                }
+
+                const hasDeltaByte = entryBytes === 3;
                 if (cur.pos + keysCount * entryBytes <= blockEnd) {
                   const dpcmMap: { pitch: number; loop: boolean; sampleIndex: number; deltaCounter: number }[] =
                     Array.from({ length: 96 }, () => ({
@@ -739,22 +799,93 @@ export function parseFamiTrackerBinary(
           }
           const totalPatCells = Object.values(songs[0].patterns).reduce((s, r) => s + r.length, 0);
           parseNotes.push(`[PATTERNS] Decoded ${totalPatCells} non-empty FamiTracker events.`);
-        } else if (blockId === 'DPCM SAMPLES') {
-          const count = Math.min(64, cur.u32Read());
-          for (let i = 0; i < count && cur.pos < blockEnd; i++) {
-            const entryStart = cur.pos;
-            const looksLikeU8Idx = cur.pos + 9 <= blockEnd && isPlausibleNameHeader(cur.pos + 1);
-            const looksLikeU32Idx = cur.pos + 12 <= blockEnd && isPlausibleNameHeader(cur.pos + 4);
-            const idx = !looksLikeU8Idx && looksLikeU32Idx ? cur.u32Read() : cur.u8Read();
-            const name = cur.lenString() || `DPCM_${idx}`;
-            const rawSize = cur.u32Read();
-            const size = Math.max(0, Math.min(blockEnd - cur.pos, Math.min(65536, rawSize)));
-            if (cur.pos <= entryStart) break;
-            const data = cur.bytes(size);
-            dpcmSamples.push({ index: idx, name, data });
+        } else if (blockId === 'DPCM SAMPLES' || blockId === 'DSAMPLES') {
+          const dpcmBlockStart = cur.pos;
+          const tryReadDpcmLayout = (
+            countBytes: 1 | 4,
+            idxBytes: 1 | 4
+          ): { ok: boolean; endPos: number; items: FamiTrackerDpcmSample[] } => {
+            cur.seek(dpcmBlockStart);
+            if (cur.pos + countBytes > blockEnd) return { ok: false, endPos: cur.pos, items: [] };
+            const rawCount = countBytes === 1 ? cur.u8Read() : cur.u32Read();
+            if (rawCount > 128) return { ok: false, endPos: cur.pos, items: [] };
+            if (rawCount === 0) {
+              return { ok: cur.pos === blockEnd, endPos: cur.pos, items: [] };
+            }
+            const parsed: FamiTrackerDpcmSample[] = [];
+            for (let i = 0; i < rawCount; i++) {
+              if (cur.pos + idxBytes + 8 > blockEnd) return { ok: false, endPos: cur.pos, items: parsed };
+              const idx = idxBytes === 1 ? cur.u8Read() : cur.u32Read();
+              if (idx > 127) return { ok: false, endPos: cur.pos, items: parsed };
+              if (!isPlausibleNameHeader(cur.pos)) return { ok: false, endPos: cur.pos, items: parsed };
+              const nameLen = cur.u32Read();
+              if (nameLen > 256 || cur.pos + nameLen + 4 > blockEnd) {
+                return { ok: false, endPos: cur.pos, items: parsed };
+              }
+              const name = (nameLen > 0 ? cur.fixedString(nameLen) : '') || `DPCM_${idx}`;
+              const rawSize = cur.u32Read();
+              if (rawSize > 65536 || cur.pos + rawSize > blockEnd) {
+                return { ok: false, endPos: cur.pos, items: parsed };
+              }
+              const data = cur.bytes(rawSize);
+              parsed.push({ index: idx, name, data });
+            }
+            return { ok: cur.pos === blockEnd, endPos: cur.pos, items: parsed };
+          };
+
+          // Try all official FamiTracker / 0CC / Dn binary DSAMPLES header combinations
+          const layouts: Array<[1 | 4, 1 | 4]> = [
+            [1, 1], // Official FamiTracker: u8 count, u8 idx
+            [4, 1], // u32 count, u8 idx
+            [4, 4], // u32 count, u32 idx
+            [1, 4], // u8 count, u32 idx
+          ];
+          let chosenSamples: FamiTrackerDpcmSample[] | null = null;
+          let fallbackSamples: FamiTrackerDpcmSample[] = [];
+          let fallbackDelta = Number.MAX_SAFE_INTEGER;
+
+          for (const [cb, ib] of layouts) {
+            const res = tryReadDpcmLayout(cb, ib);
+            if (res.ok) {
+              chosenSamples = res.items;
+              break;
+            }
+            const delta = Math.abs(blockEnd - res.endPos);
+            if (
+              res.items.length > fallbackSamples.length ||
+              (res.items.length === fallbackSamples.length && delta < fallbackDelta)
+            ) {
+              fallbackSamples = res.items;
+              fallbackDelta = delta;
+            }
           }
+
+          const finalDpcm = chosenSamples || fallbackSamples;
+          dpcmSamples.push(...finalDpcm);
           if (dpcmSamples.length > 0) {
             parseNotes.push(`[DPCM] Loaded ${dpcmSamples.length} hardware 1-bit delta sample(s).`);
+          }
+        } else if (blockId === 'DETUNETABLES') {
+          if (blockSize === 6 * 96 * 4) {
+            for (let idx = 0; idx < 6 * 96 && cur.pos + 4 <= blockEnd; idx++) {
+              const offset = cur.i32Read();
+              detuneTable[idx] = offset;
+              if (offset !== 0) hasDetuneTable = true;
+            }
+          } else if (cur.pos < blockEnd) {
+            const count = cur.u8Read();
+            for (let i = 0; i < count && cur.pos + 6 <= blockEnd; i++) {
+              const chip = cur.u8Read();
+              const note = cur.u8Read();
+              const offset = cur.i32Read();
+              if (chip < 6 && note < 96) {
+                detuneTable[chip * 96 + note] = offset;
+                if (offset !== 0) hasDetuneTable = true;
+              }
+            }
+          }
+          if (hasDetuneTable) {
+            parseNotes.push('[DETUNE] Loaded custom per-chip hardware detune tuning table.');
           }
         }
       } catch (blockErr: any) {
@@ -811,6 +942,7 @@ export function parseFamiTrackerBinary(
     sequences,
     instruments,
     dpcmSamples,
+    detuneTable: hasDetuneTable ? detuneTable : undefined,
     parseNotes,
   };
 }
@@ -890,7 +1022,7 @@ export function convertFamiTrackerToAriaPatterns(
 
   const expLabel =
     mod.expansions.length > 1 ? ` + ${mod.expansions.slice(1).join('/')}` : '';
-  const chipType = `RP2A03 (NES APU)${expLabel}`;
+  const chipType = `Furnace (RP2A03${expLabel})`;
 
   return {
     patterns: allPatterns[0],

@@ -44,7 +44,7 @@ interface HeaderProps {
     rawSidBuffer?: ArrayBuffer,
     sidMetadata?: SidHeaderMetadata,
     rawSunVoxBuffer?: ArrayBuffer,
-    rawFamiTrackerBuffer?: ArrayBuffer
+    rawFurnaceBuffer?: ArrayBuffer
   ) => void;
   onLoadTrack?: (tracksJson: string, bpm: number) => void;
   trackTitle?: string | null;
@@ -447,7 +447,7 @@ export default function Header({
                            result.rawSidBuffer,
                            result.sidMetadata,
                            result.rawSunVoxBuffer,
-                           result.rawFamiTrackerBuffer
+                           result.rawFurnaceBuffer
                          );
                          setIsPlaying(true);
                          addRecentSong({

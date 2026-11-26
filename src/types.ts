@@ -47,7 +47,7 @@ export interface OscilloscopeConfig {
   phaseSync: boolean; // Stabilize waveform at zero-crossing (true) or free-drifting phase (false)
 }
 
-export type EngineKind = 'FURNACE' | 'FAMITRACKER' | 'SF2/SFE' | 'TINYRSID' | 'SUNVOX' | 'TINYSYNTH';
+export type EngineKind = 'FURNACE' | 'SF2/SFE' | 'TINYRSID' | 'SUNVOX' | 'TINYSYNTH';
 
 export interface SoundEnginesConfig {
   spessaSynth: boolean;     // SpessaSynth (WorkletSynthesizer SF2/SF3/DLS/SFe & 16-channel MIDI)
@@ -57,7 +57,6 @@ export interface SoundEnginesConfig {
   tinyRSid: boolean;        // TinyRSid / WebSID (WASM C64 MOS6581/MOS8580 multi-SID emulator)
   sunvox: boolean;          // SunVox WASM (Modular tracker engine for .sunvox)
   furnace: boolean;         // Furnace WASM (Cycle-accurate headless DivEngine chip cores)
-  famitracker: boolean;     // FamiTracker / Dn-FamiTracker + bitphase nes_apu.wasm engine (.ftm/.0cc/.dnm)
 }
 
 export type SoundFontInterpolationMode =
@@ -78,7 +77,7 @@ export interface PatternCellData {
 export type WasmBundleStatus = 'unloaded' | 'loading' | 'ready' | 'error';
 
 export interface WasmBundleSlot {
-  id: 'furnace' | 'tinyrsid' | 'sunvox' | 'famitracker';
+  id: 'furnace' | 'tinyrsid' | 'sunvox';
   label: string;
   defaultJsUrl: string;
   defaultWasmUrl: string;
@@ -119,8 +118,8 @@ export const CHIPS = [
   'MOS8580 (C64 SID)',
   'PAULA (Amiga PCM)',
   'RP2A03 (NES APU)',
-  'Sunsoft 5B (FamiTracker)',
-  'VRC6 (FamiTracker)',
+  'Sunsoft 5B (Furnace)',
+  'VRC6 (Furnace)',
   'VRC7 (OPLL FM)',
   'FDS (Famicom Disk)',
   'Namco 163',

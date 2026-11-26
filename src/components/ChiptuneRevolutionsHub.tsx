@@ -28,9 +28,23 @@ import {
   toggleCrQuestionStatus,
 } from '../utils/crQuestionsService';
 
-const GOOGLE_GROUP_EMBED_URL =
-  'https://groups.google.com/forum/embed/?place=forum/chiptune-revolutions-cr&showsearch=true&showpopout=true';
 const GOOGLE_GROUP_DIRECT_URL = 'https://groups.google.com/g/chiptune-revolutions-cr';
+const GOOGLE_GROUP_POST_URL = 'https://groups.google.com/g/chiptune-revolutions-cr/post';
+const GOOGLE_GROUP_MEMBERSHIP_URL = 'https://groups.google.com/g/chiptune-revolutions-cr/membership';
+
+function buildGoogleGroupEmbedUrl(): string {
+  const parentUrl = typeof window !== 'undefined' ? window.location.href : 'https://localhost:3000/';
+  const params = new URLSearchParams({
+    place: 'forum/chiptune-revolutions-cr',
+    showsearch: 'true',
+    showpopout: 'true',
+    showtabs: 'false',
+    hideforumtitle: 'false',
+    parenturl: parentUrl,
+  });
+  return `https://groups.google.com/forum/embed/?${params.toString()}`;
+}
+
 const DRIVE_MOD_CHIPTUNE_URL =
   'https://drive.google.com/drive/folders/1Joel5ZB-YlmV2KAMP0k6MGpE1rx7a8AU';
 const DRIVE_MIDI_OTHER_URL =
@@ -343,8 +357,9 @@ function ChiptuneRevolutionsHubInner() {
   const [categoryFilter, setCategoryFilter] = useState<'All' | CrQuestionCategory>('All');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Open' | 'Resolved'>('All');
 
-  // Google Group iframe toggle
+  // Google Group view & inline frame toggle
   const [showGoogleGroup, setShowGoogleGroup] = useState(false);
+  const [tryInlineGroupFrame, setTryInlineGroupFrame] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (currentUser) => {
@@ -353,6 +368,7 @@ function ChiptuneRevolutionsHubInner() {
       if (!currentUser) {
         setQuestions([]);
         setShowGoogleGroup(false);
+        setTryInlineGroupFrame(false);
       }
     });
     return () => unsub();
@@ -583,35 +599,77 @@ function ChiptuneRevolutionsHubInner() {
         </div>
       </section>
 
-      {/* 3. Direct Google Group Iframe View */}
+      {/* 3. Chiptune Revolutions Google Group Panel */}
       {showGoogleGroup && (
-        <section className="bg-zinc-900/75 border border-zinc-800 rounded-xl p-4 flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-zinc-100">
-              Chiptune Revolutions (CR) Google Group
-            </h3>
+        <section className="bg-zinc-900/75 border border-zinc-800 rounded-xl p-5 flex flex-col gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-zinc-100">
+                Chiptune Revolutions (CR) Google Group
+              </h3>
+              <p className="text-xs text-zinc-400 font-sans mt-1 max-w-2xl">
+                Google Groups enforces <code className="text-zinc-300">X-Frame-Options: SAMEORIGIN</code> on login and member-only group views, which prevents browsers from displaying it inside embedded preview frames. Use the direct links below to read, post, and manage membership seamlessly.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTryInlineGroupFrame((v) => !v)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 transition whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {tryInlineGroupFrame ? 'Hide Inline Frame' : 'Try Legacy Inline Frame'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <a
               href={GOOGLE_GROUP_DIRECT_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs font-medium text-cyan-400 hover:text-cyan-300 hover:underline inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              className="px-4 py-3 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/25 border border-cyan-500/40 text-xs font-semibold text-cyan-200 transition flex items-center justify-between gap-2"
             >
-              <span>Open Google Group directly in new tab</span>
-              <ExternalLink size={12} />
+              <span>Open Group Discussions</span>
+              <ExternalLink size={14} className="text-cyan-300 shrink-0" />
+            </a>
+
+            <a
+              href={GOOGLE_GROUP_POST_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-3 rounded-lg bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 hover:border-emerald-500/50 text-xs font-semibold text-emerald-300 transition flex items-center justify-between gap-2"
+            >
+              <span>Start a New Topic</span>
+              <ExternalLink size={14} className="text-emerald-400 shrink-0" />
+            </a>
+
+            <a
+              href={GOOGLE_GROUP_MEMBERSHIP_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-3 rounded-lg bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 hover:border-zinc-500 text-xs font-semibold text-zinc-200 transition flex items-center justify-between gap-2"
+            >
+              <span>Group Membership Settings</span>
+              <ExternalLink size={14} className="text-zinc-400 shrink-0" />
             </a>
           </div>
-          <p className="text-xs text-zinc-400 font-sans">
-            If your browser blocks third-party cookies inside embedded frames, use the direct link above to view and post in the group.
-          </p>
-          <div className="w-full overflow-hidden rounded-lg border border-zinc-800 bg-white">
-            <iframe
-              title="Chiptune Revolutions (CR) Google Group"
-              src={GOOGLE_GROUP_EMBED_URL}
-              width="100%"
-              height="700"
-              className="w-full block border-0"
-            />
-          </div>
+
+          {tryInlineGroupFrame && (
+            <div className="flex flex-col gap-2">
+              <p className="text-[11px] text-amber-300/90 font-sans">
+                Note: Inline frames only load if third-party cookies for <code className="text-amber-200">groups.google.com</code> are enabled in your browser and you are signed in to Google outside the sandbox.
+              </p>
+              <div className="w-full overflow-hidden rounded-lg border border-zinc-800 bg-white">
+                <iframe
+                  title="Chiptune Revolutions (CR) Google Group"
+                  src={buildGoogleGroupEmbedUrl()}
+                  allow="storage-access"
+                  referrerPolicy="no-referrer-when-downgrade"
+                  width="100%"
+                  height="640"
+                  className="w-full block border-0"
+                />
+              </div>
+            </div>
+          )}
         </section>
       )}
 
